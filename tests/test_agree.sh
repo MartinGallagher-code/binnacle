@@ -109,8 +109,9 @@ t_order_is_host_list_order_not_completion() {
     fake_host slow; fake_host fast
     printf 'sleep 0.4; echo x\n' > "$FAKE_ROOT/slow/run.sh"
     printf 'echo x\n'            > "$FAKE_ROOT/fast/run.sh"
-    a="$(ag -H slow,fast --quiet --csv "$TEST_TMPDIR/1.csv" -- sh run.sh)"
-    b="$(ag -H slow,fast --quiet --csv "$TEST_TMPDIR/2.csv" -- sh run.sh)"
+    # Run it twice; only the recorded order is under test.
+    ag -H slow,fast --quiet --csv "$TEST_TMPDIR/1.csv" -- sh run.sh >/dev/null
+    ag -H slow,fast --quiet --csv "$TEST_TMPDIR/2.csv" -- sh run.sh >/dev/null
     assert_eq "$(cut -d, -f1 < "$TEST_TMPDIR/1.csv")" \
               "$(cut -d, -f1 < "$TEST_TMPDIR/2.csv")"
     assert_contains "$(cat "$TEST_TMPDIR/1.csv")" "slow"
@@ -121,9 +122,13 @@ t_mask_hosts_makes_hostname_output_agree() {
     for h in n1 n2; do fake_host "$h"; done
     # Each host echoes its own name: byte-exact can never agree.
     set +e
+    # The single quotes are the point: $PWD must expand on the
+    # far side, not here.
+    # shellcheck disable=SC2016
     strict="$(ag -H n1,n2 --quiet --strict -- 'echo $(basename $PWD)')"
     set -e
     assert_contains "$strict" "GROUP 2"
+    # shellcheck disable=SC2016
     loose="$(ag -H n1,n2 --quiet --mask-hosts -- 'echo $(basename $PWD)')"
     assert_not_contains "$loose" "GROUP 2"
     assert_contains "$loose" "%HOST%"

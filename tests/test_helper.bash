@@ -17,7 +17,6 @@ PY="${PY:-python3}"
 
 TESTS_RUN=0
 TESTS_FAILED=0
-CURRENT_TEST=""
 FAILED_NAMES=()
 
 setup_env() {
@@ -49,7 +48,6 @@ teardown_env() {
 run_test() {
     local name="$1"; shift
     TESTS_RUN=$((TESTS_RUN + 1))
-    CURRENT_TEST="$name"
     local out rc
     out="$(
         setup_env
@@ -188,11 +186,11 @@ fake_host_unreachable() {
 ssh_calls() {
     # grep -c exits 1 on no matches, so a naive `|| echo 0` prints the
     # count AND a zero.  Count lines instead.
+    local n=0
     if [ -f "$FAKE_SSH_LOG" ]; then
-        grep '^ssh ' "$FAKE_SSH_LOG" 2>/dev/null | wc -l | tr -d ' '
-    else
-        echo 0
+        n=$(grep -c '^ssh ' "$FAKE_SSH_LOG" 2>/dev/null) || n=0
     fi
+    printf '%s\n' "$n"
 }
 
 # -- fixtures ---------------------------------------------------------------

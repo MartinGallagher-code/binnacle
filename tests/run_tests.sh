@@ -9,9 +9,10 @@
 # loopback.
 
 set -u
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 2
 
-export BINNACLE_DIR="$(cd ../binnacle && pwd)"
+BINNACLE_DIR="$(cd ../binnacle && pwd)"
+export BINNACLE_DIR
 export PY="${PY:-python3}"
 
 if [ $# -gt 0 ]; then

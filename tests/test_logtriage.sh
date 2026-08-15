@@ -67,7 +67,6 @@ t_novel_beats_frequent() {
     # errors, 3 novel OOM kills.  Frequency must NOT win.
     gen_log "$TEST_TMPDIR/test.log"
     out="$(lt "$TEST_TMPDIR/test.log" --csv)"
-    first_id="$(printf '%s' "$out" | sed -n '2p' | cut -d, -f1)"
     first_sev="$(printf '%s' "$out" | sed -n '2p' | cut -d, -f7)"
     first_count="$(printf '%s' "$out" | sed -n '2p' | cut -d, -f3)"
     assert_eq "$first_sev" "crit"
@@ -134,7 +133,7 @@ t_eviction_is_reported_not_silent() {
 
 t_reads_stdin_and_gzip() {
     gen_log "$TEST_TMPDIR/test.log"
-    out="$(cat "$TEST_TMPDIR/test.log" | lt - --csv | wc -l)"
+    out="$(lt - --csv < "$TEST_TMPDIR/test.log" | wc -l)"
     "$PY" -c "import sys; sys.exit(0 if int('$out') > 3 else 1)" \
         || _fail "stdin produced only $out csv lines"
     gzip -c "$TEST_TMPDIR/test.log" > "$TEST_TMPDIR/test.log.gz"
