@@ -1,0 +1,2 @@
+```{include} ../PUBLISHING.md
+```

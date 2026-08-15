@@ -1,0 +1,75 @@
+name: Publish to PyPI
+
+# Publishes when a GitHub Release is published, or on a manual dispatch.
+# Uses PyPI "trusted publishing" (OIDC), so no API token is stored as a
+# secret -- configure the trusted publisher on PyPI first, see PUBLISHING.md.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check metadata
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+
+      # The published artifact must be a working tool, not just valid
+      # metadata: install the wheel and drive every entry point.
+      - name: Smoke-test the built wheel
+        run: |
+          python -m pip install dist/*.whl
+          why-slow --version
+          agree --version
+          logtriage --version
+          netmesh --version
+          reachable --version
+          netmesh selftest --for 3
+
+      - name: Upload the distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    # The environment is half of the trusted-publisher identity, and it is
+    # also where a required-reviewer gate can be attached.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/binnacle/
+
+    permissions:
+      # Required for OIDC; nothing else is needed.
+      id-token: write
+
+    steps:
+      - name: Download the distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1

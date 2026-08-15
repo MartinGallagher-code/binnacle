@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+docs/_build/
+# Generated from the live parsers on every docs build.
+docs/cli.md
