@@ -152,6 +152,32 @@ t_single_snapshot_skips_rate_rules() {
     assert_contains "$out" "rerun without --interval 0"
 }
 
+t_a_counter_reset_is_unknown_not_negative() {
+    # Counters reset under a live read: a container restart, a module
+    # reload, a wrap.  (b - a) / dt with b < a reported a negative rate
+    # -- "-99990 pg/s in" -- and a busy percentage past 100.  A pair the
+    # kernel reset between reads is not a measurement at all.
+    mkdir -p "$TEST_TMPDIR/proc"
+    printf 'cpu  5000 0 900 80000 100 0 50 200 0 0\ncpu0 5000 0 900 80000 100 0 50 200 0 0\nctxt 1000\nprocesses 50\nprocs_running 1\nprocs_blocked 0\n' \
+        > "$TEST_TMPDIR/proc/stat"
+    printf 'pswpin 1000000\npswpout 900000\n' > "$TEST_TMPDIR/proc/vmstat"
+    printf '0.40 0.30 0.20 1/210 9999\n' > "$TEST_TMPDIR/proc/loadavg"
+    printf 'MemTotal: 1000000 kB\nMemAvailable: 900000 kB\nSwapTotal: 100000 kB\nSwapFree: 100000 kB\n' \
+        > "$TEST_TMPDIR/proc/meminfo"
+    printf '10 0\n' > "$TEST_TMPDIR/proc/uptime"
+    ( sleep 0.4
+      printf 'cpu  100 0 20 500 5 0 2 10 0 0\ncpu0 100 0 20 500 5 0 2 10 0 0\nctxt 100\nprocesses 5\nprocs_running 1\nprocs_blocked 0\n' \
+          > "$TEST_TMPDIR/proc/stat"
+      printf 'pswpin 10\npswpout 5\n' > "$TEST_TMPDIR/proc/vmstat" ) &
+    out="$(ws --proc-root "$TEST_TMPDIR/proc" --sys-root "$TEST_TMPDIR/nosys" \
+             --interval 1 --no-exec --facts)"
+    wait
+    assert_contains "$out" '"cpu.busy_pct": null'
+    assert_contains "$out" '"mem.pswpin_per_s": null'
+    # nothing measured may be negative
+    assert_not_contains "$out" '": -'
+}
+
 t_a_full_table_outranks_the_drops_it_causes() {
     # Same precedence argument as swap over CPU: a conntrack table at the
     # ceiling is why the retransmits are happening, so naming the
@@ -303,4 +329,5 @@ run_test "ceilings read from a /proc tree"    t_ceilings_are_read_from_a_synthet
 run_test "absent conntrack is not empty"      t_an_absent_conntrack_table_is_not_an_empty_one
 run_test "an empty fact file is not health"   t_an_empty_fact_file_is_not_a_clean_bill_of_health
 run_test "a non-dict fact file is refused"    t_a_facts_file_that_is_not_a_dictionary_is_refused
+run_test "a counter reset is unknown"          t_a_counter_reset_is_unknown_not_negative
 finish

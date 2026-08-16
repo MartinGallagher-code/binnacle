@@ -159,7 +159,7 @@ it surfaces on a developer machine and all of it surfaces on the fleet.
 ## Testing
 
 ```bash
-bash tests/run_tests.sh              # all eight suites, 159 checks
+bash tests/run_tests.sh              # all eight suites, 160 checks
 bash tests/run_tests.sh agree        # one suite
 ```
 
