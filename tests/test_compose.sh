@@ -241,7 +241,7 @@ t_declared_copies_have_not_drifted() {
     # what shared_tools exists because of: "the two copies that once
     # existed drifted apart".  Nothing checked these had not.
     "$PY" - "$BINNACLE_DIR" <<'EOF'
-import ast, os, sys
+import ast, io, os, sys
 
 root = sys.argv[1]
 bad = []
@@ -263,7 +263,10 @@ VERBATIM = [
 def body(mod, name):
     """A function's code with its docstring dropped: the prose is allowed
     to differ per tool, the behaviour is not."""
-    src = open(os.path.join(root, mod)).read()
+    # Explicit encoding: under the C locale -- which is what the Python 3.6
+    # container runs with -- a bare open() decodes as ASCII, and
+    # logtriage's sparkline block is not.
+    src = io.open(os.path.join(root, mod), encoding="utf-8").read()
     for node in ast.parse(src).body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             if ast.get_docstring(node) is not None:
@@ -286,7 +289,7 @@ for name, canon, copy in VERBATIM:
 for fname in sorted(os.listdir(root)):
     if not fname.endswith(".py"):
         continue
-    for line in open(os.path.join(root, fname)):
+    for line in io.open(os.path.join(root, fname), encoding="utf-8"):
         if "canonical copy" not in line:
             continue
         for token in line.replace(",", " ").split():
