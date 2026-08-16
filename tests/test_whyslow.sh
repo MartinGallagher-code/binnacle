@@ -152,6 +152,101 @@ t_single_snapshot_skips_rate_rules() {
     assert_contains "$out" "rerun without --interval 0"
 }
 
+t_a_full_table_outranks_the_drops_it_causes() {
+    # Same precedence argument as swap over CPU: a conntrack table at the
+    # ceiling is why the retransmits are happening, so naming the
+    # retransmits would send the reader to the network.
+    facts_json "$TEST_TMPDIR/f.json" \
+        lim.conntrack_pct=93 lim.conntrack=244000 lim.conntrack_max=262144 \
+        net.tcp_retrans_pct=6.0
+    out="$(ws --from-facts "$TEST_TMPDIR/f.json")"
+    assert_contains "$out" "connection tracking"
+    assert_contains "$out" "tcp retransmitting"
+    verdict="$(printf '%s' "$out" | grep -A2 VERDICT | head -3)"
+    assert_not_contains "$verdict" "retransmit"
+}
+
+t_a_limit_already_hit_outranks_a_drained_table() {
+    # The table has since drained, so every ratio reads healthy and only
+    # the kernel log remembers.
+    facts_json "$TEST_TMPDIR/f.json" \
+        'kern.limit_hits=["kernel: nf_conntrack: table full, dropping packet"]' \
+        lim.conntrack_pct=4
+    out="$(ws --from-facts "$TEST_TMPDIR/f.json" --csv)"
+    assert_contains "$out" "LIMIT_HITS,CRITICAL"
+    human="$(ws --from-facts "$TEST_TMPDIR/f.json")"
+    assert_contains "$human" "already refused work"
+}
+
+t_cgroup_task_limit_beats_host_health() {
+    facts_json "$TEST_TMPDIR/f.json" sys.container=true cg.v=2 \
+        cg.pids_pct=97 cg.pids_current=485 cg.pids_max=500 \
+        lim.pid_pct=0.4
+    out="$(ws --from-facts "$TEST_TMPDIR/f.json")"
+    assert_contains "$out" "TasksMax"
+    assert_contains "$out" "cgroup task limit"
+}
+
+t_exhaustion_thresholds_are_boundaries() {
+    facts_json "$TEST_TMPDIR/lo.json" lim.fd_pct=74.9
+    facts_json "$TEST_TMPDIR/hi.json" lim.fd_pct=75.1
+    lo="$(ws --from-facts "$TEST_TMPDIR/lo.json" --csv)"
+    hi="$(ws --from-facts "$TEST_TMPDIR/hi.json" --csv)"
+    assert_not_contains "$lo" "FD_EXHAUSTION"
+    assert_contains "$hi" "FD_EXHAUSTION,WARN"
+}
+
+t_ceilings_are_read_from_a_synthetic_proc_tree() {
+    mkdir -p "$TEST_TMPDIR/proc/sys/fs" "$TEST_TMPDIR/proc/sys/kernel" \
+             "$TEST_TMPDIR/proc/sys/net/netfilter" \
+             "$TEST_TMPDIR/proc/sys/net/ipv4/neigh/default" \
+             "$TEST_TMPDIR/proc/net"
+    printf 'cpu  100 0 50 800 10 0 5 20 0 0\ncpu0 100 0 50 800 10 0 5 20 0 0\n' \
+        > "$TEST_TMPDIR/proc/stat"
+    printf '0.40 0.30 0.20 1/900 9999\n' > "$TEST_TMPDIR/proc/loadavg"
+    printf 'MemTotal: 1000000 kB\nMemAvailable: 900000 kB\n' \
+        > "$TEST_TMPDIR/proc/meminfo"
+    printf '8000\t0\t10000\n' > "$TEST_TMPDIR/proc/sys/fs/file-nr"
+    printf '1000\n' > "$TEST_TMPDIR/proc/sys/kernel/pid_max"
+    printf '200\n' > "$TEST_TMPDIR/proc/sys/net/netfilter/nf_conntrack_count"
+    printf '250\n' > "$TEST_TMPDIR/proc/sys/net/netfilter/nf_conntrack_max"
+    printf 'sockets: used 300\nTCP: inuse 12 orphan 0 tw 100 alloc 20 mem 3\n' \
+        > "$TEST_TMPDIR/proc/net/sockstat"
+    printf '32768\t60999\n' > "$TEST_TMPDIR/proc/sys/net/ipv4/ip_local_port_range"
+    printf '1024\n' \
+        > "$TEST_TMPDIR/proc/sys/net/ipv4/neigh/default/gc_thresh3"
+    {
+        printf 'IP address       HW type     Flags       HW address            Mask     Device\n'
+        for i in $(seq 1 900); do
+            printf '10.0.0.%d       0x1         0x2         00:00:00:00:00:01     *        eth0\n' "$i"
+        done
+    } > "$TEST_TMPDIR/proc/net/arp"
+    out="$(ws --proc-root "$TEST_TMPDIR/proc" --sys-root "$TEST_TMPDIR/nosys" \
+             --interval 0 --no-exec --facts)"
+    assert_contains "$out" '"lim.fd_pct": 80.0'
+    assert_contains "$out" '"lim.pid_pct": 90.0'
+    assert_contains "$out" '"lim.conntrack_pct": 80.0'
+    assert_contains "$out" '"lim.arp": 900'
+    # Tasks, not processes: the count comes from loadavg, because a
+    # threaded process consumes many pids and one process entry.
+    assert_contains "$out" '"lim.tasks": 900'
+}
+
+t_an_absent_conntrack_table_is_not_an_empty_one() {
+    # No netfilter loaded means there is nothing to fill, which must read as
+    # "not measured", never as a healthy 0%.
+    mkdir -p "$TEST_TMPDIR/proc"
+    printf 'cpu  100 0 50 800 10 0 5 20 0 0\ncpu0 100 0 50 800 10 0 5 20 0 0\n' \
+        > "$TEST_TMPDIR/proc/stat"
+    printf '0.40 0.30 0.20 1/210 9999\n' > "$TEST_TMPDIR/proc/loadavg"
+    printf 'MemTotal: 1000000 kB\nMemAvailable: 900000 kB\n' \
+        > "$TEST_TMPDIR/proc/meminfo"
+    out="$(ws --proc-root "$TEST_TMPDIR/proc" --sys-root "$TEST_TMPDIR/nosys" \
+             --interval 0 --no-exec --all)"
+    assert_contains "$out" "connection tracking is"
+    assert_not_contains "$out" "conntrack entries in use (0%)"
+}
+
 echo "why-slow"
 run_test "healthy box says so"                t_healthy_box_says_so
 run_test "swap outranks cpu in the verdict"   t_swap_outranks_cpu_in_verdict
@@ -166,4 +261,10 @@ run_test "csv header is stable"               t_csv_header_is_stable
 run_test "--rules and --explain generated"    t_rules_and_explain_are_generated
 run_test "reads a synthetic /proc tree"       t_reads_a_synthetic_proc_tree
 run_test "single snapshot skips rate rules"   t_single_snapshot_skips_rate_rules
+run_test "a full table outranks its drops"    t_a_full_table_outranks_the_drops_it_causes
+run_test "a limit already hit outranks now"   t_a_limit_already_hit_outranks_a_drained_table
+run_test "cgroup task limit beats the host"   t_cgroup_task_limit_beats_host_health
+run_test "ceiling thresholds are boundaries"  t_exhaustion_thresholds_are_boundaries
+run_test "ceilings read from a /proc tree"    t_ceilings_are_read_from_a_synthetic_proc_tree
+run_test "absent conntrack is not empty"      t_an_absent_conntrack_table_is_not_an_empty_one
 finish
