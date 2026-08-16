@@ -202,6 +202,23 @@ PYEOF
     assert_status $? 0
 }
 
+t_a_server_by_name_is_refused_with_the_reason() {
+    # Naming a resolver requires resolving the name -- with the very stub
+    # this tool is diagnosing.  And a typo'd address reported as "no
+    # resolver answered" blames the fleet for a bad argument.
+    rc=0
+    out="$(rs --server dns1.corp.example --no-stub --timeout 0.2 2>&1)" || rc=$?
+    assert_status $rc 2
+    assert_contains "$out" "IP address"
+    rc=0
+    out="$(rs --server 999.1.2.3 --no-stub --timeout 0.2 2>&1)" || rc=$?
+    assert_status $rc 2
+    # bracketed v6 with a port is still a valid way to write one
+    port="$(free_port)"
+    start_fake_dns "$port" '{"records": {}}'
+    rs --server "127.0.0.1:$port" --no-stub --timeout 1 > /dev/null
+}
+
 t_answers_a_real_query_on_loopback() {
     port="$(free_port)"
     start_fake_dns "$port" \
@@ -350,4 +367,5 @@ run_test "--csv does not swallow the name"     t_csv_does_not_swallow_the_name
 run_test "a duplicated nameserver counts once" t_a_duplicated_nameserver_still_counts_once
 run_test "an empty fact file is not health"    t_an_empty_fact_file_is_not_a_clean_bill_of_health
 run_test "a mangled reply is an error"         t_a_mangled_reply_is_an_error_not_an_answer
+run_test "a server by name is refused"         t_a_server_by_name_is_refused_with_the_reason
 finish

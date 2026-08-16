@@ -108,6 +108,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A fleet running mixed tool versions could silently misfile its merged
+  CSV.** These tools get scp'd to machines and stay there, so version skew
+  across a fleet is the expected state, not the exception — and
+  `agree --merge-csv` stacked every host's rows positionally under the
+  first host's header. A host running an older copy with a missing column
+  produced ragged rows; one with *reordered* columns filed its values
+  under the wrong headers with nothing to show for it. Rows are now
+  aligned by column name: a value stays under its own column wherever the
+  emitting host put it, a column a host does not have is left blank, and
+  the skew is reported to stderr with which host lacks or adds what —
+  mixed versions are exactly the disagreement this tool exists to
+  surface.
+- **`resolve --server` took a typo for a dead fleet.** A resolver written
+  as a hostname or a malformed address (`999.1.2.3`) was probed anyway
+  and reported as *no resolver answered, CRITICAL* — a usage error
+  laundered into a finding. Worse, a hostname there would have to be
+  resolved by the very stub this tool exists to diagnose. `--server` now
+  requires an IP address (v4, v6, bracketed-with-port all fine) and is
+  refused at startup with the reason, matching where `agree` and
+  `reachable` validate their host tokens.
 - **New Year's Eve reversed a syslog file.** Syslog lines carry no year,
   and `logtriage` stamped every one with the file's year — so a log
   crossing midnight on December 31st, read in January, put its December

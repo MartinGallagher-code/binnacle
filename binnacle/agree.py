@@ -949,28 +949,54 @@ def write_merged_csv(results, path):
     ssh_host and the CSV's own host column are deliberately both kept: they
     differ (a login alias versus what the machine calls itself) and knowing
     which is which matters when they disagree.
+
+    Rows are aligned by column *name*, not position.  These tools get
+    scp'd to machines and stay there, so a fleet runs mixed versions, and
+    stacking an older host's rows positionally files its values under the
+    wrong headers.  A column a host does not have is left blank, and the
+    skew is said out loud rather than silently misfiled.
     """
-    header = None
+    header = ["ssh_host"]
+    first_cols = None
     rows = []
+    skewed = []
     for r in results:
         if r.outcome != OK or not r.stdout.strip():
             continue
-        rdr = csv.reader(io.StringIO(r.stdout))
-        try:
-            hdr = next(rdr)
-        except StopIteration:
+        rdr = csv.DictReader(io.StringIO(r.stdout))
+        cols = rdr.fieldnames
+        if not cols:
             continue
-        if header is None:
-            header = ["ssh_host"] + hdr
+        for col in cols:
+            if col not in header:
+                header.append(col)
+        if first_cols is None:
+            first_cols = list(cols)
+        elif list(cols) != first_cols:
+            missing = [c for c in first_cols if c not in cols]
+            extra = [c for c in cols if c not in first_cols]
+            bits = []
+            if missing:
+                bits.append("lacks %s" % ",".join(missing))
+            if extra:
+                bits.append("adds %s" % ",".join(extra))
+            skewed.append("%s %s" % (r.host.name, "; ".join(bits)
+                                     or "reorders its columns"))
         for row in rdr:
-            if row == hdr:
-                continue
-            rows.append([r.host.name] + row)
-    if header is None:
+            row.pop(None, None)        # cells past the host's own header
+            if list(row.values()) == cols:
+                continue               # a header line repeated mid-stream
+            row["ssh_host"] = r.host.name
+            rows.append(row)
+    if first_cols is None:
         die("no host produced parseable CSV output", 1)
+    if skewed:
+        sys.stderr.write("[%s] column skew across hosts (mixed tool "
+                         "versions?): %s\n" % (PROG, " / ".join(skewed)))
     with io.open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh, lineterminator="\n")
-        w.writerow(header)
+        w = csv.DictWriter(fh, fieldnames=header, restval="",
+                           extrasaction="ignore", lineterminator="\n")
+        w.writeheader()
         w.writerows(rows)
     return len(rows)
 

@@ -221,6 +221,31 @@ SHIM
     assert_not_contains "$out" "xxxxxxxxxx"
 }
 
+t_mixed_tool_versions_merge_by_column_name() {
+    # These tools get scp'd to machines and stay there, so a fleet runs
+    # mixed versions.  Stacking an older host's rows positionally filed
+    # its values under the wrong headers; aligning by name keeps every
+    # value under its own column, blanks what a host does not have, and
+    # says the skew out loud.
+    cat > "$TEST_TMPDIR/ssh_skew" <<'SHIM'
+#!/bin/bash
+case "$*" in
+  *node01*) printf 'host,ts,rule_id,severity,title,detail,fix\nnode01,1,SWAP,critical,swapping,bad,add ram\n' ;;
+  *node02*) printf 'host,ts,severity,rule_id,title,detail\nnode02,2,critical,SWAP,swapping,bad\n' ;;
+esac
+SHIM
+    chmod +x "$TEST_TMPDIR/ssh_skew"
+    rc=0
+    out="$("$PY" "$AG" run -H node01,node02 --ssh "$TEST_TMPDIR/ssh_skew" \
+             --merge-csv "$TEST_TMPDIR/skew.csv" --quiet -- x --csv 2>&1)" || rc=$?
+    assert_contains "$out" "column skew"
+    assert_contains "$out" "node02"
+    # node02 reordered severity and rule_id, and lacks fix: the merged row
+    # must keep SWAP under rule_id and critical under severity anyway.
+    row2="$(grep '^node02' "$TEST_TMPDIR/skew.csv")"
+    assert_eq "$row2" "node02,node02,2,SWAP,critical,swapping,bad,"
+}
+
 t_merge_csv_stacks_and_prefixes_ssh_host() {
     install_fake_ssh
     for h in a b; do
@@ -361,4 +386,5 @@ run_test "sudo is always -n"                   t_sudo_is_always_non_interactive
 run_test "script pushes, runs, cleans up"      t_script_pushes_runs_and_cleans_up
 run_test "--merge-csv stacks with ssh_host"    t_merge_csv_stacks_and_prefixes_ssh_host
 run_test "a flooding host is killed, not grouped" t_a_flooding_host_is_killed_not_grouped
+run_test "mixed versions merge by column name" t_mixed_tool_versions_merge_by_column_name
 finish
