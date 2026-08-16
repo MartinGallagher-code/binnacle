@@ -234,6 +234,77 @@ EOF
     assert_contains "$nm" "--mtu-ceiling"
 }
 
+t_declared_copies_have_not_drifted() {
+    # No module imports another -- each tool is scp'd to machines that have
+    # never heard of this package -- so helpers are duplicated on purpose
+    # and each copy names its canonical one.  That arrangement is exactly
+    # what shared_tools exists because of: "the two copies that once
+    # existed drifted apart".  Nothing checked these had not.
+    "$PY" - "$BINNACLE_DIR" <<'EOF'
+import ast, io, os, sys
+
+root = sys.argv[1]
+bad = []
+
+# (name, canonical module, copy module) for every pair declared verbatim.
+VERBATIM = [
+    ("_read", "why_slow.py", "during.py"),
+    ("_read_int", "why_slow.py", "during.py"),
+    ("read_vmstat", "why_slow.py", "during.py"),
+    ("read_meminfo", "why_slow.py", "during.py"),
+    ("read_pressure", "why_slow.py", "during.py"),
+    ("_read", "why_slow.py", "resolve.py"),
+    ("expand_range", "agree.py", "reachable.py"),
+    ("split_host_port", "agree.py", "reachable.py"),
+    ("is_ipv6", "agree.py", "reachable.py"),
+]
+
+
+def body(mod, name):
+    """A function's code with its docstring dropped: the prose is allowed
+    to differ per tool, the behaviour is not."""
+    # Explicit encoding: under the C locale -- which is what the Python 3.6
+    # container runs with -- a bare open() decodes as ASCII, and
+    # logtriage's sparkline block is not.
+    src = io.open(os.path.join(root, mod), encoding="utf-8").read()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            if ast.get_docstring(node) is not None:
+                node.body = node.body[1:]
+            return ast.dump(node)
+    return None
+
+
+for name, canon, copy in VERBATIM:
+    a, b = body(canon, name), body(copy, name)
+    if a is None:
+        bad.append("%s: %s is gone from the canonical copy" % (canon, name))
+    elif b is None:
+        bad.append("%s: %s is gone" % (copy, name))
+    elif a != b:
+        bad.append("%s has drifted from %s in %s" % (name, canon, copy))
+
+# Every "canonical copy: <path>" pointer must name a file that exists --
+# this package moved from scripts/ to binnacle/ once already.
+for fname in sorted(os.listdir(root)):
+    if not fname.endswith(".py"):
+        continue
+    for line in io.open(os.path.join(root, fname), encoding="utf-8"):
+        if "canonical copy" not in line:
+            continue
+        for token in line.replace(",", " ").split():
+            if token.endswith(".py") and "/" in token:
+                if not os.path.exists(os.path.join(root, "..", token)):
+                    bad.append("%s points at %s, which does not exist"
+                               % (fname, token))
+
+if bad:
+    sys.stderr.write("\n".join(bad) + "\n")
+    sys.exit(1)
+EOF
+    assert_status $? 0
+}
+
 t_an_unreachable_host_is_a_group_not_an_error() {
     # The convention that matters most in a fleet run: a host that never
     # answered has to survive as a finding rather than a line on stderr,
@@ -261,5 +332,6 @@ run_test "during groups by what limited them"   t_during_groups_hosts_by_what_li
 run_test "--fleet-csv is the two flags"         t_fleet_csv_is_the_two_flags_and_says_so
 run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one_csv_header
 run_test "every flag appears in --help"         t_every_flag_appears_in_its_tools_help
+run_test "declared copies have not drifted"     t_declared_copies_have_not_drifted
 run_test "an unreachable host is a group"       t_an_unreachable_host_is_a_group_not_an_error
 finish

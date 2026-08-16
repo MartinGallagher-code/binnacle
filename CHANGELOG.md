@@ -108,6 +108,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Nothing checked that the deliberate duplication had not drifted** —
+  the arrangement `shared_tools` exists because of, its README naming *"the
+  two copies that once existed drifted apart"* as the reason. The suite now
+  compares every pair declared verbatim as code with docstrings stripped,
+  so per-tool prose stays local while behaviour cannot diverge, and checks
+  that every `canonical copy:` pointer names a file that exists —
+  `reachable` still pointed at `scripts/agree.py`, from before this package
+  moved to `binnacle/`. Both halves were verified by breaking a copy and a
+  pointer on purpose and watching the suite fail.
+- **`during`'s provenance comment claimed more than was true.** It named
+  `why-slow` as the canonical copy of ten `/proc` readers when five are
+  deliberately trimmed — narrower fields, aggregated where `why-slow` keeps
+  the parts separate — so a parser fix applied upstream would have been
+  pasted into functions that were never the same. The comment now names
+  both sets and says which is which.
+
 - **Seven flags existed without appearing in their tool's `--help`**,
   including `--fleet-csv` itself the moment it was added. Each tool's
   `--help` prints its module docstring and the CLI reference is generated

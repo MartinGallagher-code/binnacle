@@ -85,8 +85,25 @@ would break the moment it landed on a machine that has never heard of
 
 The consequence is deliberate duplication: `agree` holds a copy of
 `logtriage`'s timestamp-mask table, and `reachable` a copy of `agree`'s
-range expander. Each copy carries a comment naming the canonical one. That
-is the accepted cost of files that can be scp'd.
+range expander and address parser. Each copy carries a comment naming the
+canonical one. That is the accepted cost of files that can be scp'd.
+
+The cost has to be paid, not just accepted. Copies drift — that is the
+entire reason `shared_tools` exists, and its README says so: *"the two
+copies that once existed drifted apart"*. So the suite enforces it. Every
+pair declared **verbatim** is compared as code with docstrings stripped, so
+prose can be local to each tool while behaviour cannot diverge; a fix
+applied upstream and not mirrored fails the run and names the function and
+both modules. Every `canonical copy:` pointer is checked to name a file
+that exists, because this package moved from `scripts/` to `binnacle/`
+once already and one pointer did not follow.
+
+Not every copy is verbatim, and the difference is written down where it
+matters. `during` samples every second for minutes, so five of the `/proc`
+readers it takes from `why-slow` are deliberately **trimmed** — keeping
+only the fields a sample row needs, aggregating where `why-slow` keeps the
+parts separate. Its provenance comment names both sets, so a parser fix
+upstream is not pasted into a reader that was never the same function.
 
 ## Stateless
 
@@ -112,7 +129,7 @@ ships 3.6.
 ## Testing
 
 ```bash
-bash tests/run_tests.sh              # all eight suites, 149 checks
+bash tests/run_tests.sh              # all eight suites, 150 checks
 bash tests/run_tests.sh agree        # one suite
 ```
 
