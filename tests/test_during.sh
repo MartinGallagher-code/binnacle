@@ -178,6 +178,54 @@ t_exit_code_opts_into_severity_instead() {
     assert_status $rc 10
 }
 
+t_an_interrupt_reports_without_waiting_for_the_command() {
+    # The docstring promises ^C still prints the report.  It did not: the
+    # run blocked in wait() until the command finished, so a benchmark that
+    # traps SIGINT -- make, a JVM, most test harnesses -- held the report
+    # hostage for as long as it liked.
+    # Not the du_ helper: backgrounding a shell function makes $! the
+    # subshell, and the signal would go there instead of to the tool.
+    "$PY" "$DU" --interval 0.2 -- sh -c 'trap "" INT; sleep 20' \
+        > "$TEST_TMPDIR/int.out" 2>&1 &
+    local pid=$!
+    sleep 1.2
+    kill -INT "$pid" 2>/dev/null
+    # Bounded wait: the grace period is 2s, so 6 is generous and a hang
+    # fails the case instead of stalling the suite.
+    local i=0
+    while [ $i -lt 60 ]; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null
+        _fail "still running 6s after the interrupt"
+        return 1
+    fi
+    set +e
+    wait "$pid"; rc=$?
+    set -e
+    assert_status $rc 130
+    out="$(cat "$TEST_TMPDIR/int.out")"
+    assert_contains "$out" "VERDICT"
+    assert_contains "$out" "interrupted"
+    # The command was not killed, so the report says where it went.
+    assert_contains "$out" "still running as pid"
+    pkill -f 'trap "" INT; sleep 20' 2>/dev/null || true
+}
+
+t_a_signalled_command_reports_what_a_shell_would() {
+    # Popen gives -N for a signalled child, and returning that hands the
+    # shell 256-N: 254 for a plain ^C, where running the command directly
+    # would have given 130.  A drop-in prefix has to agree with the shell.
+    set +e
+    du_ --interval 0.2 -- sh -c 'sleep 0.7; kill -TERM $$' >/dev/null 2>&1
+    rc=$?
+    set -e
+    assert_status $rc 143
+}
+
 t_corrupt_numbers_are_not_measurements() {
     # A NaN or an infinity in a numeric column is corrupt input, and
     # letting one through poisons every mean and threshold downstream.
@@ -285,6 +333,8 @@ run_test "--rules and --explain generated"     t_rules_and_explain_are_generated
 run_test "wrapping passes status through"      t_wrapping_passes_the_commands_status_through
 run_test "--exit-code opts into severity"      t_exit_code_opts_into_severity_instead
 run_test "a failed command outranks severity" t_a_failed_command_outranks_a_severity
+run_test "an interrupt reports immediately"   t_an_interrupt_reports_without_waiting_for_the_command
+run_test "a signalled command reports 128+N"  t_a_signalled_command_reports_what_a_shell_would
 run_test "a long run still fits on a line"    t_a_long_run_still_fits_on_a_line
 run_test "corrupt numbers are not measured"   t_corrupt_numbers_are_not_measurements
 run_test "a series with no hostname says ?"   t_a_series_without_a_hostname_says_so

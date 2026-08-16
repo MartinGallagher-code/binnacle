@@ -188,9 +188,19 @@ which always wins: reporting `warn` for a benchmark that never finished
 would hide a build failure behind a diagnosis of it, and there is nothing
 worth reading in a run that did not complete.
 
-`^C` finishes the run and prints the report for what was sampled — losing a
-twenty-minute benchmark's diagnosis to an impatient keystroke would be the
-worst behaviour this could have.
+A command killed by a signal reports `128 + N`, the same as a shell would.
+`Popen` gives `-N` for those, and passing that through hands the shell
+`256 - N` — `254` for a plain `^C`, where running the command directly
+would have given `130`.
+
+`^C` finishes the run and prints the report for what was sampled, and does
+**not** wait on a command that ignored the signal — losing a twenty-minute
+benchmark's diagnosis to an impatient keystroke would be the worst behaviour
+this could have, and so would holding the report until a benchmark that
+traps `SIGINT` decides to finish. The command is given two seconds to exit
+so its real status can be collected, and is then reported as still running
+rather than killed: stopping somebody's benchmark uninvited would be
+destructive without saying so, and saying so is cheaper.
 
 ## See also
 
