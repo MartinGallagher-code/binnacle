@@ -108,6 +108,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **New Year's Eve reversed a syslog file.** Syslog lines carry no year,
+  and `logtriage` stamped every one with the file's year — so a log
+  crossing midnight on December 31st, read in January, put its December
+  lines eleven months into the *future*. The span printed backwards, the
+  midnight incident fell into the baseline, and a routine heartbeat
+  outranked the actual emergency — inverted triage on exactly the night
+  nobody wants it. Two facts pin the year down and both are now used: no
+  line can be written after the file's last write, so anything "later"
+  than the mtime belongs to the year before; and a half-year jump
+  backwards between adjacent lines is a rollover, not time travel. The
+  test pins the absolute year as well as the ordering, because the
+  relative order can be repaired while every December line still sits in
+  the wrong year — each rule was disabled separately to prove the test
+  catches its absence.
 - **A mangled DNS reply could become an answer instead of an error.** A
   record whose `rdlength` runs past the end of the packet — a broken
   middlebox, a truncating proxy — sliced quietly and handed back a
