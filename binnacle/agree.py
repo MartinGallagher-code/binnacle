@@ -143,6 +143,37 @@ def die(msg, code=2):
     raise SystemExit(code)
 
 
+class _WriteGuard(object):
+    """Full disk, quota, missing directory: name the file and stop.
+
+    Wraps a block writing an output the user asked for by path.  Only
+    OSError becomes the message, and only when a path was really given,
+    so stdout keeps its ordinary pipe semantics.  A traceback here would
+    bury the one fact that matters: which file could not be written.
+
+    The partial file is removed too -- a half-written CSV that parses is
+    worse than none -- except when appending, where what was already
+    there predates this failure and is still good.
+    """
+
+    def __init__(self, path, appending=False):
+        self.path = path
+        self.appending = appending
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.path and exc_type is not None and issubclass(exc_type, OSError):
+            if not self.appending:
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    pass
+            die("cannot write %s: %s" % (self.path, exc))
+        return False
+
+
 def _env(name, default=None):
     v = os.environ.get("AGREE_" + name)
     return v if v not in (None, "") else default
@@ -1018,13 +1049,16 @@ def run_fleet(args, command, label=None):
             "norms": active_normalizations(args), "label": label or "run"}
 
     if args.merge_csv:
-        n = write_merged_csv(results, args.merge_csv)
+        with _WriteGuard(args.merge_csv):
+            n = write_merged_csv(results, args.merge_csv)
         sys.stderr.write("[%s] merged %d rows into %s\n"
                          % (PROG, n, args.merge_csv))
     if args.csv:
-        write_csv(results, groups, args.csv)
+        with _WriteGuard(args.csv):
+            write_csv(results, groups, args.csv)
     if args.json:
-        write_json(results, groups, args.json, meta)
+        with _WriteGuard(args.json):
+            write_json(results, groups, args.json, meta)
     sys.stdout.write(render_groups(groups, args, meta) + "\n")
 
     failed = any(g.outcome != OK for g in groups)
