@@ -112,15 +112,17 @@ ships 3.6.
 ## Testing
 
 ```bash
-bash tests/run_tests.sh              # all five suites, 74 checks
+bash tests/run_tests.sh              # all six suites, 101 checks
 bash tests/run_tests.sh agree        # one suite
 ```
 
 **No network and no second machine.** `ssh` and `scp` are replaced by a shim
 that runs the "remote" command locally in a sandbox directory per fake host,
 logging every invocation so a test can assert *what was invoked* as well as
-what came back. The only real packets are `netmesh`'s own agents talking to
-themselves over loopback.
+what came back. The only real packets are on loopback: `netmesh`'s own
+agents, and a small DNS responder that `resolve` is pointed at — one that
+builds its replies independently of the tool's own packet code, so a shared
+bug cannot cancel itself out.
 
 `why-slow`'s rules are pure functions of a fact dictionary, so they are
 driven from JSON fixtures with no machine in the state being diagnosed —

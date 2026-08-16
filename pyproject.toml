@@ -25,6 +25,8 @@ keywords = [
     "latency",
     "path-mtu",
     "fleet",
+    "dns",
+    "resolver",
     "ssh",
     "log-analysis",
     "linux",
@@ -78,6 +80,7 @@ agree = "binnacle.agree:main"
 logtriage = "binnacle.logtriage:main"
 netmesh = "binnacle.netmesh:main"
 reachable = "binnacle.reachable:main"
+resolve = "binnacle.resolve:main"
 
 [tool.setuptools]
 packages = ["binnacle"]

@@ -1,8 +1,8 @@
 # Composing them
 
-Each tool is useful alone. The reason to have five is that they fit
-together: two of them produce deterministic CSV, one of them fans things out
-across a fleet, and one keeps the host list honest so the fan-out is not
+Each tool is useful alone. The reason to have six is that they fit
+together: three of them produce deterministic CSV, one of them fans things
+out across a fleet, and one keeps the host list honest so the fan-out is not
 half wasted.
 
 ## Fleet-wide triage
@@ -44,6 +44,16 @@ the detail is there when you want to sort or filter it:
 awk -F, '$5=="CRITICAL"' triage.csv
 ```
 
+## The same trick for DNS
+
+```bash
+agree script ./resolve.py --hosts prod.txt -- --csv db01.example.com
+```
+
+Hosts get grouped by **what they think a name means**. One rack pointed at a
+resolver with a stale zone is one group, and it is a group you would
+otherwise meet as intermittent application errors on a third of the fleet.
+
 ## The same trick for logs
 
 ```bash
@@ -70,17 +80,21 @@ reachable prod.txt -i
 # 2. What is wrong, and where?
 agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
 
-# 3. why-slow says the boxes are fine. Is it the network?
+# 3. why-slow says the boxes are fine. Is it DNS?
+resolve db01.example.com
+
+# 4. DNS is fine too. Is it the network?
 netmesh check web03 db01
 
-# 4. The network is fine too. What changed, and when?
+# 5. The network is fine too. What changed, and when?
 logtriage /var/log/syslog --split-at 14:20
 ```
 
 Each step either finds the problem or rules out a layer. The tools
 cross-reference each other in their own output, so the next command is
-usually printed for you: `why-slow` on a healthy box suggests `netmesh` and
-`logtriage`, and `netmesh` on a healthy network suggests `mx` and
+usually printed for you: `why-slow` on a healthy box suggests `resolve`,
+`netmesh` and `logtriage`; `resolve` on healthy DNS suggests `why-slow` and
+`netmesh`; and `netmesh` on a healthy network suggests `mx` and
 `iperf_orchestrator` for the load question.
 
 ## Prune before you fan out

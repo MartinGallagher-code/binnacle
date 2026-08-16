@@ -8,7 +8,7 @@
 [![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds five, for Linux boxes, the fleets they belong to, and the networks
+one holds six, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -18,6 +18,7 @@ between them.
 | `logtriage` | Which ten lines of this log matter? |
 | `netmesh` | Is it the network, and which link is sick? |
 | `reachable` | Which entries in this server list are still real? |
+| `resolve` | Is it DNS, and which resolver is wrong? |
 
 ```bash
 pip install binnacle
@@ -76,15 +77,19 @@ agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The five, briefly
+## The six, briefly
 
 ### why-slow
 
 Samples `/proc` twice, adds the kernel log, cgroup limits and filesystem
-fullness, and runs 23 rules. Container-aware: inside a cgroup your own limit
+fullness, and runs 30 rules. Container-aware: inside a cgroup your own limit
 is checked first, because a 4 GB container on a 256 GB host is out of memory
-while the host looks fine. Every rule is a pure function of a fact
-dictionary, so `--from-facts` reproduces any diagnosis anywhere.
+while the host looks fine. Seven of the rules measure **ceilings rather than
+rates** — conntrack, file descriptors, task slots, ephemeral ports, the
+neighbour table — because a box can be idle and still refusing work, and
+those have no gradient to watch: they work until abruptly they do not. Every
+rule is a pure function of a fact dictionary, so `--from-facts` reproduces
+any diagnosis anywhere.
 
 ### agree
 
@@ -112,6 +117,19 @@ counts what arrived, so **loss splits into forward and return legs**.
 Unprivileged path-MTU discovery catches the black hole where small packets
 echo and large ones vanish.
 
+### resolve
+
+Asks every configured nameserver separately rather than through the stub,
+because the stub is what hides the fault: a box whose first resolver is dead
+resolves everything correctly and slowly for ever, and every `dig` against
+the second one says DNS is fine. **A dead resolver earlier in the list
+outranks the latency it causes.** Answers are compared across resolvers --
+sorted, so round-robin rotation is never mistaken for disagreement -- and
+the search-domain cost is *measured* by walking the list, so the finding is
+"2 wasted queries, costing 41ms" rather than a lecture about `ndots`. A
+local stub is named as one, because timing `127.0.0.53` says nothing about
+what is behind it.
+
 ### reachable
 
 Pings and ssh's every entry in a host list and comments out the failures,
@@ -131,12 +149,13 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # five suites, 74 checks
+bash tests/run_tests.sh          # six suites, 101 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim
 that runs the "remote" command locally in a sandbox, and the only real
-packets are `netmesh`'s own agents talking to themselves over loopback.
+packets are `netmesh`'s own agents and `resolve`'s DNS responder talking to
+themselves over loopback.
 
 Writing that suite found seven real bugs, three of which looked fine by
 hand: CRLF line endings in a CSV, an IPv6 token mis-parsed into a nonsense

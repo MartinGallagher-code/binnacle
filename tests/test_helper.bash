@@ -42,6 +42,11 @@ setup_env() {
 teardown_env() {
     # A crashed case must not leave probing agents behind.
     pkill -f "[n]etmesh[.]py agent --mesh $TEST_TMPDIR" 2>/dev/null || true
+    if [ -f "$TEST_TMPDIR/dns.pid" ]; then
+        while read -r pid; do
+            kill "$pid" 2>/dev/null || true
+        done < "$TEST_TMPDIR/dns.pid"
+    fi
     [ -n "$TEST_TMPDIR" ] && rm -rf "$TEST_TMPDIR"
 }
 
@@ -236,6 +241,160 @@ with open(path, "w") as f:
 EOF
 }
 
+# start_fake_dns PORT JSON -- a UDP (and optionally TCP) DNS responder on
+# 127.0.0.1, so resolve's wire code can be exercised for real without a
+# network or a resolver.  The responder builds its replies independently of
+# the tool's own packet code, which is the point: a shared bug would cancel
+# out.  JSON keys:
+#   records     {"name": {"A": ["10.0.0.7"], "AAAA": [...]}}, "." is served
+#               automatically so a liveness probe answers
+#   nxdomain    ["name", ...]        answer NXDOMAIN
+#   drop        ["AAAA"]             never answer these types (a black hole)
+#   truncate    ["name"]             reply with TC set, and refuse TCP
+#   delay_ms    N                    wait this long before answering
+#   tcp         true/false           listen on TCP 53 as well (default true)
+# Writes the pid to $TEST_TMPDIR/dns.pid; teardown_env kills it.
+start_fake_dns() {
+    local port="$1" cfg="$2"
+    cat > "$TEST_TMPDIR/dnsd.py" <<'EOF'
+import json, socket, struct, sys, threading, time
+
+cfg = json.loads(sys.argv[2])
+port = int(sys.argv[1])
+records = cfg.get("records", {})
+nxdomain = set(n.lower() for n in cfg.get("nxdomain", []))
+drop = set(cfg.get("drop", []))
+truncate = set(n.lower() for n in cfg.get("truncate", []))
+delay = cfg.get("delay_ms", 0) / 1000.0
+TYPES = {1: "A", 28: "AAAA", 2: "NS"}
+
+
+def decode_name(data, pos):
+    labels = []
+    while True:
+        n = data[pos]
+        pos += 1
+        if n == 0:
+            break
+        labels.append(data[pos:pos + n].decode())
+        pos += n
+    return ".".join(labels), pos
+
+
+def encode_name(name):
+    out = b""
+    for label in name.split("."):
+        if label:
+            out += bytes([len(label)]) + label.encode()
+    return out + b"\x00"
+
+
+def build_reply(data):
+    qid, flags, qd = struct.unpack("!HHH", data[:6])
+    name, pos = decode_name(data, 12)
+    qtype, qclass = struct.unpack("!HH", data[pos:pos + 4])
+    pos += 4
+    tname = TYPES.get(qtype, str(qtype))
+    if tname in drop:
+        return None
+    question = data[12:pos]
+    if name.lower() in truncate:
+        head = struct.pack("!HHHHHH", qid, 0x8380, 1, 0, 0, 0)
+        return head + question
+    if name.lower() in nxdomain:
+        head = struct.pack("!HHHHHH", qid, 0x8183, 1, 0, 0, 0)
+        return head + question
+    if name == "":
+        vals = ["a.root-servers.net"] if tname == "NS" else []
+    else:
+        vals = records.get(name.lower(), {}).get(tname, [])
+    body = b""
+    for v in vals:
+        if tname == "A":
+            rd = socket.inet_pton(socket.AF_INET, v)
+        elif tname == "AAAA":
+            rd = socket.inet_pton(socket.AF_INET6, v)
+        else:
+            rd = encode_name(v)
+        body += b"\xc0\x0c" + struct.pack("!HHIH", qtype, 1, 300, len(rd)) + rd
+    head = struct.pack("!HHHHHH", qid, 0x8180, 1, len(vals), 0, 0)
+    return head + question + body
+
+
+def serve_udp():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    while True:
+        data, peer = s.recvfrom(4096)
+        reply = build_reply(data)
+        if reply is None:
+            continue
+        if delay:
+            time.sleep(delay)
+        s.sendto(reply, peer)
+
+
+def serve_tcp():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(5)
+    while True:
+        conn, _ = s.accept()
+        try:
+            head = conn.recv(2)
+            length = struct.unpack("!H", head)[0]
+            data = conn.recv(length)
+            reply = build_reply(data)
+            if reply is not None:
+                conn.sendall(struct.pack("!H", len(reply)) + reply)
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+
+if cfg.get("tcp", True):
+    threading.Thread(target=serve_tcp, daemon=True).start()
+serve_udp()
+EOF
+    "$PY" "$TEST_TMPDIR/dnsd.py" "$port" "$cfg" &
+    echo $! >> "$TEST_TMPDIR/dns.pid"
+    # Wait for the socket rather than sleeping a guessed interval.
+    local i=0
+    while [ $i -lt 50 ]; do
+        if "$PY" - "$port" <<'EOF'
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(0.2)
+try:
+    s.sendto(b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01",
+             ("127.0.0.1", int(sys.argv[1])))
+    s.recvfrom(4096)
+except Exception:
+    sys.exit(1)
+EOF
+        then
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    echo "fake dns on port $port never came up" >&2
+    return 1
+}
+
+# free_port -- a UDP port nothing is listening on, for the responder.
+free_port() {
+    "$PY" - <<'EOF'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+EOF
+}
+
 # facts_json FILE [key=value ...] -- a healthy why-slow fact dict with
 # overrides applied, so a rule test states only what it cares about.
 facts_json() {
@@ -279,6 +438,51 @@ f = {
   "cg.pids_pct": None,
   "therm.cur_ghz": 3.4, "therm.max_ghz": 3.6, "therm.governor": "performance",
   "therm.max_temp_c": 45.0,
+}
+for o in overrides:
+    k, v = o.split("=", 1)
+    try:
+        f[k] = json.loads(v)
+    except ValueError:
+        f[k] = v
+with open(path, "w") as fh:
+    json.dump(f, fh)
+EOF
+}
+
+# resolve_facts_json FILE [key=value ...] -- the same idea for resolve: a
+# box whose DNS is healthy, with overrides applied.
+resolve_facts_json() {
+    local path="$1"; shift
+    "$PY" - "$path" "$@" <<'EOF'
+import json, sys
+path, overrides = sys.argv[1], sys.argv[2:]
+f = {
+  "sys.hostname": "testbox", "res.path": "/etc/resolv.conf",
+  "res.readable": True, "res.nameservers": ["10.0.0.53", "10.0.0.54"],
+  "res.search": ["example.com"], "res.options": [], "res.ndots": 1,
+  "res.timeout": 1, "res.attempts": 2, "res.rotate": False,
+  "res.single_request": False, "res.stub": None, "res.upstreams": None,
+  "probe.source": "/etc/resolv.conf", "probe.names": ["db01.example.com"],
+  "probe.types": ["A", "AAAA"], "probe.timeout_s": 2.0, "probe.attempts": 1,
+  "srv.list": ["10.0.0.53", "10.0.0.54"],
+  "srv.all": {"10.0.0.53": {"alive": True, "rtt_ms": 1.2, "rcode": "NOERROR",
+                            "error": None, "names": {}},
+              "10.0.0.54": {"alive": True, "rtt_ms": 1.9, "rcode": "NOERROR",
+                            "error": None, "names": {}}},
+  "srv.count": 2, "srv.dead": [], "srv.alive": ["10.0.0.53", "10.0.0.54"],
+  "srv.first_dead": False, "srv.slowest": "10.0.0.54",
+  "srv.slowest_ms": 1.9, "srv.fastest_ms": 1.2,
+  "names.all": {"db01.example.com": {
+      "by_server": {}, "hosts": None, "distinct": 1,
+      "answers": {"10.0.0.53": ["10.0.0.7"], "10.0.0.54": ["10.0.0.7"]}}},
+  "names.disagree": [], "names.failed": [], "names.partial": [],
+  "names.aaaa_stall": [], "names.hosts_shadow": [], "tcp.blocked": [],
+  "hosts.readable": True,
+  "search.count": 1, "search.wasted": 0, "search.wasted_ms": 0.0,
+  "stub.all": {"db01.example.com": {"ms": 2.4, "addrs": ["10.0.0.7"],
+                                    "error": None}},
+  "stub.slowest_ms": 2.4, "budget.worst_s": 4,
 }
 for o in overrides:
     k, v = o.split("=", 1)
