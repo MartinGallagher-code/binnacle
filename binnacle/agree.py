@@ -21,6 +21,8 @@ Options:
   -H a,b,c            hosts inline, repeatable
   --jobs N            hosts contacted at once                 (AGREE_JOBS)
   --timeout S         per-host command timeout, seconds       (AGREE_TIMEOUT)
+  --max-output BYTES  per-host output cap; a host past it is
+                      killed and reported, not grouped      (AGREE_MAX_OUTPUT)
   --user NAME         ssh user                                (AGREE_USER)
   --ssh CMD/--scp CMD transports                     (AGREE_SSH / AGREE_SCP)
   --sudo              prefix the command with `sudo -n`
@@ -98,6 +100,7 @@ import io
 import json
 import os
 import re
+import selectors
 import shlex
 import socket
 import subprocess
@@ -552,6 +555,7 @@ class Runner(object):
         self.scp = (args.scp or "scp").split()
         self.user = args.user
         self.timeout = args.timeout
+        self.max_output = args.max_output
         self.remote_dir = args.remote_dir
 
     def target(self, host):
@@ -572,20 +576,72 @@ class Runner(object):
         return argv
 
     def _exec(self, argv, timeout):
+        """Bounded capture: one runaway host must not sink the whole run.
+
+        communicate() holds everything a child ever prints, so a single
+        box caught in a log storm -- exactly the kind of box this tool is
+        pointed at -- could grow this process by gigabytes, multiplied by
+        --jobs.  Output is read incrementally and cut at --max-output;
+        a host that blows the cap is killed and reported as such, because
+        grouping the front half of a flood would be an answer to a
+        question nobody asked.
+        """
+        limit = int(self.max_output)
         try:
             p = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE,
-                                 stdin=subprocess.DEVNULL,
-                                 universal_newlines=True,
-                                 encoding="utf-8-sig", errors="replace")
-            out, err = p.communicate(timeout=timeout)
-            return p.returncode, out or "", err or ""
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.communicate()
-            return 124, "", "timed out after %ss" % timeout
+                                 stdin=subprocess.DEVNULL)
         except OSError as exc:
             return 127, "", str(exc)
+        chunks = {p.stdout: [], p.stderr: []}
+        sizes = {p.stdout: 0, p.stderr: 0}
+        deadline = time.monotonic() + timeout
+        flooded = False
+        # selectors rather than select(): with --jobs worth of children a
+        # descriptor number can pass select()'s 1024 ceiling
+        sel = selectors.DefaultSelector()
+        sel.register(p.stdout, selectors.EVENT_READ)
+        sel.register(p.stderr, selectors.EVENT_READ)
+        open_count = 2
+        while open_count:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                sel.close()
+                p.kill()
+                p.wait()
+                return 124, "", "timed out after %ss" % timeout
+            for key, _ in sel.select(left):
+                f = key.fileobj
+                chunk = os.read(f.fileno(), 65536)
+                if not chunk:
+                    sel.unregister(f)
+                    open_count -= 1
+                    continue
+                room = limit - sizes[f]
+                if room > 0:
+                    chunks[f].append(chunk[:room])
+                sizes[f] += len(chunk)
+                if sizes[f] > limit:
+                    flooded = True
+            if flooded:
+                p.kill()
+                break
+        sel.close()
+        try:
+            rc = p.wait(timeout=max(1.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            p.kill()
+            rc = p.wait()
+        for f in (p.stdout, p.stderr):
+            f.close()
+
+        def text(f):
+            return b"".join(chunks[f]).decode("utf-8-sig", "replace")
+
+        if flooded:
+            return 125, "", ("output exceeded --max-output (%d bytes); "
+                             "host killed" % limit)
+        return rc, text(p.stdout), text(p.stderr)
 
     def push_files(self, host, files):
         d = self.remote_dir
@@ -618,14 +674,14 @@ class Runner(object):
 
     def run_one(self, host, command, push=None, pull=None, cleanup=True):
         r = Result(host)
-        t0 = time.time()
+        t0 = time.monotonic()
         if push:
             rc, err = self.push_files(host, push)
             if rc != 0:
                 r.outcome = PUSH_FAILED
                 r.rc = rc
                 r.stderr = err
-                r.duration = time.time() - t0
+                r.duration = time.monotonic() - t0
                 return r
         rc, out, err = self._exec(self.ssh_argv(host, command), self.timeout)
         r.rc, r.stdout, r.stderr = rc, out, err
@@ -634,7 +690,7 @@ class Runner(object):
         if push and cleanup:
             self._exec(self.ssh_argv(
                 host, "rm -rf %s" % shlex.quote(self.remote_dir)), 60)
-        r.duration = time.time() - t0
+        r.duration = time.monotonic() - t0
 
         if rc == 124:
             r.outcome = TIMEOUT
@@ -1034,14 +1090,14 @@ def run_fleet(args, command, label=None):
                            for c in runner.ssh_argv(h, command)))
         return 0
 
-    t0 = time.time()
+    t0 = time.monotonic()
     results = fan_out(
         hosts,
         lambda h: runner.run_one(h, command, push=args.push,
                                  pull=args.pull,
                                  cleanup=not args.keep_remote),
         args.jobs, quiet=args.quiet)
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
 
     groups = group_results(results, args)
     meta = {"command": command, "elapsed": round(elapsed, 2),
@@ -1079,6 +1135,8 @@ def _add_common(p):
     p.add_argument("--jobs", "-j", type=int,
                    default=int(_env("JOBS", min(32, 4 * (os.cpu_count() or 4)))))
     p.add_argument("--timeout", type=float, default=float(_env("TIMEOUT", 60)))
+    p.add_argument("--max-output", type=int,
+                   default=int(_env("MAX_OUTPUT", 16 * 1024 * 1024)))
     p.add_argument("--user", "-u", default=_env("USER", os.environ.get(
         "SSH_USER")))
     p.add_argument("--ssh", default=_env("SSH", "ssh"))

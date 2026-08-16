@@ -528,7 +528,7 @@ class Prober(object):
 
     def check(self, spec):
         r = Result(spec)
-        t0 = time.time()
+        t0 = time.monotonic()
         if self.args.dry_run:
             r.detail = "not contacted (--dry-run)"
             r.usable = True
@@ -538,7 +538,7 @@ class Prober(object):
         rc, err = self.ssh_host(r)
         r.ssh = (rc == 0)
         r.outcome, r.detail = self.classify(r, rc, err)
-        r.duration = time.time() - t0
+        r.duration = time.monotonic() - t0
 
         # ssh is the gate; ping only explains.  A host answering ssh is
         # kept even with no ping, because ICMP is blocked on plenty of

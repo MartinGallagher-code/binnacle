@@ -108,6 +108,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A mangled DNS reply could become an answer instead of an error.** A
+  record whose `rdlength` runs past the end of the packet — a broken
+  middlebox, a truncating proxy — sliced quietly and handed back a
+  one-byte "address", because Python slicing never complains. That bogus
+  value then fed the cross-server comparison, which could have reported
+  *your nameservers disagree* off corruption. The parser now refuses the
+  record. The rest of the parser held up under crafted packets —
+  compression-pointer loops, self-referencing pointers, pointers past the
+  packet, truncated headers, 5 KB names — all already clean `DNSError`s,
+  and a reply that fails to parse keeps the query waiting on its budget
+  rather than killing it, so a spoofed or late packet cannot deny the
+  real answer.
+- **One runaway host could sink a whole `agree` fan-out.** Everything a
+  child printed was buffered in memory, so a single box caught in a log
+  storm — exactly the kind of box this tool gets pointed at — grew the
+  process by the size of whatever it printed, multiplied by `--jobs`:
+  200 MB of output cost 593 MB of RSS, before multiplying. Output is now
+  read incrementally and cut at `--max-output` (default 16 MB,
+  `AGREE_MAX_OUTPUT`); a host past the cap is killed and reported as its
+  own finding, not grouped, because a truncated flood agreeing with
+  anything means nothing. The reader uses `selectors`, not `select()`,
+  so a wide `--jobs` cannot trip the 1024-descriptor ceiling.
+- **Timeouts and durations were measured on the wall clock.** `resolve`'s
+  query deadlines and latency numbers, `reachable`'s and `agree`'s
+  per-host durations, and `netmesh`'s CPU-rate denominator all used
+  `time.time()`, so an NTP step mid-run could stretch a timeout, produce
+  a negative latency, or corrupt a rate. All measurement clocks are now
+  `time.monotonic()`, matching `during`, which already did this
+  correctly; wall time remains only in displayed timestamps, where it is
+  the point.
 - **A disk that filled up was answered with a stack trace.** Every tool
   that writes an output the user names — `--csv`, `--json`,
   `--save-templates`, `--samples`, `--merge-csv`, `netmesh`'s mesh, report
