@@ -74,9 +74,12 @@ Robustness properties
     about a run that never finished is not worth reading
   * the command's own process tree is excluded from interloper detection,
     because the benchmark is not a surprise
-  * interrupting with ^C still prints the report for what was sampled --
-    losing a long run to an impatient keystroke would be the worst
-    possible behaviour
+  * interrupting with ^C still prints the report for what was sampled, and
+    does not wait on a command that ignored the signal -- losing a long
+    run to an impatient keystroke would be the worst possible behaviour,
+    and so would holding the report until a benchmark that traps SIGINT
+    decides to finish.  The command is never killed, only reported as
+    still running
   * sampling reads /proc and /sys only: no root, no packages, no agent,
     nothing left behind
   * the analysis is a pure function of the sample series, so
@@ -1453,6 +1456,10 @@ def render_human(samples, summary, findings, skipped, passed, args, C):
         bits.append("wrapping %s" % summary["run.wrapped"])
     if summary.get("run.interrupted"):
         bits.append("interrupted")
+    if summary.get("run.child_running"):
+        bits.append("%s still running as pid %s"
+                    % (summary.get("run.wrapped") or "the command",
+                       summary["run.child_running"]))
     out.append("%s -- %s, %s" % (PROG, summary.get("run.host") or "?",
                                  ", ".join(bits)))
     out.append("")
@@ -1703,9 +1710,32 @@ def main(argv=None):
         samples, interrupted = watch(args, child)
         if child is not None:
             try:
-                child_status = child.wait()
+                if interrupted:
+                    # Collect the status if the command is going to exit
+                    # promptly, but never block on it.  A benchmark that
+                    # traps SIGINT -- make, a JVM, most test harnesses --
+                    # would otherwise hold the report hostage for as long
+                    # as it feels like running, which is exactly the
+                    # twenty-minutes-lost-to-a-keystroke failure this is
+                    # supposed to prevent.  It is not killed: stopping
+                    # somebody's benchmark uninvited would be destructive
+                    # without saying so, and saying so is cheaper.
+                    try:
+                        child_status = child.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        child_status = 130
+                        meta["run.child_running"] = child.pid
+                else:
+                    child_status = child.wait()
             except KeyboardInterrupt:
                 child_status = 130
+            if child_status < 0:
+                # Popen reports a signalled child as -N.  Returning that
+                # gives the shell 256-N -- 254 for a plain ^C -- where
+                # running the command directly would have given 128+N.
+                # This is meant to be a drop-in prefix, so it reports what
+                # the shell would have.
+                child_status = 128 + (-child_status)
     meta["run.interrupted"] = interrupted
 
     if not samples:
