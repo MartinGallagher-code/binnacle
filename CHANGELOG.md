@@ -6,7 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Rewriting a host list did not give the file back as itself.**
+  `reachable -i` is the one operation in this package that edits a file
+  you already had, and temp-file-plus-rename loses two things unless they
+  are carried across. A `0600` inventory came back **`0644`** — a tool run
+  to tidy a server list quietly published the name of every box in it. And
+  a **symlink was replaced by a regular file**: an inventory pointing into
+  a shared checkout lost the link, while the file everyone else reads
+  stayed stale, so the edit appeared to work and changed nothing for
+  anybody. The target is now resolved before writing, and mode and
+  ownership are copied onto the replacement. `netmesh`'s mesh writer got
+  the same treatment: a mesh carries hand edits — the `~` ping-only prefix
+  is a human's mark — so regenerating it must not widen its mode either.
 
 ## [0.2.0] - 2026-08-16
 

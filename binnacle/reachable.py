@@ -408,11 +408,30 @@ def read_lines(path):
 
 
 def write_atomic(path, text):
-    """Temp file plus rename: a half-written server list is worse than none."""
+    """Temp file plus rename: a half-written server list is worse than none.
+
+    The file being replaced is the user's own, so its identity has to
+    survive the replacement.  A symlink is followed rather than clobbered
+    -- an inventory is often a link into a shared checkout, and replacing
+    the link both destroys it and leaves the file everyone else reads
+    untouched.  Mode and ownership are carried across too: without that a
+    0600 host list came back 0644, publishing the name of every box in it.
+    """
+    path = os.path.realpath(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        st = None
     tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
         with io.open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
+        if st is not None:
+            os.chmod(tmp, st.st_mode & 0o7777)
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass    # not root: the mode is the half that leaks
         os.replace(tmp, path)
     except OSError as exc:
         try:

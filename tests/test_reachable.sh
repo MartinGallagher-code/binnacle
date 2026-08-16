@@ -286,6 +286,30 @@ t_ipv6_entries_are_probed_not_mangled() {
 }
 
 echo "reachable"
+t_rewriting_keeps_the_file_it_was_given() {
+    # This is the one tool that edits a file you already had, so the file
+    # has to come back as itself.  Temp-file-plus-rename loses two things
+    # unless they are carried across: a 0600 inventory came back 0644,
+    # publishing the name of every box in it, and a symlink -- how an
+    # inventory usually points into a shared checkout -- was replaced by
+    # a regular file while the file everyone else reads stayed stale.
+    install_fake_probes
+    printf 'web01\ndb07\n' > "$TEST_TMPDIR/private.txt"
+    chmod 600 "$TEST_TMPDIR/private.txt"
+    re "$TEST_TMPDIR/private.txt" -i --no-ping --quiet > /dev/null 2>&1 || true
+    assert_eq "$(stat -c '%a' "$TEST_TMPDIR/private.txt")" "600"
+
+    mkdir -p "$TEST_TMPDIR/shared"
+    printf 'web01\n' > "$TEST_TMPDIR/shared/hosts.txt"
+    ln -s shared/hosts.txt "$TEST_TMPDIR/inventory"
+    re "$TEST_TMPDIR/inventory" -i --no-ping --quiet > /dev/null 2>&1 || true
+    if [ ! -L "$TEST_TMPDIR/inventory" ]; then
+        fail "the symlink was replaced by a regular file"
+    fi
+    # and the edit landed on the file the link points at, not beside it
+    assert_contains "$(cat "$TEST_TMPDIR/shared/hosts.txt")" "#[unreachable]"
+}
+
 run_test "ipv6 entries are probed"             t_ipv6_entries_are_probed_not_mangled
 run_test "comments out only the failures"      t_comments_out_only_the_failures
 run_test "all reachable: exit 0, no change"    t_all_reachable_exits_zero_and_changes_nothing
@@ -304,4 +328,5 @@ run_test "-i keeps a backup"                   t_in_place_keeps_a_backup
 run_test "--dry-run contacts nobody"           t_dry_run_contacts_nobody
 run_test "name=address form"                   t_name_equals_address_form
 run_test "--recheck-only is narrow"            t_recheck_only_touches_commented_lines
+run_test "rewriting keeps the file given"     t_rewriting_keeps_the_file_it_was_given
 finish
