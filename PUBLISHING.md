@@ -31,9 +31,23 @@ usual cause of `invalid-publisher`.
 
 ## Cutting a release
 
-1. Update the version in **two** places — they must agree:
+1. Update the version in **all nine** places — they must agree, and the
+   suite fails if they do not:
    - `pyproject.toml` → `version`
    - `binnacle/__init__.py` → `VERSION`
+   - each tool's own `VERSION`, in all seven modules
+
+   The seven are not redundant. A tool is routinely `scp`'d to a machine
+   that has never heard of this package, where its own `VERSION` is the
+   only version there is — and `agree` groups a fleet by what `--version`
+   reports, so a module left behind at the old number reads as version
+   skew across the fleet rather than as a release that was cut carelessly.
+
+   ```bash
+   sed -i 's/^VERSION = "0\.2\.0"$/VERSION = "0.2.1"/' \
+       binnacle/*.py
+   sed -i 's/^version = "0\.2\.0"$/version = "0.2.1"/' pyproject.toml
+   ```
 2. Move the `## [Unreleased]` items in `CHANGELOG.md` under a new
    `## [x.y.z] - YYYY-MM-DD` heading, and update the link definitions at the
    foot of the file.
