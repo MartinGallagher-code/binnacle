@@ -630,9 +630,15 @@ def _num(s, key):
     if v is None or v == "":
         return None
     try:
-        return float(v)
+        v = float(v)
     except (TypeError, ValueError):
         return None
+    # A NaN or an infinity in a numeric column is corrupt input, not a
+    # measurement, and letting one through would quietly poison every mean
+    # and threshold downstream of it.  Blank means not measured.
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
 
 
 def classify(s):
@@ -1447,7 +1453,7 @@ def render_human(samples, summary, findings, skipped, passed, args, C):
         bits.append("wrapping %s" % summary["run.wrapped"])
     if summary.get("run.interrupted"):
         bits.append("interrupted")
-    out.append("%s -- %s, %s" % (PROG, summary.get("run.host", "?"),
+    out.append("%s -- %s, %s" % (PROG, summary.get("run.host") or "?",
                                  ", ".join(bits)))
     out.append("")
     out.append("  %s   %s" % (C.bold("VERDICT"),

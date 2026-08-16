@@ -1937,7 +1937,7 @@ class Colors(object):
 def render_human(facts, findings, skipped, passed, args, C):
     out = []
     ncpu = facts.get("cpu.count")
-    head = "%s -- %s" % (PROG, facts.get("sys.hostname", "?"))
+    head = "%s -- %s" % (PROG, facts.get("sys.hostname") or "?")
     bits = []
     if facts.get("sample.interval_s"):
         bits.append("%.1fs sample" % facts["sample.interval_s"])

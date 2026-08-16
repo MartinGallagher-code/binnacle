@@ -1316,7 +1316,7 @@ def render_human(facts, findings, skipped, passed, args, C):
                                    else "s"))
     if facts.get("probe.source"):
         bits.append("from %s" % facts["probe.source"])
-    head = "%s -- %s" % (PROG, facts.get("sys.hostname", "?"))
+    head = "%s -- %s" % (PROG, facts.get("sys.hostname") or "?")
     out.append("%s, %s" % (head, ", ".join(bits)) if bits else head)
     out.append("")
 

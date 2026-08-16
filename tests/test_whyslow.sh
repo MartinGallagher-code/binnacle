@@ -266,6 +266,12 @@ t_an_empty_fact_file_is_not_a_clean_bill_of_health() {
 }
 
 t_a_facts_file_that_is_not_a_dictionary_is_refused() {
+    # A hostname that is present but null must render as ?, never as the
+    # literal None.
+    printf '{"sys.hostname": null}' > "$TEST_TMPDIR/nullhost.json"
+    nh="$(ws --from-facts "$TEST_TMPDIR/nullhost.json" --quiet)"
+    assert_contains "$nh" "why_slow.py -- ?"
+    assert_not_contains "$nh" "-- None"
     printf '[]' > "$TEST_TMPDIR/list.json"
     set +e
     out="$(ws --from-facts "$TEST_TMPDIR/list.json" 2>&1)"; rc=$?

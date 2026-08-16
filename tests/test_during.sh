@@ -178,6 +178,37 @@ t_exit_code_opts_into_severity_instead() {
     assert_status $rc 10
 }
 
+t_corrupt_numbers_are_not_measurements() {
+    # A NaN or an infinity in a numeric column is corrupt input, and
+    # letting one through poisons every mean and threshold downstream.
+    during_samples "$TEST_TMPDIR/s.csv" 30 cpu_busy_pct=95 \
+        cpu_max_core_pct=97
+    "$PY" - "$TEST_TMPDIR/s.csv" <<'EOF'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+for i, r in enumerate(rows):
+    if i % 5 == 0:
+        r["cpu_busy_pct"] = "1e400"          # inf once parsed
+        r["cpu_max_core_pct"] = "nan"
+w = csv.DictWriter(open(sys.argv[1], "w"), fieldnames=list(rows[0]),
+                   lineterminator="\n")
+w.writeheader()
+w.writerows(rows)
+EOF
+    out="$(du_ --from-samples "$TEST_TMPDIR/s.csv")"
+    assert_not_contains "$out" "inf"
+    assert_not_contains "$out" "nan"
+    # The samples that are real still carry the run.
+    assert_contains "$out" "cpu"
+}
+
+t_a_series_without_a_hostname_says_so() {
+    printf 'elapsed_s,cpu_busy_pct\n1.0,95\n2.0,95\n' > "$TEST_TMPDIR/n.csv"
+    out="$(du_ --from-samples "$TEST_TMPDIR/n.csv" --quiet)"
+    assert_contains "$out" "during.py -- ?"
+    assert_not_contains "$out" "None"
+}
+
 t_a_long_run_still_fits_on_a_line() {
     # A ten-minute run at the default interval is 600 samples, and one
     # character per sample is a 600-character line: unreadable in a
@@ -255,6 +286,8 @@ run_test "wrapping passes status through"      t_wrapping_passes_the_commands_st
 run_test "--exit-code opts into severity"      t_exit_code_opts_into_severity_instead
 run_test "a failed command outranks severity" t_a_failed_command_outranks_a_severity
 run_test "a long run still fits on a line"    t_a_long_run_still_fits_on_a_line
+run_test "corrupt numbers are not measured"   t_corrupt_numbers_are_not_measurements
+run_test "a series with no hostname says ?"   t_a_series_without_a_hostname_says_so
 run_test "the series reads back in"            t_the_series_written_out_reads_back_in
 run_test "a too-short window says so"          t_a_window_shorter_than_one_interval_says_so
 run_test "neither command nor window errors"   t_asking_for_neither_a_command_nor_a_window_is_a_usage_error

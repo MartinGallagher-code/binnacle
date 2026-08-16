@@ -17,6 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the exit status, so a monitoring wrapper cannot read it as healthy either.
   A fact file that is not a dictionary is refused with a message rather
   than an `AttributeError` traceback.
+- **A NaN or an infinity in a `during` sample column was treated as a
+  measurement**, quietly distorting every mean and threshold downstream of
+  it. Corrupt input now reads as blank, which is what the rest of the
+  package means by "not measured". A series with no `host` column printed
+  the literal `None` as the hostname; all three rule tools now print `?`
+  when the name is missing or null.
 - **`during`'s timeline grew without bound.** A ten-minute run at the
   default interval is 600 samples, and one character per sample is a
   600-character line that survives neither a terminal nor a paste into a
