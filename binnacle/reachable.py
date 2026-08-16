@@ -144,7 +144,7 @@ def note(msg, quiet=False):
 #
 # Same grammar as servers.txt in iperf_orchestrator and matrix_orchestrator:
 # '#' comments, blank lines, name[=addr[:port]] tokens.
-# canonical copy of the range expander: scripts/agree.py expand_range
+# canonical copy of the range expander: binnacle/agree.py expand_range
 
 RANGE_RE = re.compile(r"\[([^\]]+)\]")
 

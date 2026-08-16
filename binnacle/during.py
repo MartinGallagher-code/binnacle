@@ -152,6 +152,20 @@ def _env(name, default=None):
 # rather than imported because each tool in this package is a standalone file
 # that gets copied onto machines which have never heard of the package -- see
 # the note at the foot of this file.
+#
+# Two kinds of copy, and the difference matters to anyone fixing a parser
+# bug upstream:
+#
+#   verbatim   _read, _read_int, read_vmstat, read_meminfo, read_pressure
+#              -- identical to why_slow's, and a fix there belongs here too.
+#              tests/test_compose.sh fails if they stop matching.
+#
+#   trimmed    read_stat, read_diskstats, read_netdev, read_snmp, read_procs
+#              -- deliberately narrower.  This tool samples every second for
+#              minutes at a time, so each keeps only the fields the sample
+#              row needs and aggregates where why_slow keeps the parts
+#              separate.  A fix upstream has to be re-thought here, not
+#              pasted.
 
 def _read(path, default=None):
     try:
