@@ -108,6 +108,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **One non-ASCII byte anywhere in the input lost the whole run, in all
+  seven tools.** The CI failure that prompted this was in the suite rather
+  than a tool — the drift check read source with a bare `open()` and died on
+  the sparkline characters in `logtriage.py` — but the same assumption was
+  in every tool, and a survey under `LC_ALL=C` found three distinct ways it
+  broke. `logtriage` crashed on *output*, having read a log fine and then
+  failed printing its own sparkline. `reachable`, `during`, `agree` and
+  `netmesh` crashed on *input*: a UTF-8 hostname comment, a `make` target
+  echoing a typographic quote, one accented word in a log. Worst was
+  `resolve`, which crashed nowhere and instead read a perfectly good
+  `resolv.conf` as **empty** — reporting "0 resolvers" for a box that had
+  one, the failure mode the conventions exist to prevent, and caught only
+  because the `NOTHING_CHECKED` guard added earlier refused to call that
+  health. Text is now read with `errors="replace"` and subprocess output
+  decoded the same way, so an undecodable byte costs one character rather
+  than the finding it appeared in; and a `_stdio_safe()` helper rewraps
+  `stdout`/`stderr` with `backslashreplace` when the locale claims ASCII,
+  so a report is never lost to the terminal it is being printed on.
+  Reproducing any of this needs `PYTHONCOERCECLOCALE=0 PYTHONUTF8=0` as
+  well as `LC_ALL=C`: PEP 538 quietly coerces the C locale to UTF-8 on
+  modern Python, which is exactly why none of it showed up until a RHEL 8
+  container ran the suite. `_stdio_safe` is now on the verbatim-copy list,
+  so the seven copies this fix created are held identical by the check
+  added alongside it.
 - **Nothing checked that the deliberate duplication had not drifted** —
   the arrangement `shared_tools` exists because of, its README naming *"the
   two copies that once existed drifted apart"* as the reason. The suite now

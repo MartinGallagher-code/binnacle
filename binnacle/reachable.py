@@ -78,6 +78,7 @@ Robustness properties
 import argparse
 import concurrent.futures
 import csv
+import io
 import json
 import os
 import re
@@ -120,6 +121,27 @@ OUTCOME_TEXT = {
     DOWN: "no ping, no ssh",
     UNKNOWN: "could not be determined",
 }
+
+
+def _stdio_safe():
+    """Never lose a report to a character the locale cannot spell.
+
+    On a box with LANG=C -- a RHEL 8 default, and the floor this package
+    targets -- stdout is ASCII, so a single UTF-8 name echoed out of a log,
+    a process table or a remote command turns the whole report into a
+    UnicodeEncodeError.  Degrading the character is the same bargain the
+    rest of these tools already make with --ascii: the run is worth more
+    than the byte.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or not hasattr(stream, "buffer"):
+            continue
+        enc = (getattr(stream, "encoding", None) or "").lower()
+        if enc.replace("-", "_") in ("ascii", "ansi_x3.4_1968", "us_ascii"):
+            setattr(sys, name, io.TextIOWrapper(
+                stream.buffer, encoding=stream.encoding,
+                errors="backslashreplace", line_buffering=True))
 
 
 def die(msg, code=2):
@@ -346,7 +368,7 @@ def read_lines(path):
         if not os.path.isfile(path):
             die("no such file: %s" % path)
         try:
-            with open(path) as f:
+            with io.open(path, errors="replace") as f:
                 text = f.read()
         except OSError as exc:
             die("cannot read %s: %s" % (path, exc))
@@ -408,7 +430,8 @@ class Prober(object):
             p = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.DEVNULL,
-                                 universal_newlines=True)
+                                 universal_newlines=True,
+                             errors="replace")
             out, err = p.communicate(timeout=timeout)
             return p.returncode, out or "", err or ""
         except subprocess.TimeoutExpired:
@@ -637,6 +660,7 @@ def build_parser():
 
 
 def main(argv=None):
+    _stdio_safe()
     args = build_parser().parse_args(argv)
     if args.in_place and args.path == "-":
         die("cannot rewrite stdin in place")

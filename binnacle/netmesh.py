@@ -90,6 +90,7 @@ Robustness properties
 import argparse
 import csv
 import errno
+import io
 import os
 import re
 import select
@@ -158,6 +159,27 @@ CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every")
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+def _stdio_safe():
+    """Never lose a report to a character the locale cannot spell.
+
+    On a box with LANG=C -- a RHEL 8 default, and the floor this package
+    targets -- stdout is ASCII, so a single UTF-8 name echoed out of a log,
+    a process table or a remote command turns the whole report into a
+    UnicodeEncodeError.  Degrading the character is the same bargain the
+    rest of these tools already make with --ascii: the run is worth more
+    than the byte.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or not hasattr(stream, "buffer"):
+            continue
+        enc = (getattr(stream, "encoding", None) or "").lower()
+        if enc.replace("-", "_") in ("ascii", "ansi_x3.4_1968", "us_ascii"):
+            setattr(sys, name, io.TextIOWrapper(
+                stream.buffer, encoding=stream.encoding,
+                errors="backslashreplace", line_buffering=True))
+
 
 def die(msg, code=2):
     """Exit with a usage-style status (2), as argparse does -- so a bad mesh
@@ -369,7 +391,7 @@ def load_mesh(path):
     cfg = {}
     data_lines = []
     line_numbers = []
-    with open(path) as f:
+    with io.open(path, errors="replace") as f:
         for lineno, line in enumerate(f, start=1):
             if line.startswith("#"):
                 for part in line[1:].split():
@@ -474,7 +496,7 @@ def read_servers(path):
     if not os.path.isfile(path):
         die("server list not found: %s" % path)
     out = []
-    with open(path) as f:
+    with io.open(path, errors="replace") as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
             if line:
@@ -843,7 +865,8 @@ class Agent(object):
         try:
             self.ping_procs[st.name] = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, universal_newlines=True)
+                stdin=subprocess.DEVNULL, universal_newlines=True,
+                             errors="replace")
             st.sent = count
         except OSError:
             st.note = "no-ping-binary"
@@ -1166,7 +1189,8 @@ class Fleet(object):
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL,
-                                 universal_newlines=True)
+                                 universal_newlines=True,
+                             errors="replace")
             out, _ = p.communicate(timeout=timeout)
             return p.returncode, (out or "").strip()
         except subprocess.TimeoutExpired:
@@ -1531,7 +1555,7 @@ def read_reports(reports_dir):
             continue
         path = os.path.join(reports_dir, name)
         try:
-            with open(path, newline="") as f:
+            with io.open(path, newline="", errors="replace") as f:
                 for row in csv.DictReader(f):
                     rows.append(row)
         except OSError as exc:
@@ -2130,7 +2154,8 @@ def cmd_selftest(args):
                    "--duration", "%g" % secs, "--bind", "127.0.0.1"]
             procs.append(subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT,
-                                          universal_newlines=True))
+                                          universal_newlines=True,
+                             errors="replace"))
         log("[%s] two agents probing over loopback for %s..."
             % (PROG, fmt_secs(secs)))
         for p in procs:
@@ -2370,6 +2395,7 @@ def cmd_full_help(parser, sub):
 
 
 def main(argv=None):
+    _stdio_safe()
     argv = list(sys.argv[1:] if argv is None else argv)
     parser, sub = build_parser()
     if not argv:

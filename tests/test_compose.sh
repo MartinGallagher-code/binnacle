@@ -234,6 +234,52 @@ EOF
     assert_contains "$nm" "--mtu-ceiling"
 }
 
+t_a_stray_utf8_byte_does_not_lose_the_run() {
+    # The floor this package targets is RHEL 8: Python 3.6, often LANG=C,
+    # where stdout is ASCII.  One UTF-8 name in a log, a process table, a
+    # host list or a remote command used to end the run -- and in resolve's
+    # case, to read a perfectly good resolv.conf as empty.
+    printf 'Jan  7 04:00:00 web01 sshd[1]: Failed password for caf\xc3\xa9\n' \
+        > "$TEST_TMPDIR/utf8.log"
+    printf 'web01  # caf\xc3\xa9 rack\nweb02\n' > "$TEST_TMPDIR/hosts.txt"
+    printf 'nameserver 10.0.0.53  # caf\xc3\xa9\n' > "$TEST_TMPDIR/resolv.conf"
+    printf 'host,elapsed_s,cpu_busy_pct\ncaf\xc3\xa9,1.0,95\ncaf\xc3\xa9,2.0,95\n' \
+        > "$TEST_TMPDIR/s.csv"
+
+    # A locale with no room for the byte.  This machine's Python coerces C
+    # to UTF-8 for free (PEP 538), so the coercion has to be defeated or
+    # the case proves nothing.
+    ascii_run() {
+        env PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 LC_ALL=C LANG=C "$@" 2>&1
+    }
+
+    out="$(ascii_run "$PY" "$BINNACLE_DIR/logtriage.py" "$TEST_TMPDIR/utf8.log")"
+    assert_not_contains "$out" "UnicodeEncodeError"
+    assert_contains "$out" "sshd"
+
+    out="$(ascii_run "$PY" "$BINNACLE_DIR/agree.py" hosts \
+             --hosts "$TEST_TMPDIR/hosts.txt")"
+    assert_not_contains "$out" "UnicodeDecodeError"
+    assert_contains "$out" "web01"
+
+    out="$(ascii_run "$PY" "$BINNACLE_DIR/reachable.py" \
+             "$TEST_TMPDIR/hosts.txt" --dry-run)"
+    assert_not_contains "$out" "UnicodeDecodeError"
+    assert_contains "$out" "web02"
+
+    out="$(ascii_run "$PY" "$BINNACLE_DIR/during.py" --from-samples \
+             "$TEST_TMPDIR/s.csv")"
+    assert_not_contains "$out" "UnicodeDecodeError"
+    assert_contains "$out" "VERDICT"
+
+    # resolve did not crash -- it read the file as empty and reported no
+    # resolvers at all, which is the worse failure of the two.
+    out="$(ascii_run "$PY" "$BINNACLE_DIR/resolve.py" --resolv-conf \
+             "$TEST_TMPDIR/resolv.conf" --timeout 0.2 --no-stub --quiet)"
+    assert_contains "$out" "1 resolver"
+    assert_not_contains "$out" "0 resolvers"
+}
+
 t_declared_copies_have_not_drifted() {
     # No module imports another -- each tool is scp'd to machines that have
     # never heard of this package -- so helpers are duplicated on purpose
@@ -254,6 +300,13 @@ VERBATIM = [
     ("read_meminfo", "why_slow.py", "during.py"),
     ("read_pressure", "why_slow.py", "during.py"),
     ("_read", "why_slow.py", "resolve.py"),
+    # Duplicated into all seven, so all seven are held to it.
+    ("_stdio_safe", "why_slow.py", "agree.py"),
+    ("_stdio_safe", "why_slow.py", "logtriage.py"),
+    ("_stdio_safe", "why_slow.py", "netmesh.py"),
+    ("_stdio_safe", "why_slow.py", "reachable.py"),
+    ("_stdio_safe", "why_slow.py", "resolve.py"),
+    ("_stdio_safe", "why_slow.py", "during.py"),
     ("expand_range", "agree.py", "reachable.py"),
     ("split_host_port", "agree.py", "reachable.py"),
     ("is_ipv6", "agree.py", "reachable.py"),
@@ -333,5 +386,6 @@ run_test "--fleet-csv is the two flags"         t_fleet_csv_is_the_two_flags_and
 run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one_csv_header
 run_test "every flag appears in --help"         t_every_flag_appears_in_its_tools_help
 run_test "declared copies have not drifted"     t_declared_copies_have_not_drifted
+run_test "a stray utf8 byte is survivable"      t_a_stray_utf8_byte_does_not_lose_the_run
 run_test "an unreachable host is a group"       t_an_unreachable_host_is_a_group_not_an_error
 finish
