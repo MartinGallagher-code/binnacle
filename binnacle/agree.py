@@ -13,7 +13,7 @@ Examples:
   agree.py -H web01,web02,db01 -- rpm -q openssl
   agree.py --hosts prod.txt -- 'sysctl net.core.somaxconn'
   agree.py --hosts 'node[01-24]' --loose -- uname -r
-  agree.py script ./why-slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
+  agree.py script ./why_slow.py --hosts prod.txt --fleet-csv -- --csv
 
 Options:
   --hosts FILE|SPEC   host list: a file, a range like node[01-24], or - for
@@ -24,8 +24,11 @@ Options:
   --user NAME         ssh user                                (AGREE_USER)
   --ssh CMD/--scp CMD transports                     (AGREE_SSH / AGREE_SCP)
   --sudo              prefix the command with `sudo -n`
+  --sudo-user NAME    sudo to this user rather than root
   --push FILE         copy FILE to each host first, repeatable
   --pull GLOB         copy matching files back afterwards
+  --pull-dir DIR      where pulled files land, one subdir per host (results)
+  --keep-remote       leave the pushed files behind instead of cleaning up
   --remote-dir DIR    where pushed files go           (AGREE_REMOTE_DIR)
   --first N           only the first N hosts -- the canary before the fleet
   --limit N           refuse to run wider than N hosts without --yes
@@ -41,7 +44,11 @@ Options:
 Normalization (outputs almost never match byte for byte):
   --loose             trim + squeeze-ws + mask-times + mask-hosts + numbers
   --strict            nothing at all: byte-exact comparison
+  --fleet-csv         mask-hosts + mask-times: what grouping the CSV these
+                      tools emit needs, since every row begins host,ts
   --trim              drop trailing whitespace                (on by default)
+  --no-trim           keep trailing whitespace
+  --no-strip-ansi     keep ANSI escapes instead of stripping them
   --squeeze-ws        collapse internal whitespace runs
   --sort-lines        order does not matter (rpm -qa, ls, ip addr)
   --ignore-case       case does not matter

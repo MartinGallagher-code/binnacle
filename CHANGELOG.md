@@ -108,6 +108,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Seven flags existed without appearing in their tool's `--help`**,
+  including `--fleet-csv` itself the moment it was added. Each tool's
+  `--help` prints its module docstring and the CLI reference is generated
+  from the live parsers, but nothing checked that the hand-written
+  docstring lists every flag the parser accepts — so a flag could work,
+  be documented on the site, and still be invisible to the person holding
+  the terminal. `agree --sudo-user/--pull-dir/--keep-remote/--no-trim/
+  --no-strip-ansi`, `logtriage --max-template-len` and `during --explain`
+  are now written down, and a test enforces it across every tool.
+  `netmesh` is exempt by its own wording — its docstring lists "common
+  options" and its `help` verb prints every flag of every verb — and the
+  test checks that escape hatch actually works.
+
 - **`^C` did not print `during`'s report if the command ignored it.** The
   run blocked in `wait()` until the wrapped command finished, so a
   benchmark that traps `SIGINT` — `make`, a JVM, most test harnesses —
