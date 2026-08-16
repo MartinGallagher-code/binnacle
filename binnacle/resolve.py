@@ -696,6 +696,18 @@ def collect_facts(args, names):
     return f
 
 
+DATA_SUFFIXES = ("csv", "json", "tsv", "txt", "out", "log", "dat", "tmp")
+
+
+def _looks_like_a_hostname(value):
+    """A dotted name with no path separator and no data-file suffix."""
+    if os.sep in value or value.startswith("."):
+        return False
+    if "." not in value:
+        return False
+    return value.rsplit(".", 1)[1].lower() not in DATA_SUFFIXES
+
+
 def _split_server(spec):
     """'10.0.0.53', '10.0.0.53:5353', '[::1]:5353' -> (addr, port)."""
     spec = spec.strip()
@@ -1493,6 +1505,18 @@ def main(argv=None):
         if t not in QTYPES:
             die("unknown record type %r (known: %s)"
                 % (t, ", ".join(sorted(QTYPES))))
+
+    # `resolve --csv db01.example.com` is the same trap: --csv takes an
+    # optional path, so it swallows the name and the run silently resolves
+    # nothing while writing a file called db01.example.com.  Only a value
+    # that reads as a hostname is refused -- report.csv and run.json are
+    # ordinary output paths and pass straight through.
+    for flag, value in (("--csv", args.csv), ("--json", args.json)):
+        if value and not args.names and _looks_like_a_hostname(value):
+            die("%s was given %r, which reads as a name rather than a file, "
+                "so nothing would be looked up.  The name comes first: "
+                "`%s %s %s`.  If it really is a filename, write it as "
+                "%s=./%s." % (flag, value, PROG, value, flag, flag, value))
 
     if args.from_facts:
         try:

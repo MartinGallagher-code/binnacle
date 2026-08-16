@@ -8,7 +8,8 @@ agree, 3 do not, here is the diff.
 ```bash
 agree -H 'node[01-24]' -- rpm -q openssl
 agree --hosts prod.txt --loose -- uname -r
-agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
+    --merge-csv triage.csv -- --csv
 agree hosts -H 'rack[a-c]-node[01-04]'      # expand without running anything
 agree doctor --hosts prod.txt               # can each host be reached and used?
 ```
@@ -82,7 +83,8 @@ documented, because it matters:
 3. `--head N` / `--tail N`
 4. `--field N`
 5. `--mask-hosts` — each host's own name and address → `%HOST%`
-6. `--mask-times` — timestamps → `<TS>`
+6. `--mask-times` — timestamps → `<TS>`, including bare epoch
+   seconds, which is what every binnacle tool stamps its CSV with
 7. `--scrub RE` (repeatable) → `%X%`
 8. `--mask-numbers` — every number → `#`
 9. `--ignore-case`
@@ -179,7 +181,8 @@ collects files after, and `agree script PATH` is the sugar for the whole
 cycle: push, `chmod +x`, run, collect, clean up.
 
 ```bash
-agree script ./why_slow.py --hosts prod.txt -- --csv --interval 2
+agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
+    -- --csv --interval 2
 ```
 
 This is the reason `agree` exists in the same distribution as the others.

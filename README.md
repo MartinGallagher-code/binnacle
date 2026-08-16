@@ -65,7 +65,8 @@ following that number is how an afternoon disappears into the wrong problem.
 reachable prod.txt -i
 
 # Fleet-wide triage: every box diagnosed, hosts grouped by what is wrong.
-agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
+    --merge-csv triage.csv -- --csv
 ```
 
 ```text
@@ -166,7 +167,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # seven suites, 122 checks
+bash tests/run_tests.sh          # eight suites, 133 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

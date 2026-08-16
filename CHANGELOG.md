@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`tests/test_compose.sh`** — the claim on the front page, actually run.
+  Real tools pushed to fake hosts through real `agree`, asserting that
+  hosts group by what is wrong with them, that `--merge-csv` keeps the
+  values masking hid, that the diagnostic tools share one CSV header, and
+  that a host which never answered is a group rather than a line on stderr.
+
 - **`during`** — a seventh instrument: *what limited this run, and can you
   trust the number?* The others diagnose an instant; this samples a whole
   window and answers what a point-in-time tool structurally cannot.
@@ -75,6 +81,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the CPU on a swapping box.
   - A healthy box now suggests `resolve` alongside `netmesh` and
     `logtriage`.
+
+### Fixed
+
+- **`agree --mask-hosts` masked substrings rather than names.** A host
+  called `sql` turned `%HOST%` up inside `postgresql`, and a host called `a`
+  turned every word containing an *a* into `%HOST%` — corrupting the
+  comparison it exists to enable, differently on each host, and so
+  manufacturing exactly the spurious groups it was meant to remove. It now
+  matches on word boundaries, and leaves single characters alone.
+- **`agree --mask-times` did not mask epoch seconds**, which is the one
+  timestamp every tool in this package stamps its CSV with. Two hosts
+  answering either side of a tick landed in different groups. Narrowed to
+  the 2001–2033 range so an ordinary ten-digit number is not silently
+  treated as a date.
+- **The documented fleet-triage command could not group hosts.**
+  `agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv --
+  --csv` was missing `--mask-hosts --mask-times`, and every row begins with
+  the machine's own name and an epoch — so every host became its own group
+  and the headline result in the README was unobtainable. Corrected
+  everywhere it appears, with the reason written down in
+  [Composing them](composing.md), and now covered by a test suite that runs
+  the real tools through real `agree`.
+- **`logtriage --csv /var/log/syslog` analysed nothing.** `--csv` takes an
+  optional path, so it swallowed the log and `logtriage` read stdin instead
+  — which under `ssh` or a pipeline is empty rather than a terminal, so the
+  help-on-no-input guard never fired. The failure now names the actual
+  mistake. The same trap in `resolve --csv db01.example.com` is refused
+  outright.
 
 ## [0.1.0] - 2026-08-15
 

@@ -293,7 +293,10 @@ def collect_hosts(args):
 # a pid is usually enough to make every host look unique.  These run in a
 # fixed order, and the active ones are always printed with the result.
 #
-# canonical copy of the timestamp table: scripts/logtriage.py TIME_MASKS
+# canonical copy of the timestamp table: binnacle/logtriage.py TIME_MASKS.
+# The epoch entry at the end of this one is deliberately *not* in the
+# canonical copy: logtriage's own number mask already covers it, and this
+# table needs it because every tool here stamps its CSV with an epoch.
 
 TIME_MASKS = [
     re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?"
@@ -302,6 +305,12 @@ TIME_MASKS = [
     re.compile(r"\[\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2} [+-]\d{4}\]"),
     re.compile(r"\[\s*\d+\.\d{6}\]"),
     re.compile(r"\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b"),
+    # Epoch seconds.  Every tool in this package stamps its CSV with one,
+    # and two hosts answering either side of a tick would otherwise land in
+    # different groups for no reason connected to what is wrong with them.
+    # Narrowed to the 1_000_000_000-1_999_999_999 range -- 2001 to 2033 --
+    # so an ordinary ten-digit number is not silently masked as a date.
+    re.compile(r"\b1\d{9}\b"),
 ]
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -357,9 +366,22 @@ def normalize(text, host, args):
     if args.mask_hosts and host is not None:
         # Per host, and before hashing: without this, anything that echoes
         # the machine's own name can never agree with anything.
-        for token in filter(None, {host.name, host.addr,
-                                   host.name.split(".")[0]}):
-            lines = [l.replace(token, "%HOST%") for l in lines]
+        #
+        # On word boundaries, never as a bare substring.  A plain replace
+        # turns a host called "sql" into %HOST% inside "postgresql" and a
+        # host called "a" into %HOST% inside every word containing an a --
+        # which corrupts the comparison instead of enabling it, and does so
+        # differently on each host, so it produces exactly the spurious
+        # groups it was meant to remove.  Single characters are left alone
+        # for the same reason: they appear in ordinary prose far more often
+        # than they appear as a hostname.
+        for token in sorted(filter(None, {host.name, host.addr,
+                                          host.name.split(".")[0]}),
+                            key=len, reverse=True):
+            if len(token) < 2:
+                continue
+            lines = [re.sub(r"\b%s\b" % re.escape(token), "%HOST%", l)
+                     for l in lines]
     if args.mask_times:
         for rx in TIME_MASKS:
             lines = [rx.sub("<TS>", l) for l in lines]

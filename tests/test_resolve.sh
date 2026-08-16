@@ -241,6 +241,22 @@ t_search_domains_cost_is_measured_not_assumed() {
     assert_contains "$out" "2 wasted queries"
 }
 
+t_csv_does_not_swallow_the_name() {
+    # `--csv NAME` is the trap that argparse sets with an optional-argument
+    # flag next to a positional: the name becomes the output path and the
+    # run silently resolves nothing.
+    set +e
+    out="$(rs --csv db01.example.com 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "reads as a name rather than a file"
+    assert_no_file "db01.example.com"
+    # An ordinary output path is still an output path.
+    resolve_facts_json "$TEST_TMPDIR/f.json"
+    rs --from-facts "$TEST_TMPDIR/f.json" --csv "$TEST_TMPDIR/out.csv"
+    assert_file_exists "$TEST_TMPDIR/out.csv"
+}
+
 echo "resolve"
 run_test "healthy dns says so"                 t_healthy_dns_says_so
 run_test "dead resolver outranks its slowness" t_dead_first_resolver_outranks_the_slowness_it_causes
@@ -263,4 +279,5 @@ run_test "record order is not disagreement"    t_record_order_is_not_disagreemen
 run_test "a dropped AAAA is a black hole"      t_a_dropped_aaaa_is_a_black_hole_not_a_missing_record
 run_test "truncation with no tcp reported"     t_truncation_with_no_tcp_is_reported
 run_test "search cost is measured"             t_search_domains_cost_is_measured_not_assumed
+run_test "--csv does not swallow the name"     t_csv_does_not_swallow_the_name
 finish
