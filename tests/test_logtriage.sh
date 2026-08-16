@@ -181,7 +181,42 @@ run_test "tracebacks collapse to one"         t_tracebacks_collapse_to_one_templ
 run_test "multiline off shatters them"        t_multiline_off_shatters_it
 run_test "--split-at sharpens novelty"        t_split_at_sharpens_novelty
 run_test "saved digest works as a baseline"   t_baseline_file_marks_known_templates
+
+t_new_years_eve_does_not_reverse_the_log() {
+    # Syslog lines carry no year, and a log crosses New Year's Eve every
+    # year it survives long enough.  Stamping every line with the file's
+    # year put "Dec 31" eleven months into the future: the span printed
+    # backwards, the midnight incident fell into the baseline, and a
+    # routine heartbeat outranked it.
+    {
+        for m in 50 51 52 53 54 55 56 57 58 59; do
+            echo "Dec 31 23:${m}:00 web01 app[1]: routine heartbeat ok"
+        done
+        echo "Jan  1 00:00:01 web01 app[1]: error: payment gateway unreachable"
+        echo "Jan  1 00:00:02 web01 app[1]: error: payment gateway unreachable"
+        echo "Jan  1 00:00:03 web01 app[1]: error: payment gateway unreachable"
+    } > "$TEST_TMPDIR/newyear.log"
+    # The mtime is the anchor: the file was last written just after
+    # midnight, so its December lines belong to the year before.
+    touch -d "2026-01-01 00:10" "$TEST_TMPDIR/newyear.log"
+
+    out="$(lt "$TEST_TMPDIR/newyear.log")"
+    # the span runs forward through midnight, not eleven months backwards
+    assert_contains "$out" "23:50:00 -> 00:00:03"
+    # and the incident outranks the heartbeat
+    first_ranked="$(printf '%s\n' "$out" | grep -m1 '#1' -A 1 | tail -1)"
+    assert_contains "$first_ranked" "payment gateway"
+
+    # The absolute year matters too: relative order can be repaired while
+    # every December line still sits in the wrong year.  The mtime is the
+    # anchor, so December belongs to the year before it.
+    dec_epoch="$(lt "$TEST_TMPDIR/newyear.log" --csv \
+                   | awk -F, '/heartbeat/ {print $5}')"
+    assert_eq "$(date -d "@$dec_epoch" +%Y)" "2025"
+}
+
 run_test "eviction is reported, not silent"   t_eviction_is_reported_not_silent
 run_test "reads stdin and gzip"               t_reads_stdin_and_gzip
 run_test "no timestamps degrades cleanly"     t_no_timestamps_falls_back_to_line_numbers
+run_test "new year does not reverse the log"  t_new_years_eve_does_not_reverse_the_log
 finish

@@ -629,16 +629,45 @@ def expand_inputs(paths):
     return out
 
 
-def file_year(path):
+def file_mtime(path):
     try:
-        return datetime.fromtimestamp(os.path.getmtime(path)).year
-    except (OSError, ValueError):
+        return os.path.getmtime(path)
+    except OSError:
         return None
+
+
+def _shift_year(ts, delta):
+    dt = datetime.fromtimestamp(ts)
+    try:
+        return time.mktime(dt.replace(year=dt.year + delta).timetuple())
+    except ValueError:          # Feb 29 shifted into a non-leap year
+        return ts + delta * 31536000
+
+
+def _unroll_year(ts, anchor, prev_ts):
+    """Put a yearless syslog timestamp in the right year.
+
+    Syslog lines carry no year, and one file crosses New Year's Eve every
+    year it survives long enough.  Stamping every line with the file's
+    year put "Dec 31" eleven months into the future, which reversed the
+    span, dropped the midnight incident into the baseline, and ranked a
+    routine heartbeat above it.  Two facts pin the year down: no line can
+    be written after the file's last write (so anything "later" than
+    mtime belongs to the year before), and a jump half a year backwards
+    between adjacent lines is a rollover, not time travel.
+    """
+    if anchor is not None and ts > anchor + 172800:      # 2 days of skew
+        ts = _shift_year(ts, -1)
+    if prev_ts is not None and ts < prev_ts - 15552000:  # ~180 days
+        ts = _shift_year(ts, 1)
+    return ts
 
 
 def feed(counter, paths, args):
     for path in paths:
-        year = file_year(path) if path != "-" else None
+        anchor = file_mtime(path) if path != "-" else time.time()
+        year = datetime.fromtimestamp(anchor).year if anchor else None
+        prev_syslog_ts = None
         try:
             fh = open_any(path)
         except OSError as exc:
@@ -662,6 +691,9 @@ def feed(counter, paths, args):
                     pending_raw = None
                     continue
                 ts, _host, prog, _pid, msg, fmt = parsed
+                if fmt == "syslog" and ts is not None:
+                    ts = _unroll_year(ts, anchor, prev_syslog_ts)
+                    prev_syslog_ts = ts
                 counter.formats[fmt] = counter.formats.get(fmt, 0) + 1
                 if args.multiline == "auto":
                     pending_ts, pending_prog, pending_raw = ts, prog, msg
