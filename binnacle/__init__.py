@@ -3,13 +3,15 @@
 """binnacle -- instruments for Linux boxes, fleets and the networks between.
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds five:
+one holds seven:
 
     why-slow    why is this box slow?
     agree       which hosts in this fleet disagree with the rest?
     logtriage   which ten lines of this log matter?
     netmesh     is it the network, and which link is sick?
     reachable   which entries in this server list are still real?
+    resolve     is it DNS, and which resolver is wrong?
+    during      what limited this run, and can you trust the number?
 
 Each is a complete standalone program with no imports from its siblings and
 no dependencies beyond the standard library, because they are routinely
@@ -30,4 +32,6 @@ TOOLS = {
     "logtriage": "which ten lines of this log matter?",
     "netmesh": "is it the network, and which link is sick?",
     "reachable": "which entries in this server list are still real?",
+    "resolve": "is it DNS, and which resolver is wrong?",
+    "during": "what limited this run, and can you trust the number?",
 }

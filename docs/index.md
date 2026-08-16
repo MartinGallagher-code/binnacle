@@ -1,7 +1,7 @@
 # binnacle
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds five, for Linux boxes, the fleets they belong to, and the networks
+one holds seven, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 ```{toctree}
@@ -21,6 +21,8 @@ tools/agree
 tools/logtriage
 tools/netmesh
 tools/reachable
+tools/resolve
+tools/during
 ```
 
 ```{toctree}
@@ -33,7 +35,7 @@ changelog
 publishing
 ```
 
-## The five
+## The seven
 
 | Tool | The question it answers |
 |---|---|
@@ -42,6 +44,8 @@ publishing
 | [`logtriage`](tools/logtriage.md) | Which ten lines of this log matter? |
 | [`netmesh`](tools/netmesh.md) | Is it the network, and which link is sick? |
 | [`reachable`](tools/reachable.md) | Which entries in this server list are still real? |
+| [`resolve`](tools/resolve.md) | Is it DNS, and which resolver is wrong? |
+| [`during`](tools/during.md) | What limited this run, and can I trust the number? |
 
 ## Diagnose, don't dump
 
@@ -75,7 +79,7 @@ into the wrong problem. Causes outrank symptoms, deliberately.
 
 ## They compose
 
-The reason to have five rather than any one of them:
+The reason to have seven rather than any one of them:
 
 ```bash
 # Prune the list first, so the fan-out is not half wasted on dead entries.
@@ -87,7 +91,13 @@ agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
 # The same trick for logs -- hosts grouped by which templates they emit.
 agree script ./logtriage.py --hosts prod.txt -- --csv /var/log/syslog
 
-# why-slow says the box is fine, so ask whether the network is.
+# why-slow says the box is fine, so ask whether it is DNS.
+resolve db01.example.com
+
+# Benchmarking rather than firefighting: what limited the run?
+during -- ./benchmark.sh
+
+# ...and then whether it is the network.
 netmesh check web01 db01
 ```
 

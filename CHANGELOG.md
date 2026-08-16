@@ -6,6 +6,76 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`during`** — a seventh instrument: *what limited this run, and can you
+  trust the number?* The others diagnose an instant; this samples a whole
+  window and answers what a point-in-time tool structurally cannot.
+  - Every sample is classified into **exactly one** state — cpu, one core,
+    io, memory, network, throttled, stolen, or not bound — so the shares add
+    up and "bound by two things at once" cannot be reported.
+  - **"This box was not the bottleneck"** is a first-class finding: nothing
+    near a ceiling means the limit was the load generator, the peer, or a
+    lock inside the application.
+  - **`one core` is its own state.** A serialised benchmark pins one core
+    and leaves an eight-core box reading 12% busy, which every whole-box
+    average calls idle — and the usual next step is a bigger instance that
+    changes nothing.
+  - **Trust outranks attribution.** Warmup, an interloping process, a
+    falling clock, an exhausted burst balance, steal and instability all
+    rank above the bottleneck in the verdict, because a bottleneck
+    attributed from an invalid run is a confident wrong answer.
+  - The wrapped command's output and exit status pass straight through, so
+    `during -- make bench` is a drop-in prefix; its process tree is excluded
+    from interloper detection, re-derived every sample so forked workers
+    still count as the benchmark. `^C` still prints the report.
+  - `--samples` writes the raw tidy series; `--csv` writes findings with
+    why-slow's header; `--from-samples` re-runs the whole analysis over a
+    saved series, which is how it is tested; `--baseline` compares two runs.
+
+- **`resolve`** — a sixth instrument: *is it DNS, and which resolver is
+  wrong?* Queries every configured nameserver directly on the wire rather
+  than through the stub, because the stub is what hides the fault.
+  - **A dead resolver earlier in the list outranks the latency it causes.**
+    A box whose first nameserver is dead resolves everything correctly and
+    slowly for ever, and every `dig` against the working server says DNS is
+    fine — the fault is invisible to any tool that asks one question.
+  - Answers are compared across resolvers to catch split horizon and stale
+    caches, **sorted**, so a resolver rotating records round-robin is never
+    mistaken for a disagreement.
+  - The search-domain cost is measured by walking the list and counting the
+    NXDOMAINs, not inferred from `ndots`; `getaddrinfo` is timed alongside,
+    and the gap between it and the fastest resolver is the cost of the
+    configuration rather than of the network.
+  - A local stub (`127.0.0.53`) is named as one, because timing it says
+    nothing about the upstreams behind it.
+  - DNS packets are built and parsed in-module — no `dig`, standard library
+    only. Replies whose id or question does not match are discarded rather
+    than counted, and query ids come from `os.urandom`.
+  - Thirteen rules, `--csv` with the same header as `why-slow` so `agree
+    --merge-csv` stacks them, plus `--rules`, `--explain`, `--facts` and
+    `--from-facts`.
+
+### Changed
+
+- **`why-slow`** now runs 30 rules rather than 23. The seven new ones
+  measure **ceilings rather than rates**: `CONNTRACK_FULL`,
+  `FD_EXHAUSTION`, `PID_EXHAUSTION`, `CGROUP_PIDS`, `EPHEMERAL_PORTS`,
+  `ARP_TABLE_FULL`, and `LIMIT_HITS`.
+  - A box can be idle and still refusing work. These limits have no
+    gradient to watch — they work until abruptly they do not — so they are
+    reported as ratios against their ceilings before the wall is reached,
+    and an `EVIDENCE` line shows every ratio whether or not a rule fired.
+  - `LIMIT_HITS` reads the kernel log for a table that has *already*
+    overflowed, and ranks with `OOM_KILLS`: the table has drained since, so
+    every ratio measured now looks healthy and only that line survives.
+  - The exhaustion rules sit above the network symptoms they cause in the
+    verdict precedence — a full conntrack table produces the drops and
+    retransmits, so naming the drops would be the same mistake as naming
+    the CPU on a swapping box.
+  - A healthy box now suggests `resolve` alongside `netmesh` and
+    `logtriage`.
+
 ## [0.1.0] - 2026-08-15
 
 First release. Five single-file, dependency-free diagnostics, packaged

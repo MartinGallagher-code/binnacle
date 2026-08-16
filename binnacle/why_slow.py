@@ -35,13 +35,22 @@ What it does
   what they mean, which is the part that takes experience.  It samples
   /proc twice a couple of seconds apart, adds the things that are only
   visible once (the kernel log, cgroup limits, filesystem fullness), runs
-  about twenty rules over the result, and prints the highest-severity
+  about thirty rules over the result, and prints the highest-severity
   finding as a verdict with the exact command to run next.
 
   The rules are ordered by cause, not by symptom.  A box that is swapping
   also looks CPU-busy, and reporting the CPU is how people spend an hour
   tuning the wrong thing -- so swap thrashing and disk errors outrank CPU
   saturation in the verdict even when the CPU number is larger.
+
+  Slow is not the only way a box fails.  It can be idle and still refusing
+  work because a kernel table is full: conntrack, file descriptors, task
+  slots, the ephemeral port range, the neighbour table.  Those have no
+  gradient to watch -- they work until abruptly they do not -- so they are
+  measured as ratios against their ceilings and reported before the wall,
+  and the kernel log is searched for the moment one was actually hit,
+  because a table that overflowed an hour ago has since drained and no
+  ratio measured now will show it.
 
 Robustness properties
   * a fact that could not be measured is None, never 0, and any rule that
@@ -333,7 +342,8 @@ def read_cgroup():
     """cgroup v2 first, then v1.  Inside a container these paths are the
     container's own limits, which is exactly what we want."""
     cg = {"v": None, "mem_max": None, "mem_current": None, "mem_events_max": 0,
-          "cpu_quota_cores": None, "nr_periods": None, "nr_throttled": None}
+          "cpu_quota_cores": None, "nr_periods": None, "nr_throttled": None,
+          "pids_current": None, "pids_max": None}
     base = os.path.join(SYS, "fs", "cgroup")
     if os.path.exists(os.path.join(base, "cgroup.controllers")) or \
             os.path.exists(os.path.join(base, "memory.max")):
@@ -355,6 +365,8 @@ def read_cgroup():
             m = re.search(r"^%s (\d+)" % key, stat, re.M)
             if m:
                 cg[key] = int(m.group(1))
+        cg["pids_current"] = _read_int(os.path.join(base, "pids.current"))
+        cg["pids_max"] = _read_int(os.path.join(base, "pids.max"))
     else:
         mem = os.path.join(base, "memory")
         cpu = os.path.join(base, "cpu")
@@ -377,6 +389,13 @@ def read_cgroup():
                 m = re.search(r"^%s (\d+)" % key, stat, re.M)
                 if m:
                     cg[key] = int(m.group(1))
+        pids = os.path.join(base, "pids")
+        if os.path.isdir(pids):
+            cg["v"] = cg["v"] or 1
+            cg["pids_current"] = _read_int(os.path.join(pids, "pids.current"))
+            # v1 writes the literal "max" for no limit, which _read_int
+            # already turns into None rather than a number.
+            cg["pids_max"] = _read_int(os.path.join(pids, "pids.max"))
     return cg
 
 
@@ -444,6 +463,16 @@ KERNEL_PATTERNS = {
     "throttle": re.compile(
         r"temperature above threshold|clock throttled|"
         r"CPU\d+: Core temperature|thermal throttling", re.I),
+    # A ceiling that was hit an hour ago is invisible to any ratio measured
+    # now -- the table drains, the counter does not stay pinned, and the
+    # only surviving evidence is the line the kernel wrote at the time.
+    "limit": re.compile(
+        r"nf_conntrack: table full, dropping packet|"
+        r"neighbou?r table overflow|"
+        r"VFS: file-max limit \d+ reached|"
+        r"Out of socket memory|TCP: out of memory|"
+        r"Possible SYN flooding on port \d+|"
+        r"cgroup: fork rejected by pids controller", re.I),
 }
 
 
@@ -476,9 +505,10 @@ def read_kernel_log(boot_window):
                 break
     if text is None:
         return None
-    found = {"oom": [], "io_error": [], "throttle": [], "source": source}
+    found = {"oom": [], "io_error": [], "throttle": [], "limit": [],
+             "source": source}
     for line in text.splitlines():
-        for key in ("oom", "io_error", "throttle"):
+        for key in ("oom", "io_error", "throttle", "limit"):
             if KERNEL_PATTERNS[key].search(line):
                 found[key].append(line.strip()[:200])
     return found
@@ -495,6 +525,70 @@ def read_failed_units():
         if parts:
             units.append(parts[0])
     return units
+
+
+def read_limits():
+    """Kernel tables and the ceilings they are measured against.
+
+    These are hard edges rather than gradients: below the limit everything
+    works and above it the kernel refuses outright, so each is read as a
+    pair (in use, ceiling) and judged as a ratio.  A box sitting at 95% of
+    its conntrack table is not slow -- it is about to start dropping
+    packets while every rate in this report still looks healthy.
+    """
+    lim = {"fd_used": None, "fd_max": None, "tasks": None, "pid_max": None,
+           "conntrack": None, "conntrack_max": None, "tw": None,
+           "ephemeral": None, "arp": None, "arp_max": None}
+
+    # file-nr is "allocated free max"; on every kernel since 2.6 the middle
+    # field is 0, so the first is the count actually in use.
+    nr = (_read(os.path.join(PROC, "sys", "fs", "file-nr")) or "").split()
+    if len(nr) >= 3:
+        try:
+            lim["fd_used"], lim["fd_max"] = int(nr[0]), int(nr[2])
+        except ValueError:
+            pass
+
+    # The fourth loadavg field is running/total *tasks*, and tasks is what
+    # pid_max actually limits -- a threaded process consumes many.
+    la = (_read(os.path.join(PROC, "loadavg")) or "").split()
+    if len(la) >= 4 and "/" in la[3]:
+        try:
+            lim["tasks"] = int(la[3].split("/")[1])
+        except ValueError:
+            pass
+    lim["pid_max"] = _read_int(os.path.join(PROC, "sys", "kernel", "pid_max"))
+
+    # Absent unless connection tracking is loaded, which is the common case
+    # on a box with no firewall -- absence is "no table", not "empty table".
+    lim["conntrack"] = _read_int(os.path.join(
+        PROC, "sys", "net", "netfilter", "nf_conntrack_count"))
+    for path in (("sys", "net", "netfilter", "nf_conntrack_max"),
+                 ("sys", "net", "nf_conntrack_max")):
+        lim["conntrack_max"] = _read_int(os.path.join(PROC, *path))
+        if lim["conntrack_max"]:
+            break
+
+    # TIME_WAIT sockets hold an ephemeral port for a minute after close, so
+    # this is what exhausts the range on a busy outbound client.
+    sock = _read(os.path.join(PROC, "net", "sockstat")) or ""
+    m = re.search(r"^TCP:.*\btw (\d+)", sock, re.M)
+    if m:
+        lim["tw"] = int(m.group(1))
+    rng = (_read(os.path.join(PROC, "sys", "net", "ipv4",
+                              "ip_local_port_range")) or "").split()
+    if len(rng) == 2:
+        try:
+            lim["ephemeral"] = int(rng[1]) - int(rng[0]) + 1
+        except ValueError:
+            pass
+
+    arp = _read(os.path.join(PROC, "net", "arp"))
+    if arp is not None:
+        lim["arp"] = max(0, len(arp.splitlines()) - 1)   # minus the header
+    lim["arp_max"] = _read_int(os.path.join(
+        PROC, "sys", "net", "ipv4", "neigh", "default", "gc_thresh3"))
+    return lim
 
 
 def read_thermal():
@@ -741,6 +835,26 @@ def collect_facts(interval, top_n, boot_window):
     f["cg.throttled_pct"] = None
     if cg["nr_periods"]:
         f["cg.throttled_pct"] = (cg["nr_throttled"] or 0) * 100.0 / cg["nr_periods"]
+    f["cg.pids_current"] = cg["pids_current"]
+    f["cg.pids_max"] = cg["pids_max"]
+    f["cg.pids_pct"] = None
+    if cg["pids_max"] and cg["pids_current"] is not None:
+        f["cg.pids_pct"] = cg["pids_current"] * 100.0 / cg["pids_max"]
+
+    # --- kernel tables and their ceilings ---
+    lim = read_limits()
+    for key in ("fd_used", "fd_max", "tasks", "pid_max", "conntrack",
+                "conntrack_max", "tw", "ephemeral", "arp", "arp_max"):
+        f["lim." + key] = lim[key]
+    for pct, used, ceiling in (("lim.fd_pct", "fd_used", "fd_max"),
+                               ("lim.pid_pct", "tasks", "pid_max"),
+                               ("lim.conntrack_pct", "conntrack",
+                                "conntrack_max"),
+                               ("lim.ephemeral_pct", "tw", "ephemeral"),
+                               ("lim.arp_pct", "arp", "arp_max")):
+        f[pct] = None
+        if lim[used] is not None and lim[ceiling]:
+            f[pct] = lim[used] * 100.0 / lim[ceiling]
 
     # --- kernel log, units, thermal ---
     klog = read_kernel_log(boot_window)
@@ -749,6 +863,7 @@ def collect_facts(interval, top_n, boot_window):
     f["kern.oom"] = klog["oom"] if klog else None
     f["kern.io_errors"] = klog["io_error"] if klog else None
     f["kern.throttle"] = klog["throttle"] if klog else None
+    f["kern.limit_hits"] = klog["limit"] if klog else None
 
     units = read_failed_units()
     f["sys.failed_units"] = units
@@ -794,7 +909,17 @@ MISSING_REASONS = {
     "kern.io_errors": "kernel log unreadable -- rerun with sudo to check for "
                       "OOM kills and I/O errors",
     "kern.throttle": "kernel log unreadable -- rerun with sudo",
+    "kern.limit_hits": "kernel log unreadable -- rerun with sudo to see "
+                       "whether a kernel table has already overflowed",
     "sys.failed_units": "systemctl unavailable (not systemd, or --no-exec)",
+    "lim.fd_pct": "no /proc/sys/fs/file-nr on this machine",
+    "lim.pid_pct": "no task count or pid_max -- /proc/loadavg or "
+                   "/proc/sys/kernel/pid_max unreadable",
+    "lim.conntrack_pct": "no conntrack table here -- connection tracking is "
+                         "not loaded, so there is nothing to fill",
+    "lim.ephemeral_pct": "no /proc/net/sockstat or local port range",
+    "lim.arp_pct": "no /proc/net/arp or neighbour gc_thresh3 here",
+    "cg.pids_pct": "not in a task-limited cgroup",
     "cg.mem_pct": "not in a memory-limited cgroup",
     "cg.throttled_pct": "not in a CPU-limited cgroup",
     "cg.cpu_quota_cores": "not in a CPU-limited cgroup",
@@ -1450,15 +1575,232 @@ def _entropy():
 
 
 # ---------------------------------------------------------------------------
+# Ceilings rather than rates
+# ---------------------------------------------------------------------------
+#
+# Everything above this point measures how hard the box is working.  The
+# rules below measure how close it is to a wall, which is a different
+# failure and reads nothing like slowness: the load is normal, the disks
+# are quiet, memory is fine, and connections are being refused anyway.
+# Each is a ratio against a kernel ceiling, because below the ceiling there
+# is no gradient to see -- it works, until abruptly it does not.
+
+# 24 -----------------------------------------------------------------------
+@rule("LIMIT_HITS", "a kernel limit was actually hit", ("kern.limit_hits",),
+      "A table that filled an hour ago is invisible to any ratio measured "
+      "now: it drains, and the only evidence left is the line the kernel "
+      "wrote at the time.")
+def _limit_hits():
+    def level(f):
+        return CRITICAL if f["kern.limit_hits"] else None
+
+    def say(f):
+        n = len(f["kern.limit_hits"])
+        return ("%d line%s in the kernel log where a limit was reached"
+                % (n, "" if n == 1 else "s"))
+
+    def fix(f):
+        return ("The kernel has already refused work here -- most recent: "
+                "%s.  Whatever failed at that moment failed for this reason "
+                "and not the one in its own logs.  The ratios below are "
+                "measured now and will look healthy if the table has since "
+                "drained, so trust this line over them."
+                % f["kern.limit_hits"][-1][:160])
+    return level, say, fix
+
+
+# 25 -----------------------------------------------------------------------
+@rule("CONNTRACK_FULL", "connection tracking table filling",
+      ("lim.conntrack_pct",),
+      "A full conntrack table makes the kernel drop new connections while "
+      "every rate on the box still looks healthy, and the only symptom is "
+      "clients timing out.")
+def _conntrack_full():
+    def level(f):
+        if f["lim.conntrack_pct"] >= 90:
+            return CRITICAL
+        if f["lim.conntrack_pct"] >= 75:
+            return WARN
+        return None
+
+    def say(f):
+        return ("%d of %d conntrack entries in use (%.0f%%)"
+                % (_g(f, "lim.conntrack", 0), _g(f, "lim.conntrack_max", 0),
+                   f["lim.conntrack_pct"]))
+
+    def fix(f):
+        return ("At the ceiling the kernel drops new connections and logs "
+                "'nf_conntrack: table full' -- clients see timeouts and your "
+                "application logs show nothing at all.  Raise "
+                "net.netfilter.nf_conntrack_max (and nf_conntrack_buckets "
+                "with it, or the hash degrades into a list), or shorten "
+                "nf_conntrack_tcp_timeout_established, which is 5 days by "
+                "default and is why the table fills with connections that "
+                "ended long ago.")
+    return level, say, fix
+
+
+# 26 -----------------------------------------------------------------------
+@rule("FD_EXHAUSTION", "file descriptors running out",
+      ("lim.fd_pct",),
+      "Out of descriptors, every accept() and open() fails at once, across "
+      "every process on the box, and the errors name the victim rather than "
+      "the cause.")
+def _fd_exhaustion():
+    def level(f):
+        if f["lim.fd_pct"] >= 90:
+            return CRITICAL
+        if f["lim.fd_pct"] >= 75:
+            return WARN
+        return None
+
+    def say(f):
+        return ("%d of %d file descriptors allocated system-wide (%.0f%%)"
+                % (_g(f, "lim.fd_used", 0), _g(f, "lim.fd_max", 0),
+                   f["lim.fd_pct"]))
+
+    def fix(f):
+        return ("Raise fs.file-max for the box, but check the per-process "
+                "limit first: it is far more often the binding one, and it "
+                "fails identically.  `cat /proc/<pid>/limits | grep files` "
+                "for the process that is failing, then LimitNOFILE= in its "
+                "unit -- ulimit in a shell profile does not reach a systemd "
+                "service.")
+    return level, say, fix
+
+
+# 27 -----------------------------------------------------------------------
+@rule("PID_EXHAUSTION", "task table running out",
+      ("lim.pid_pct",),
+      "At pid_max, fork() fails for everything including the shell you "
+      "would use to fix it, so this is worth seeing while it is still a "
+      "ratio.")
+def _pid_exhaustion():
+    def level(f):
+        if f["lim.pid_pct"] >= 90:
+            return CRITICAL
+        if f["lim.pid_pct"] >= 75:
+            return WARN
+        return None
+
+    def say(f):
+        return ("%d tasks against a pid_max of %d (%.0f%%)"
+                % (_g(f, "lim.tasks", 0), _g(f, "lim.pid_max", 0),
+                   f["lim.pid_pct"]))
+
+    def fix(f):
+        return ("Threads count here, not just processes, so this is usually "
+                "one runtime with an unbounded pool rather than a fork loop. "
+                " `ps -eLf | awk '{print $1}' | sort | uniq -c | sort -n | "
+                "tail` names the owner.  Raising kernel.pid_max buys room; "
+                "it does not fix a pool with no ceiling.")
+    return level, say, fix
+
+
+# 28 -----------------------------------------------------------------------
+@rule("CGROUP_PIDS", "at your cgroup task limit", ("cg.pids_pct",),
+      "A container at its own TasksMax cannot fork while the host has "
+      "thousands of free slots -- the host's numbers say nothing about it.")
+def _cgroup_pids():
+    def level(f):
+        if f["cg.pids_pct"] >= 95:
+            return CRITICAL
+        if f["cg.pids_pct"] >= 85:
+            return WARN
+        return None
+
+    def say(f):
+        return ("this cgroup holds %d of its %d permitted tasks (%.0f%%)"
+                % (_g(f, "cg.pids_current", 0), _g(f, "cg.pids_max", 0),
+                   f["cg.pids_pct"]))
+
+    def fix(f):
+        return ("At the limit every fork fails with 'Resource temporarily "
+                "unavailable' -- which reads as a memory problem and is not. "
+                " Raise TasksMax= on the unit, --pids-limit on docker, or "
+                "pids.max on the cgroup directly.  The host being fine is "
+                "not evidence against this.")
+    return level, say, fix
+
+
+# 29 -----------------------------------------------------------------------
+@rule("EPHEMERAL_PORTS", "ephemeral ports running out",
+      ("lim.ephemeral_pct",),
+      "A client that has consumed its local port range cannot open an "
+      "outbound connection at all, and the failure surfaces as 'cannot "
+      "assign requested address' rather than anything about ports.")
+def _ephemeral_ports():
+    def level(f):
+        if f["lim.ephemeral_pct"] >= 90:
+            return CRITICAL
+        if f["lim.ephemeral_pct"] >= 70:
+            return WARN
+        return None
+
+    def say(f):
+        return ("%d sockets in TIME_WAIT against a local port range of %d "
+                "(%.0f%%)" % (_g(f, "lim.tw", 0), _g(f, "lim.ephemeral", 0),
+                              f["lim.ephemeral_pct"]))
+
+    def fix(f):
+        return ("Every closed outbound connection holds its port for a "
+                "minute, so this is a connection *rate* problem wearing a "
+                "capacity mask -- almost always a client that opens a fresh "
+                "connection per request.  Turn on keepalive or pooling in "
+                "that client, widen net.ipv4.ip_local_port_range, and set "
+                "net.ipv4.tcp_tw_reuse=1.  Do not reach for tcp_tw_recycle: "
+                "it breaks NAT and was removed in 4.12.")
+    return level, say, fix
+
+
+# 30 -----------------------------------------------------------------------
+@rule("ARP_TABLE_FULL", "neighbour table filling", ("lim.arp_pct",),
+      "Past gc_thresh3 the kernel drops entries it still needs, so hosts on "
+      "the local network become intermittently unreachable in a pattern "
+      "that looks exactly like a flapping switch.")
+def _arp_table():
+    def level(f):
+        if f["lim.arp_pct"] >= 90:
+            return CRITICAL
+        if f["lim.arp_pct"] >= 75:
+            return WARN
+        return None
+
+    def say(f):
+        return ("%d neighbour entries against a gc_thresh3 of %d (%.0f%%)"
+                % (_g(f, "lim.arp", 0), _g(f, "lim.arp_max", 0),
+                   f["lim.arp_pct"]))
+
+    def fix(f):
+        return ("The default ceiling is 1024, which a flat /16 or a busy "
+                "container host passes without anything being wrong.  Raise "
+                "net.ipv4.neigh.default.gc_thresh1/2/3 together -- raising "
+                "only gc_thresh3 leaves the garbage collector working "
+                "against you.  The symptom is intermittent unreachability "
+                "that looks like a network fault, so check this before "
+                "blaming the switch.")
+    return level, say, fix
+
+
+# ---------------------------------------------------------------------------
 # Running the rules
 # ---------------------------------------------------------------------------
 
 # A swapping box also looks CPU-busy, and a box with dying disks also looks
 # I/O-bound.  Reporting the symptom over the cause is the exact failure this
 # tool exists to prevent, so causes are pulled to the front of the verdict.
+#
+# The exhaustion rules sit above the network symptoms they cause and below
+# the memory ones that cause them: a full conntrack table produces drops
+# and retransmits, so naming the drops would be the same mistake as naming
+# the CPU on a swapping box.  LIMIT_HITS ranks with OOM_KILLS because both
+# are the kernel reporting that it already refused work, which outranks any
+# ratio measured afterwards.
 VERDICT_PRECEDENCE = [
-    "IO_ERRORS", "OOM_KILLS", "SWAP_THRASH", "MEM_EXHAUSTED", "CGROUP_MEM",
-    "FS_FULL", "FS_INODES", "CPU_STEAL", "DISK_SATURATED", "IO_STALL",
+    "IO_ERRORS", "OOM_KILLS", "LIMIT_HITS", "SWAP_THRASH", "MEM_EXHAUSTED",
+    "CGROUP_MEM", "FS_FULL", "FS_INODES", "CONNTRACK_FULL", "FD_EXHAUSTION",
+    "PID_EXHAUSTION", "CGROUP_PIDS", "EPHEMERAL_PORTS", "ARP_TABLE_FULL",
+    "CPU_STEAL", "DISK_SATURATED", "IO_STALL",
     "DSTATE_PROCS", "CGROUP_THROTTLED", "NET_DROPS", "LISTEN_OVERFLOW",
     "TCP_RETRANS", "CPU_SATURATED", "PSI_CPU", "FORK_STORM",
     "THERMAL_THROTTLE", "CPU_QUOTA_VS_NPROC", "SYSTEMD_FAILED",
@@ -1525,6 +1867,31 @@ def verdict_line(findings, facts):
                    "everywhere until it is not.",
         "CGROUP_THROTTLED": "This cgroup is being throttled against its CPU "
                             "quota, which is why it stalls on an idle box.",
+        # These read differently from everything above: the box is not slow,
+        # it is refusing.  Saying so plainly stops the reader from going
+        # looking for a bottleneck that is not there.
+        "LIMIT_HITS": "The kernel has already refused work on this box "
+                      "because a table was full.  Whatever failed at that "
+                      "moment failed for that reason, not the one in its "
+                      "own logs.",
+        "CONNTRACK_FULL": "This box is running out of connection tracking "
+                          "entries.  It is not slow -- past the ceiling it "
+                          "silently drops new connections.",
+        "FD_EXHAUSTION": "This box is running out of file descriptors.  "
+                         "Nothing here is overloaded; it is about to start "
+                         "failing every open() and accept() at once.",
+        "PID_EXHAUSTION": "This box is running out of task slots.  At the "
+                          "limit fork() fails for everything, including the "
+                          "shell you would fix it from.",
+        "CGROUP_PIDS": "This container is at its own task limit.  The host "
+                       "has slots free; that is not the constraint you are "
+                       "hitting.",
+        "EPHEMERAL_PORTS": "This box is running out of local ports for "
+                           "outbound connections.  It is a connection rate "
+                           "problem wearing a capacity mask.",
+        "ARP_TABLE_FULL": "The neighbour table is filling, so hosts on the "
+                          "local network will drop in and out in a way that "
+                          "looks exactly like a flapping switch.",
     }
     return consequences.get(top.rule.id,
                             "%s: %s" % (top.rule.title.capitalize(), top.say))
@@ -1630,6 +1997,18 @@ def render_human(facts, findings, skipped, passed, args, C):
                        % (_kb(facts.get("mem.available_kb")),
                           _kb(facts.get("mem.total_kb")),
                           facts["mem.available_pct"]))
+        # How close the box is to each wall, whether or not a rule fired --
+        # a table at 60% is worth seeing before the day it is at 100%.
+        lims = []
+        for label, key in (("fds", "lim.fd_pct"), ("tasks", "lim.pid_pct"),
+                           ("conntrack", "lim.conntrack_pct"),
+                           ("ports", "lim.ephemeral_pct"),
+                           ("arp", "lim.arp_pct"),
+                           ("cgroup tasks", "cg.pids_pct")):
+            if facts.get(key) is not None:
+                lims.append("%s %.0f%%" % (label, facts[key]))
+        if lims:
+            out.append("    limits     %s  (of ceiling)" % "  ".join(lims))
         out.append("")
 
     out.append("  %s" % C.bold("WHAT TO DO NEXT"))
@@ -1641,6 +2020,8 @@ def render_human(facts, findings, skipped, passed, args, C):
             "network between them."
             % (facts.get("cpu.load1", "?"), ncpu or 0), 4))
         out.append("")
+        out.append("    %s" % _wrap(
+            "resolve <the name it looks up>         (is it DNS?)", 4))
         out.append("    %s" % _wrap(
             "netmesh check <this host> <the peer>   (is it the network?)",
             4))

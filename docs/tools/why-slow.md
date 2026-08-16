@@ -3,9 +3,10 @@
 **Why is this box slow?**
 
 Samples `/proc` twice a couple of seconds apart, adds the things only
-visible once — the kernel log, cgroup limits, filesystem fullness — runs
-twenty-three rules over the result, and prints the highest-severity finding
-as a verdict with the exact command to run next.
+visible once — the kernel log, cgroup limits, filesystem fullness, the
+kernel's own tables and their ceilings — runs thirty rules over the result,
+and prints the highest-severity finding as a verdict with the exact command
+to run next.
 
 ```bash
 why-slow                      # diagnose this box (2s sample)
@@ -57,9 +58,10 @@ So the verdict is not "the worst number", it is the **cause**. A hand-written
 precedence table pulls causes to the front:
 
 ```text
-IO_ERRORS > OOM_KILLS > SWAP_THRASH > MEM_EXHAUSTED > CGROUP_MEM >
-FS_FULL > FS_INODES > CPU_STEAL > DISK_SATURATED > IO_STALL > ... >
-CPU_SATURATED > PSI_CPU > ...
+IO_ERRORS > OOM_KILLS > LIMIT_HITS > SWAP_THRASH > MEM_EXHAUSTED >
+CGROUP_MEM > FS_FULL > FS_INODES > CONNTRACK_FULL > FD_EXHAUSTION >
+PID_EXHAUSTION > CGROUP_PIDS > EPHEMERAL_PORTS > ARP_TABLE_FULL >
+CPU_STEAL > DISK_SATURATED > IO_STALL > ... > CPU_SATURATED > PSI_CPU > ...
 ```
 
 `CPU_SATURATED` still *fires*, and still appears in the findings list — it
@@ -69,8 +71,8 @@ of tuning fixes a dying drive.
 
 ## The rules
 
-Twenty-three, each a pure function of a fact dictionary. `--rules` prints
-them all with their thresholds and the reasoning; `--explain ID` prints one.
+Thirty, each a pure function of a fact dictionary. `--rules` prints them all
+with their thresholds and the reasoning; `--explain ID` prints one.
 
 | Rule | Fires when | Why it matters |
 |---|---|---|
@@ -97,6 +99,28 @@ them all with their thresholds and the reasoning; `--explain ID` prints one.
 | `SYSTEMD_FAILED` | any failed unit | including a dead clock sync, which makes every timestamp a lie |
 | `GOVERNOR` | powersave while busy ≥ 30% | a free 20–30% |
 | `ENTROPY` | < 200 on kernels < 5.6 | presents *only* as slow TLS handshakes |
+
+### Ceilings rather than rates
+
+Everything above measures how hard the box is working. These measure how
+close it is to a wall — a different failure, which reads nothing like
+slowness: the load is normal, the disks are quiet, memory is fine, and
+connections are being refused anyway.
+
+| Rule | Fires when | Why it matters |
+|---|---|---|
+| `LIMIT_HITS` | the kernel log says a table filled | it has since drained, so **every ratio below reads healthy** |
+| `CONNTRACK_FULL` | ≥ 75% of `nf_conntrack_max` | past the ceiling, new connections are dropped silently |
+| `FD_EXHAUSTION` | ≥ 75% of `fs.file-max` | every `open()` and `accept()` fails at once |
+| `PID_EXHAUSTION` | ≥ 75% of `pid_max` | `fork()` fails for everything, including your shell |
+| `CGROUP_PIDS` | ≥ 85% of the cgroup's `pids.max` | out of task slots while the host has thousands free |
+| `EPHEMERAL_PORTS` | ≥ 70% of the local port range in TIME_WAIT | no outbound connections; a rate problem wearing a capacity mask |
+| `ARP_TABLE_FULL` | ≥ 75% of `gc_thresh3` | intermittent unreachability that looks like a flapping switch |
+
+`LIMIT_HITS` is the one to read first. A table that filled an hour ago has
+drained since, so the ratios are all healthy and only the line the kernel
+wrote at the time survives — which is why it ranks with `OOM_KILLS` rather
+than with the ratios it explains.
 
 ## Containers
 
@@ -162,13 +186,15 @@ why-slow --facts > facts.json          # capture this box
 why-slow --from-facts facts.json       # re-run the rules anywhere
 ```
 
-That is also how the tool is tested: the suite drives all twenty-three rules
-from JSON fixtures, including boundary cases either side of every threshold.
+That is also how the tool is tested: the suite drives all thirty rules from
+JSON fixtures, including boundary cases either side of every threshold.
 `--proc-root` and `--sys-root` point the fact layer at a synthetic tree for
 testing the parsers, and `--no-exec` forbids subprocesses entirely.
 
 ## See also
 
+- [`resolve`](resolve.md) — when `why-slow` says the box is fine and the
+  next question is whether it is DNS
 - [`netmesh`](netmesh.md) — when `why-slow` says the box is fine and you
   need to know whether the network is
 - [`logtriage`](logtriage.md) — when you need to know *when* it started
