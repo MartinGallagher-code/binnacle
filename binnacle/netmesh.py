@@ -289,7 +289,7 @@ def read_self_cpu():
     network, and every other number on the page should be distrusted.
     """
     try:
-        with open("/proc/self/stat") as f:
+        with io.open("/proc/self/stat", encoding="utf-8", errors="replace") as f:
             fields = f.read().rsplit(") ", 1)[-1].split()
         return (int(fields[11]) + int(fields[12])) / float(_CLK_TCK)
     except (OSError, IndexError, ValueError):
@@ -391,7 +391,7 @@ def load_mesh(path):
     cfg = {}
     data_lines = []
     line_numbers = []
-    with io.open(path, errors="replace") as f:
+    with io.open(path, encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, start=1):
             if line.startswith("#"):
                 for part in line[1:].split():
@@ -477,7 +477,7 @@ def write_mesh(path, hosts, addrs, ports, pingonly, rate, cfg):
         return ("~" + t) if h in pingonly else t
 
     tmp = path + ".tmp"
-    with open(tmp, "w", newline="") as f:
+    with io.open(tmp, "w", newline="", encoding="utf-8") as f:
         f.write("# netmesh mesh v1 -- rows probe, columns answer, "
                 "cells are probes/sec\n")
         f.write("# %s\n" % cfg_bits)
@@ -496,7 +496,7 @@ def read_servers(path):
     if not os.path.isfile(path):
         die("server list not found: %s" % path)
     out = []
-    with io.open(path, errors="replace") as f:
+    with io.open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
             if line:
@@ -866,7 +866,7 @@ class Agent(object):
             self.ping_procs[st.name] = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, universal_newlines=True,
-                             errors="replace")
+                encoding="utf-8", errors="replace")
             st.sent = count
         except OSError:
             st.note = "no-ping-binary"
@@ -980,7 +980,7 @@ class Agent(object):
         started = time.monotonic()
         end = started + self.duration if self.duration else None
 
-        with open(report_path, "a", newline="") as fh:
+        with io.open(report_path, "a", newline="", encoding="utf-8") as fh:
             # lineterminator is explicit: csv defaults to CRLF, which would
             # put a stray \r on every field the shell tools read last.
             writer = csv.DictWriter(fh, fieldnames=REPORT_FIELDS,
@@ -1190,7 +1190,7 @@ class Fleet(object):
                                  stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL,
                                  universal_newlines=True,
-                             errors="replace")
+                                 encoding="utf-8", errors="replace")
             out, _ = p.communicate(timeout=timeout)
             return p.returncode, (out or "").strip()
         except subprocess.TimeoutExpired:
@@ -1432,7 +1432,7 @@ def cmd_collect(args, mesh=None, fleet=None, quiet=False):
         if rc != 0:
             return rc, "no report: %s" % out
         try:
-            n = sum(1 for _ in open(dest)) - 1
+            n = sum(1 for _ in io.open(dest, encoding="utf-8", errors="replace")) - 1
         except OSError:
             n = 0
         return 0, "%d rows" % max(0, n)
@@ -1555,7 +1555,7 @@ def read_reports(reports_dir):
             continue
         path = os.path.join(reports_dir, name)
         try:
-            with io.open(path, newline="", errors="replace") as f:
+            with io.open(path, newline="", encoding="utf-8", errors="replace") as f:
                 for row in csv.DictReader(f):
                     rows.append(row)
         except OSError as exc:
@@ -1820,7 +1820,7 @@ def _write_grids(outdir, pairs, hosts):
 
     def grid(name, fn):
         path = os.path.join(outdir, name)
-        with open(path, "w", newline="") as f:
+        with io.open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f, lineterminator="\n")
             w.writerow(["src\\dst"] + hosts)
             for s in hosts:
@@ -2027,12 +2027,12 @@ def cmd_paths(args, mesh=None, fleet=None):
         outs = list(pool.map(trace, wanted))
 
     hops_path = os.path.join(outdir, "hops.csv")
-    with open(hops_path, "w", newline="") as f:
+    with io.open(hops_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["src", "dst", "hop", "addr", "rtt_us", "mtu", "note"])
         for (s, d), (rc, out) in zip(wanted, outs):
             raw = os.path.join(outdir, "%s__%s.txt" % (s, d))
-            with open(raw, "w") as rf:
+            with io.open(raw, "w", encoding="utf-8") as rf:
                 rf.write(out + "\n")
             hops = parse_hops(out)
             results[(s, d)] = hops
@@ -2155,7 +2155,7 @@ def cmd_selftest(args):
             procs.append(subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT,
                                           universal_newlines=True,
-                             errors="replace"))
+                                          encoding="utf-8", errors="replace"))
         log("[%s] two agents probing over loopback for %s..."
             % (PROG, fmt_secs(secs)))
         for p in procs:

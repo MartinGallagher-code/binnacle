@@ -121,9 +121,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `resolv.conf` as **empty** — reporting "0 resolvers" for a box that had
   one, the failure mode the conventions exist to prevent, and caught only
   because the `NOTHING_CHECKED` guard added earlier refused to call that
-  health. Text is now read with `errors="replace"` and subprocess output
-  decoded the same way, so an undecodable byte costs one character rather
-  than the finding it appeared in; and a `_stdio_safe()` helper rewraps
+  health.
+
+  Every file read, every file write and every subprocess pipe now names
+  `utf-8` explicitly rather than taking whatever the locale offers, with
+  `errors="replace"` on the way in so an undecodable byte costs one
+  character rather than the finding it appeared in. Naming the codec
+  matters twice over: `errors="replace"` alone stops the crash but
+  substitutes U+FFFD, which is itself unencodable on the way back out, so
+  `reachable -o` read a host list correctly, judged it correctly, and then
+  died writing it — leaving no output file at all, for a tool whose job is
+  editing the user's own file. A comment it does not understand now
+  round-trips as the bytes it arrived as. A `_stdio_safe()` helper rewraps
   `stdout`/`stderr` with `backslashreplace` when the locale claims ASCII,
   so a report is never lost to the terminal it is being printed on.
   Reproducing any of this needs `PYTHONCOERCECLOCALE=0 PYTHONUTF8=0` as

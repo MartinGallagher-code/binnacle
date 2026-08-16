@@ -368,7 +368,7 @@ def read_lines(path):
         if not os.path.isfile(path):
             die("no such file: %s" % path)
         try:
-            with io.open(path, errors="replace") as f:
+            with io.open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError as exc:
             die("cannot read %s: %s" % (path, exc))
@@ -379,7 +379,7 @@ def write_atomic(path, text):
     """Temp file plus rename: a half-written server list is worse than none."""
     tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
-        with open(tmp, "w") as f:
+        with io.open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, path)
     except OSError as exc:
@@ -431,7 +431,7 @@ class Prober(object):
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.DEVNULL,
                                  universal_newlines=True,
-                             errors="replace")
+                                 encoding="utf-8", errors="replace")
             out, err = p.communicate(timeout=timeout)
             return p.returncode, out or "", err or ""
         except subprocess.TimeoutExpired:
@@ -544,7 +544,7 @@ def _tri(v):
 
 
 def write_csv(results, path):
-    fh = open(path, "w", newline="") if path else sys.stdout
+    fh = io.open(path, "w", newline="", encoding="utf-8") if path else sys.stdout
     try:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
         w.writeheader()
@@ -568,7 +568,7 @@ def write_json(results, path, summary):
                      for r in results]}
     text = json.dumps(doc, indent=2, sort_keys=True, default=str)
     if path:
-        with open(path, "w") as fh:
+        with io.open(path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     else:
         sys.stdout.write(text + "\n")

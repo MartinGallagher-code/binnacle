@@ -144,7 +144,7 @@ def _env(name, default=None):
 
 def _read(path, default=None):
     try:
-        with io.open(path, errors="replace") as f:
+        with io.open(path, encoding="utf-8", errors="replace") as f:
             return f.read()
     except (OSError, UnicodeDecodeError):
         return default
@@ -159,7 +159,7 @@ def _run(cmd, timeout=5):
                              stderr=subprocess.DEVNULL,
                              stdin=subprocess.DEVNULL,
                              universal_newlines=True,
-                             errors="replace")
+                             encoding="utf-8", errors="replace")
         out, _ = p.communicate(timeout=timeout)
         return out if p.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
@@ -1438,7 +1438,7 @@ CSV_FIELDS = ["host", "ts", "rule_id", "severity", "title", "detail", "fix"]
 
 
 def render_csv(facts, findings, path):
-    fh = open(path, "w", newline="") if path else sys.stdout
+    fh = io.open(path, "w", newline="", encoding="utf-8") if path else sys.stdout
     try:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
         w.writeheader()
@@ -1469,7 +1469,7 @@ def render_json(facts, findings, skipped, path):
     }
     text = json.dumps(doc, indent=2, sort_keys=True, default=str)
     if path:
-        with open(path, "w") as fh:
+        with io.open(path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     else:
         sys.stdout.write(text + "\n")
@@ -1570,7 +1570,7 @@ def main(argv=None):
 
     if args.from_facts:
         try:
-            with io.open(args.from_facts, errors="replace") as fh:
+            with io.open(args.from_facts, encoding="utf-8", errors="replace") as fh:
                 facts = json.load(fh)
         except (OSError, ValueError) as exc:
             die("cannot read facts file: %s" % exc)

@@ -314,7 +314,7 @@ def read_host_file(path):
         if not os.path.isfile(path):
             return None
         try:
-            with io.open(path, errors="replace") as f:
+            with io.open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError as exc:
             die("cannot read %s: %s" % (path, exc))
@@ -545,7 +545,7 @@ class Runner(object):
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.DEVNULL,
                                  universal_newlines=True,
-                             errors="replace")
+                                 encoding="utf-8", errors="replace")
             out, err = p.communicate(timeout=timeout)
             return p.returncode, out or "", err or ""
         except subprocess.TimeoutExpired:
@@ -827,7 +827,7 @@ CSV_FIELDS = ["host", "group_id", "outcome", "exit_code", "duration_s",
 
 def write_csv(results, groups, path):
     base = {g.id for g in groups if g.baseline}
-    with open(path, "w", newline="") as fh:
+    with io.open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
         w.writeheader()
         for r in results:
@@ -851,7 +851,7 @@ def write_json(results, groups, path, meta):
                    "outcome": r.outcome, "exit_code": r.rc,
                    "duration_s": round(r.duration, 3)} for r in results],
     }
-    with open(path, "w") as fh:
+    with io.open(path, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(doc, indent=2, sort_keys=True, default=str) + "\n")
 
 
@@ -880,7 +880,7 @@ def write_merged_csv(results, path):
             rows.append([r.host.name] + row)
     if header is None:
         die("no host produced parseable CSV output", 1)
-    with open(path, "w", newline="") as fh:
+    with io.open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, lineterminator="\n")
         w.writerow(header)
         w.writerows(rows)

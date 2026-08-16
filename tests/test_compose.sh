@@ -280,6 +280,43 @@ t_a_stray_utf8_byte_does_not_lose_the_run() {
     assert_not_contains "$out" "0 resolvers"
 }
 
+t_an_edited_host_file_keeps_the_bytes_it_came_with() {
+    # Surviving the read is only half of it.  reachable rewrites the user's
+    # own file, so a comment it does not understand has to come back out
+    # exactly as it went in.  Reading under an ASCII locale replaces the
+    # byte with U+FFFD, which is itself unencodable on the way back -- so
+    # the tool read the list, decided correctly, and then died writing it,
+    # leaving no output file at all.
+    printf 'web01\n# db07 caf\xc3\xa9 rack\nweb02\n' > "$TEST_TMPDIR/h8.txt"
+    # Every host fails, so every line is rewritten and the comment between
+    # them has to be carried through untouched.
+    cat > "$TEST_TMPDIR/ssh_down" <<'SHIM'
+#!/bin/bash
+exit 255
+SHIM
+    chmod +x "$TEST_TMPDIR/ssh_down"
+
+    env PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 LC_ALL=C LANG=C \
+        "$PY" "$BINNACLE_DIR/reachable.py" "$TEST_TMPDIR/h8.txt" \
+        -o "$TEST_TMPDIR/h8.out" --ssh "$TEST_TMPDIR/ssh_down" --no-ping --quiet \
+        > "$TEST_TMPDIR/h8.err" 2>&1 || true   # every host down is exit 1, not an error here
+
+    assert_not_contains "$(cat "$TEST_TMPDIR/h8.err")" "UnicodeEncodeError"
+    if [ ! -s "$TEST_TMPDIR/h8.out" ]; then
+        fail "no output file was written at all"
+        return 0
+    fi
+    # The comment is the user's, not this tool's: it must round-trip as the
+    # same bytes, not as question marks and not as U+FFFD.
+    if ! grep -aq "$(printf 'caf\xc3\xa9')" "$TEST_TMPDIR/h8.out"; then
+        fail "the utf-8 comment did not survive the rewrite"
+    fi
+    if grep -aq "$(printf '\xef\xbf\xbd')" "$TEST_TMPDIR/h8.out"; then
+        fail "the comment came back corrupted to U+FFFD"
+    fi
+    return 0
+}
+
 t_declared_copies_have_not_drifted() {
     # No module imports another -- each tool is scp'd to machines that have
     # never heard of this package -- so helpers are duplicated on purpose
@@ -387,5 +424,6 @@ run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one
 run_test "every flag appears in --help"         t_every_flag_appears_in_its_tools_help
 run_test "declared copies have not drifted"     t_declared_copies_have_not_drifted
 run_test "a stray utf8 byte is survivable"      t_a_stray_utf8_byte_does_not_lose_the_run
+run_test "an edited host file keeps its bytes"  t_an_edited_host_file_keeps_the_bytes_it_came_with
 run_test "an unreachable host is a group"       t_an_unreachable_host_is_a_group_not_an_error
 finish

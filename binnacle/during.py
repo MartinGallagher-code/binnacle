@@ -191,7 +191,7 @@ def _env(name, default=None):
 
 def _read(path, default=None):
     try:
-        with io.open(path, errors="replace") as f:
+        with io.open(path, encoding="utf-8", errors="replace") as f:
             return f.read()
     except (OSError, UnicodeDecodeError):
         return default
@@ -1555,7 +1555,7 @@ CSV_FIELDS = ["host", "ts", "rule_id", "severity", "title", "detail", "fix"]
 
 
 def render_csv(summary, findings, path):
-    fh = open(path, "w", newline="") if path else sys.stdout
+    fh = io.open(path, "w", newline="", encoding="utf-8") if path else sys.stdout
     try:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
         w.writeheader()
@@ -1576,7 +1576,7 @@ def render_csv(summary, findings, path):
 
 def write_samples(samples, path):
     """The raw series, one row per sample.  Blank means not measured."""
-    fh = open(path, "w", newline="") if path else sys.stdout
+    fh = io.open(path, "w", newline="", encoding="utf-8") if path else sys.stdout
     try:
         w = csv.DictWriter(fh, fieldnames=SAMPLE_FIELDS, lineterminator="\n",
                            extrasaction="ignore")
@@ -1599,7 +1599,7 @@ def write_samples(samples, path):
 
 def read_samples(path):
     try:
-        with io.open(path, errors="replace") as fh:
+        with io.open(path, encoding="utf-8", errors="replace") as fh:
             rows = list(csv.DictReader(fh))
     except (OSError, csv.Error) as exc:
         die("cannot read samples file: %s" % exc)
@@ -1621,7 +1621,7 @@ def render_json(summary, findings, skipped, path):
     }
     text = json.dumps(doc, indent=2, sort_keys=True, default=str)
     if path:
-        with open(path, "w") as fh:
+        with io.open(path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     else:
         sys.stdout.write(text + "\n")
