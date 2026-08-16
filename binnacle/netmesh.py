@@ -507,6 +507,14 @@ def write_mesh(path, hosts, addrs, ports, pingonly, rate, cfg):
             t += ":%d" % ports[h]
         return ("~" + t) if h in pingonly else t
 
+    # A mesh is hand-edited (the '~' ping-only prefix is a human's mark),
+    # so regenerating it must not silently widen its mode or replace a
+    # symlink into a shared checkout with a regular file.
+    path = os.path.realpath(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        st = None
     tmp = path + ".tmp"
     try:
         with io.open(tmp, "w", newline="", encoding="utf-8") as f:
@@ -521,6 +529,12 @@ def write_mesh(path, hosts, addrs, ports, pingonly, rate, cfg):
                     r = rate.get(s, {}).get(d, 0.0)
                     row.append("" if r <= 0 else ("%g" % r))
                 w.writerow(row)
+        if st is not None:
+            os.chmod(tmp, st.st_mode & 0o7777)
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass
         os.replace(tmp, path)
     except OSError:
         # a half-written mesh must not survive to be read as a mesh

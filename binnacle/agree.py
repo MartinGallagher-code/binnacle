@@ -960,12 +960,22 @@ def write_merged_csv(results, path):
     first_cols = None
     rows = []
     skewed = []
+    unparsed = []
     for r in results:
         if r.outcome != OK or not r.stdout.strip():
             continue
         rdr = csv.DictReader(io.StringIO(r.stdout))
         cols = rdr.fieldnames
-        if not cols:
+        # A host that printed something other than this CSV -- an error
+        # message on stdout, a tool that exited 0 with a complaint -- must
+        # not contribute its text as a *column*.  One field is not a CSV
+        # header, and sharing nothing with the established schema is a
+        # different tool's output rather than an older version of this one.
+        if not cols or len(cols) < 2 or (
+                first_cols is not None
+                and not set(cols) & set(first_cols)):
+            unparsed.append("%s: %s" % (r.host.name,
+                                        (cols or [""])[0][:60]))
             continue
         for col in cols:
             if col not in header:
@@ -990,6 +1000,9 @@ def write_merged_csv(results, path):
             rows.append(row)
     if first_cols is None:
         die("no host produced parseable CSV output", 1)
+    if unparsed:
+        sys.stderr.write("[%s] not merged, output is not this CSV: %s\n"
+                         % (PROG, " / ".join(unparsed)))
     if skewed:
         sys.stderr.write("[%s] column skew across hosts (mixed tool "
                          "versions?): %s\n" % (PROG, " / ".join(skewed)))
