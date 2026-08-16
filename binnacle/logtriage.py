@@ -1032,6 +1032,9 @@ def main(argv=None):
                host or "-", prog or "-", pid or "-", msg))
         return 0
 
+    # Remembered before the stdin fallback rewrites it, so a later error
+    # can tell "you named no file" from "you named one".
+    args.paths_given = bool(args.paths)
     if not args.paths:
         if sys.stdin.isatty():
             build_parser().print_help()
@@ -1052,7 +1055,21 @@ def main(argv=None):
     feed(counter, paths, args)
 
     if not counter.n_records:
-        die("no log records found in %s" % args.source_label, 1)
+        # The commonest way to get here is not an empty log: it is
+        # `logtriage --csv /var/log/syslog`, where --csv takes an optional
+        # path and swallows the file you meant to read, leaving stdin --
+        # which under ssh or a pipeline is empty rather than a terminal, so
+        # the usual help-on-no-input guard never fires.  Say so, because
+        # the bare message sends people looking at the log instead.
+        hint = ""
+        for flag, value in (("--csv", args.csv), ("--json", args.json)):
+            if value and not args.paths_given and os.path.isfile(value):
+                hint = ("  Note %s was given %r, which exists -- if that is "
+                        "the log you meant to read, it has been taken as the "
+                        "output path instead.  The file comes first: "
+                        "`%s %s %s`." % (flag, value, PROG, value, flag))
+                break
+        die("no log records found in %s%s" % (args.source_label, hint), 1)
 
     args.split_at_epoch = None
     if args.split_at:

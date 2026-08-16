@@ -127,7 +127,8 @@ upstreams to measure directly:
 `--csv` emits the same header as `why-slow`, so the two stack in one file:
 
 ```bash
-agree script ./resolve.py --hosts prod.txt --merge-csv dns.csv -- --csv db01.example.com
+agree script ./resolve.py --hosts prod.txt --mask-hosts --mask-times \
+    --merge-csv dns.csv -- db01.example.com --csv
 ```
 
 That groups hosts by **what they think a name means** — which is how a

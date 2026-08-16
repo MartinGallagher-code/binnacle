@@ -187,7 +187,8 @@ burst_factor,score,template,example
 [`agree`](agree.md) can group hosts by which templates they emit:
 
 ```bash
-agree script ./logtriage.py --hosts prod.txt -- --csv /var/log/syslog
+agree script ./logtriage.py --hosts prod.txt --mask-hosts --mask-times \
+    -- /var/log/syslog --csv
 ```
 
 ## Debugging the tool itself

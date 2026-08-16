@@ -218,6 +218,41 @@ t_merge_csv_stacks_and_prefixes_ssh_host() {
     assert_eq "$(grep -c 'ssh_host' "$TEST_TMPDIR/m.csv")" "1"
 }
 
+t_mask_hosts_masks_names_not_substrings() {
+    # A plain substring replace turns a host called "sql" into %HOST%
+    # inside "postgresql", which corrupts the comparison it was meant to
+    # enable -- and does it differently on each host, producing exactly the
+    # spurious groups it exists to remove.
+    install_fake_ssh
+    for h in sql db; do
+        fake_host "$h"
+        printf 'echo "postgresql restarted on %s, adb loaded"\n' "$h" \
+            > "$FAKE_ROOT/$h/run.sh"
+    done
+    out="$(ag -H sql,db --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
+    assert_contains "$out" "postgresql"
+    assert_contains "$out" "adb"
+    assert_contains "$out" "%HOST%"
+}
+
+t_mask_times_covers_the_machine_readable_one() {
+    # Every tool in this package stamps its CSV with epoch seconds, so two
+    # hosts answering either side of a tick would otherwise never agree.
+    install_fake_ssh
+    fake_host a
+    printf 'echo "node,1786741765,OK"\n' > "$FAKE_ROOT/a/run.sh"
+    fake_host b
+    printf 'echo "node,1786741766,OK"\n' > "$FAKE_ROOT/b/run.sh"
+    out="$(ag -H a,b --quiet --mask-times -- sh run.sh 2>&1 || true)"
+    assert_contains "$out" "1 group"
+    assert_contains "$out" "<TS>"
+    # An ordinary ten-digit number is not a date and must survive.
+    fake_host c
+    printf 'echo "bytes 9876543210"\n' > "$FAKE_ROOT/c/run.sh"
+    plain="$(ag -H c --quiet --mask-times -- sh run.sh 2>&1 || true)"
+    assert_contains "$plain" "9876543210"
+}
+
 echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
@@ -228,6 +263,8 @@ run_test "unanimous exits 0"                   t_unanimous_exits_zero
 run_test "same output, different rc, splits"   t_same_output_different_exit_codes_split
 run_test "output in host-list order"           t_order_is_host_list_order_not_completion
 run_test "--mask-hosts makes hostnames agree"  t_mask_hosts_makes_hostname_output_agree
+run_test "--mask-hosts masks names not text"   t_mask_hosts_masks_names_not_substrings
+run_test "--mask-times covers epoch seconds"   t_mask_times_covers_the_machine_readable_one
 run_test "normalizations are disclosed"        t_normalizations_are_disclosed
 run_test "--sort-lines ignores order"          t_sort_lines_ignores_order
 run_test "danger guard refuses without --yes"  t_danger_guard_refuses_without_yes

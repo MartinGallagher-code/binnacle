@@ -150,7 +150,24 @@ t_no_timestamps_falls_back_to_line_numbers() {
     assert_contains "$out" "ordering by line number"
 }
 
+t_csv_swallowing_the_log_is_diagnosed() {
+    # `logtriage --csv /var/log/syslog` reads stdin and finds nothing, which
+    # under ssh or a pipeline is not a terminal, so the help-on-no-input
+    # guard never fires.  The bare "no records" message sends people to look
+    # at the log; this one names the actual mistake.
+    gen_log "$TEST_TMPDIR/syslog"
+    set +e
+    out="$(lt --csv "$TEST_TMPDIR/syslog" < /dev/null 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "taken as the output path"
+    assert_contains "$out" "The file comes first"
+    # ...and the log it was pointed at is still a log.
+    assert_contains "$(head -1 "$TEST_TMPDIR/syslog")" "sshd"
+}
+
 echo "logtriage"
+run_test "--csv swallowing the log is caught" t_csv_swallowing_the_log_is_diagnosed
 run_test "uuid masked before hex"             t_mask_order_uuid_before_hex
 run_test "timestamps masked before numbers"   t_mask_timestamps_before_numbers
 run_test "ip, path and quoted string masked"  t_mask_ip_and_path_and_quoted

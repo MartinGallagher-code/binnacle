@@ -86,10 +86,12 @@ The reason to have seven rather than any one of them:
 reachable prod.txt -i
 
 # Fleet-wide triage: every box diagnosed, hosts grouped by what is wrong.
-agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
+    --merge-csv triage.csv -- --csv
 
 # The same trick for logs -- hosts grouped by which templates they emit.
-agree script ./logtriage.py --hosts prod.txt -- --csv /var/log/syslog
+agree script ./logtriage.py --hosts prod.txt --mask-hosts --mask-times \
+    -- /var/log/syslog --csv
 
 # why-slow says the box is fine, so ask whether it is DNS.
 resolve db01.example.com
