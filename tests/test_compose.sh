@@ -360,6 +360,48 @@ t_a_file_saved_by_notepad_still_means_the_same_thing() {
     return 0
 }
 
+t_a_file_that_cannot_be_written_is_a_finding() {
+    # Full disk, quota, a typo'd directory: before this test every tool
+    # answered with a raw traceback, burying the one fact that matters --
+    # which file could not be written.  A missing directory raises the
+    # same OSError as ENOSPC through the same code path, and needs no
+    # root to stage.
+    printf 'Jan  7 04:00:00 web01 sshd[1]: error: x\n' > "$TEST_TMPDIR/w.log"
+    printf 'host,elapsed_s,cpu_busy_pct\nweb01,1.0,95\nweb01,2.0,95\n' \
+        > "$TEST_TMPDIR/w.csv"
+    gone="$TEST_TMPDIR/no/such/dir/out.csv"
+
+    for tool_args in \
+        "logtriage.py $TEST_TMPDIR/w.log --csv" \
+        "logtriage.py $TEST_TMPDIR/w.log --save-templates" \
+        "during.py --from-samples $TEST_TMPDIR/w.csv --csv" \
+        "during.py --from-samples $TEST_TMPDIR/w.csv --json" \
+        "why_slow.py --quiet --csv" \
+    ; do
+        # shellcheck disable=SC2086
+        set -- $tool_args
+        tool="$1"; shift
+        rc=0
+        out="$("$PY" "$BINNACLE_DIR/$tool" "$@" "$gone" 2>&1)" || rc=$?
+        if [ "$rc" -ne 2 ]; then
+            fail "$tool $*: expected exit 2 on an unwritable path, got $rc"
+        fi
+        assert_not_contains "$out" "Traceback"
+        assert_contains "$out" "cannot write"
+    done
+
+    # A failed write may not leave a stump behind: an empty CSV that
+    # parses is worse than a missing one.
+    mkdir -p "$TEST_TMPDIR/stump"
+    ( cd "$TEST_TMPDIR/stump" && ulimit -f 0 && \
+      "$PY" "$BINNACLE_DIR/logtriage.py" "$TEST_TMPDIR/w.log" \
+          --csv out.csv >/dev/null 2>&1 ) || true
+    if [ -e "$TEST_TMPDIR/stump/out.csv" ]; then
+        fail "a failed write left an empty out.csv behind"
+    fi
+    return 0
+}
+
 t_declared_copies_have_not_drifted() {
     # No module imports another -- each tool is scp'd to machines that have
     # never heard of this package -- so helpers are duplicated on purpose
@@ -387,6 +429,12 @@ VERBATIM = [
     ("_stdio_safe", "why_slow.py", "reachable.py"),
     ("_stdio_safe", "why_slow.py", "resolve.py"),
     ("_stdio_safe", "why_slow.py", "during.py"),
+    ("_WriteGuard", "why_slow.py", "agree.py"),
+    ("_WriteGuard", "why_slow.py", "logtriage.py"),
+    ("_WriteGuard", "why_slow.py", "netmesh.py"),
+    ("_WriteGuard", "why_slow.py", "reachable.py"),
+    ("_WriteGuard", "why_slow.py", "resolve.py"),
+    ("_WriteGuard", "why_slow.py", "during.py"),
     ("expand_range", "agree.py", "reachable.py"),
     ("split_host_port", "agree.py", "reachable.py"),
     ("is_ipv6", "agree.py", "reachable.py"),
@@ -401,9 +449,14 @@ def body(mod, name):
     # logtriage's sparkline block is not.
     src = io.open(os.path.join(root, mod), encoding="utf-8").read()
     for node in ast.parse(src).body:
-        if isinstance(node, ast.FunctionDef) and node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) \
+                and node.name == name:
             if ast.get_docstring(node) is not None:
                 node.body = node.body[1:]
+            for sub in getattr(node, "body", []):
+                if isinstance(sub, ast.FunctionDef) \
+                        and ast.get_docstring(sub) is not None:
+                    sub.body = sub.body[1:]
             return ast.dump(node)
     return None
 
@@ -469,5 +522,6 @@ run_test "declared copies have not drifted"     t_declared_copies_have_not_drift
 run_test "a stray utf8 byte is survivable"      t_a_stray_utf8_byte_does_not_lose_the_run
 run_test "an edited host file keeps its bytes"  t_an_edited_host_file_keeps_the_bytes_it_came_with
 run_test "a notepad file still means the same"  t_a_file_saved_by_notepad_still_means_the_same_thing
+run_test "an unwritable file is a finding"      t_a_file_that_cannot_be_written_is_a_finding
 run_test "an unreachable host is a group"       t_an_unreachable_host_is_a_group_not_an_error
 finish

@@ -189,6 +189,37 @@ def die(msg, code=2):
     raise SystemExit(code)
 
 
+class _WriteGuard(object):
+    """Full disk, quota, missing directory: name the file and stop.
+
+    Wraps a block writing an output the user asked for by path.  Only
+    OSError becomes the message, and only when a path was really given,
+    so stdout keeps its ordinary pipe semantics.  A traceback here would
+    bury the one fact that matters: which file could not be written.
+
+    The partial file is removed too -- a half-written CSV that parses is
+    worse than none -- except when appending, where what was already
+    there predates this failure and is still good.
+    """
+
+    def __init__(self, path, appending=False):
+        self.path = path
+        self.appending = appending
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.path and exc_type is not None and issubclass(exc_type, OSError):
+            if not self.appending:
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    pass
+            die("cannot write %s: %s" % (self.path, exc))
+        return False
+
+
 def log(msg):
     sys.stdout.write("%s\n" % msg)
     sys.stdout.flush()
@@ -477,19 +508,27 @@ def write_mesh(path, hosts, addrs, ports, pingonly, rate, cfg):
         return ("~" + t) if h in pingonly else t
 
     tmp = path + ".tmp"
-    with io.open(tmp, "w", newline="", encoding="utf-8") as f:
-        f.write("# netmesh mesh v1 -- rows probe, columns answer, "
-                "cells are probes/sec\n")
-        f.write("# %s\n" % cfg_bits)
-        w = csv.writer(f, lineterminator="\n")
-        w.writerow(["src\\dst"] + [tok(h) for h in hosts])
-        for s in hosts:
-            row = [tok(s)]
-            for d in hosts:
-                r = rate.get(s, {}).get(d, 0.0)
-                row.append("" if r <= 0 else ("%g" % r))
-            w.writerow(row)
-    os.replace(tmp, path)
+    try:
+        with io.open(tmp, "w", newline="", encoding="utf-8") as f:
+            f.write("# netmesh mesh v1 -- rows probe, columns answer, "
+                    "cells are probes/sec\n")
+            f.write("# %s\n" % cfg_bits)
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(["src\\dst"] + [tok(h) for h in hosts])
+            for s in hosts:
+                row = [tok(s)]
+                for d in hosts:
+                    r = rate.get(s, {}).get(d, 0.0)
+                    row.append("" if r <= 0 else ("%g" % r))
+                w.writerow(row)
+        os.replace(tmp, path)
+    except OSError:
+        # a half-written mesh must not survive to be read as a mesh
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def read_servers(path):
@@ -980,7 +1019,8 @@ class Agent(object):
         started = time.monotonic()
         end = started + self.duration if self.duration else None
 
-        with io.open(report_path, "a", newline="", encoding="utf-8") as fh:
+        with _WriteGuard(report_path, appending=True), \
+                io.open(report_path, "a", newline="", encoding="utf-8") as fh:
             # lineterminator is explicit: csv defaults to CRLF, which would
             # put a stray \r on every field the shell tools read last.
             writer = csv.DictWriter(fh, fieldnames=REPORT_FIELDS,
@@ -1291,7 +1331,8 @@ def cmd_gen(args):
            "mtu_ceiling": args.mtu_ceiling,
            "pmtu_every": "%g" % args.pmtu_every}
     hosts, addrs, ports, pingonly, rate = build_mesh(tokens, args.pps, cfg)
-    write_mesh(args.mesh, hosts, addrs, ports, pingonly, rate, cfg)
+    with _WriteGuard(args.mesh):
+        write_mesh(args.mesh, hosts, addrs, ports, pingonly, rate, cfg)
     npairs = sum(len(v) for v in rate.values())
     log("[%s] wrote %s: %d hosts, %d ordered pairs, %g probes/s each"
         % (PROG, args.mesh, len(hosts), npairs, args.pps))
@@ -1912,7 +1953,8 @@ def cmd_check(args):
            "mtu_ceiling": args.mtu_ceiling,
            "pmtu_every": "%g" % args.pmtu_every}
     hosts, addrs, ports, pingonly, rate = build_mesh(tokens, args.pps, cfg)
-    write_mesh(args.mesh, hosts, addrs, ports, pingonly, rate, cfg)
+    with _WriteGuard(args.mesh):
+        write_mesh(args.mesh, hosts, addrs, ports, pingonly, rate, cfg)
     mesh = load_mesh(args.mesh)
     fleet = Fleet(mesh, args)
 
@@ -2027,7 +2069,8 @@ def cmd_paths(args, mesh=None, fleet=None):
         outs = list(pool.map(trace, wanted))
 
     hops_path = os.path.join(outdir, "hops.csv")
-    with io.open(hops_path, "w", newline="", encoding="utf-8") as f:
+    with _WriteGuard(hops_path), \
+            io.open(hops_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["src", "dst", "hop", "addr", "rtt_us", "mtu", "note"])
         for (s, d), (rc, out) in zip(wanted, outs):

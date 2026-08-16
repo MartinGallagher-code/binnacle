@@ -149,6 +149,37 @@ def die(msg, code=2):
     raise SystemExit(code)
 
 
+class _WriteGuard(object):
+    """Full disk, quota, missing directory: name the file and stop.
+
+    Wraps a block writing an output the user asked for by path.  Only
+    OSError becomes the message, and only when a path was really given,
+    so stdout keeps its ordinary pipe semantics.  A traceback here would
+    bury the one fact that matters: which file could not be written.
+
+    The partial file is removed too -- a half-written CSV that parses is
+    worse than none -- except when appending, where what was already
+    there predates this failure and is still good.
+    """
+
+    def __init__(self, path, appending=False):
+        self.path = path
+        self.appending = appending
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.path and exc_type is not None and issubclass(exc_type, OSError):
+            if not self.appending:
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    pass
+            die("cannot write %s: %s" % (self.path, exc))
+        return False
+
+
 def _env(name, default=None):
     v = os.environ.get("REACHABLE_" + name)
     return v if v not in (None, "") else default
@@ -730,6 +761,12 @@ def main(argv=None):
             try:
                 shutil.copy2(args.path, args.path + ".bak")
             except OSError as exc:
+                # A partial .bak is a trap for whoever restores from it:
+                # better no backup and a clear failure than a truncated one.
+                try:
+                    os.unlink(args.path + ".bak")
+                except OSError:
+                    pass
                 die("cannot write backup: %s" % exc)
         write_atomic(args.path, text)
         note("rewrote %s%s" % (args.path,
@@ -742,14 +779,16 @@ def main(argv=None):
         sys.stdout.write(text)
 
     if args.csv is not None:
-        write_csv(results, args.csv or None)
+        with _WriteGuard(args.csv or None):
+            write_csv(results, args.csv or None)
 
     summary_lines, hints = summarize(results, restored, commented, args)
     summary = {"total": len(results),
                "usable": sum(1 for r in results if r.usable),
                "commented": commented, "restored": restored}
     if args.json is not None:
-        write_json(results, args.json or None, summary)
+        with _WriteGuard(args.json or None):
+            write_json(results, args.json or None, summary)
 
     if not args.quiet:
         sys.stderr.write("\n")

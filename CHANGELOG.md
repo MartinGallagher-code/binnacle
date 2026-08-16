@@ -108,6 +108,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A disk that filled up was answered with a stack trace.** Every tool
+  that writes an output the user names — `--csv`, `--json`,
+  `--save-templates`, `--samples`, `--merge-csv`, `netmesh`'s mesh, report
+  and hops files — met ENOSPC, a quota, or a typo'd directory with a raw
+  traceback, burying the one fact that matters. Each write is now wrapped
+  in a guard that says `cannot write <path>: <why>` and exits 2, and
+  removes the partial file it leaves behind — an empty CSV that parses is
+  worse than a missing one — except when appending, where what was already
+  there predates the failure and is still good. stdout is deliberately not
+  guarded, so `tool | head` keeps ordinary pipe semantics. The guard is
+  duplicated into all seven modules and held identical by the drift check,
+  which now compares classes as well as functions. Found by mounting a
+  64 KB filesystem and pointing every writer at it; the test stages the
+  same failure with a missing directory and a zero file-size ulimit, which
+  need no root.
+- **`reachable -i` could leave a truncated `.bak` behind.** If the disk
+  filled while the backup was being copied, the run stopped correctly and
+  the user's file was untouched — but a partial `.bak` stayed, and a
+  truncated backup is a trap for whoever restores from it. The failed
+  backup is now removed before the tool dies. (`netmesh`'s mesh writer had
+  the same gap with its temp file, fixed the same way; `reachable`'s own
+  `write_atomic` already cleaned up after itself.)
 - **A file saved by Notepad or exported from Excel changed its meaning.**
   Both prepend a UTF-8 byte-order mark, and every reader here glued it to
   the first token. `reachable` probed `<BOM>web01` — a name that cannot
