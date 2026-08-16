@@ -478,6 +478,10 @@ def snapshot(with_procs=True):
 def _rate(a, b, dt):
     if a is None or b is None or not dt:
         return None
+    if b < a:
+        # the counter reset underneath us -- container restart, module
+        # reload, wrap.  Unknown is None, never a negative rate.
+        return None
     return (b - a) / dt
 
 
@@ -492,14 +496,17 @@ def derive(prev, cur, elapsed, host, exclude_tree=None):
     a, b = prev["stat"], cur["stat"]
     if a and b:
         dtot = b["all"]["total"] - a["all"]["total"]
-        if dtot > 0:
-            s["cpu_busy_pct"] = (dtot - (b["all"]["idle"] - a["all"]["idle"])) \
-                * 100.0 / dtot
-            s["cpu_sys_pct"] = (b["all"]["sys"] - a["all"]["sys"]) * 100.0 / dtot
-            s["cpu_iowait_pct"] = (b["all"]["iowait"] - a["all"]["iowait"]) \
-                * 100.0 / dtot
-            s["cpu_steal_pct"] = (b["all"]["steal"] - a["all"]["steal"]) \
-                * 100.0 / dtot
+        didle = b["all"]["idle"] - a["all"]["idle"]
+        dsys = b["all"]["sys"] - a["all"]["sys"]
+        diow = b["all"]["iowait"] - a["all"]["iowait"]
+        dsteal = b["all"]["steal"] - a["all"]["steal"]
+        # any component going backwards means the pair is inconsistent
+        # (reset between reads); blank stays blank
+        if dtot > 0 and min(didle, dsys, diow, dsteal) >= 0:
+            s["cpu_busy_pct"] = (dtot - didle) * 100.0 / dtot
+            s["cpu_sys_pct"] = dsys * 100.0 / dtot
+            s["cpu_iowait_pct"] = diow * 100.0 / dtot
+            s["cpu_steal_pct"] = dsteal * 100.0 / dtot
         s["runnable"], s["blocked"] = b["running"], b["blocked"]
         # The busiest single core, because a serialised benchmark pins one
         # and leaves the whole-box average looking idle.
@@ -509,7 +516,7 @@ def derive(prev, cur, elapsed, host, exclude_tree=None):
             per = []
             for x, y in zip(a["cores"], b["cores"]):
                 d = y["total"] - x["total"]
-                if d > 0:
+                if d > 0 and y["idle"] >= x["idle"]:
                     per.append((d - (y["idle"] - x["idle"])) * 100.0 / d)
             if per:
                 s["cpu_max_core_pct"] = max(per)

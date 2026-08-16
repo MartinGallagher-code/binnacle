@@ -680,6 +680,10 @@ def read_thermal():
 def _delta_rate(a, b, dt):
     if a is None or b is None or not dt:
         return None
+    if b < a:
+        # the counter reset underneath us -- container restart, module
+        # reload, wrap.  Unknown is None, never a negative rate.
+        return None
     return (b - a) / dt
 
 
@@ -735,12 +739,18 @@ def collect_facts(interval, top_n, boot_window):
     if stat1 and stat2 and interval > 0:
         a, b = stat1["all"], stat2["all"]
         dtot = b["total"] - a["total"]
-        if dtot > 0:
-            f["cpu.busy_pct"] = (dtot - (b["idle"] - a["idle"])) * 100.0 / dtot
-            f["cpu.sys_pct"] = (b["sys"] - a["sys"]) * 100.0 / dtot
-            f["cpu.iowait_pct"] = (b["iowait"] - a["iowait"]) * 100.0 / dtot
-            f["cpu.steal_pct"] = (b["steal"] - a["steal"]) * 100.0 / dtot
-            f["cpu.softirq_pct"] = (b["softirq"] - a["softirq"]) * 100.0 / dtot
+        didle = b["idle"] - a["idle"]
+        deltas = dict((k, b[k] - a[k])
+                      for k in ("sys", "iowait", "steal", "softirq"))
+        # any component going backwards means the pair is inconsistent
+        # (reset between reads); a missing measurement is None, never
+        # a negative percentage
+        if dtot > 0 and didle >= 0 and min(deltas.values()) >= 0:
+            f["cpu.busy_pct"] = (dtot - didle) * 100.0 / dtot
+            f["cpu.sys_pct"] = deltas["sys"] * 100.0 / dtot
+            f["cpu.iowait_pct"] = deltas["iowait"] * 100.0 / dtot
+            f["cpu.steal_pct"] = deltas["steal"] * 100.0 / dtot
+            f["cpu.softirq_pct"] = deltas["softirq"] * 100.0 / dtot
         f["cpu.ctxt_per_s"] = _delta_rate(stat1["ctxt"], stat2["ctxt"], dt)
         f["cpu.forks_per_s"] = _delta_rate(stat1["forks"], stat2["forks"], dt)
 

@@ -108,6 +108,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A counter that reset between snapshots became a negative rate.**
+  `why-slow` and `during` compute rates from paired `/proc` reads, and on
+  a live box counters go backwards — a container restart, a module
+  reload, a wrap. `(b - a) / dt` with `b < a` reported "-99990 pg/s in"
+  and CPU percentages past 100. A pair the kernel reset between reads is
+  not a measurement: every rate and every CPU component now checks the
+  delta's sign, and an inconsistent pair leaves the field blank — the
+  first convention on the conventions page, applied to the sampler
+  itself. The per-core path already guarded CPU hotplug; the aggregate
+  path now matches it.
 - **A fleet running mixed tool versions could silently misfile its merged
   CSV.** These tools get scp'd to machines and stay there, so version skew
   across a fleet is the expected state, not the exception — and
