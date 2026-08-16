@@ -307,6 +307,11 @@ def parse_response(data, qid, name, qtype):
                                                        data[pos:pos + 10])
             pos += 10
             rdata_at = pos
+            if pos + rdlen > len(data):
+                # slicing would quietly hand back fewer bytes than the
+                # record claims, and a truncated address must not become
+                # an answer the cross-server comparison then acts on
+                raise DNSError("truncated record")
             rdata = data[pos:pos + rdlen]
             pos += rdlen
         except struct.error:
@@ -379,11 +384,11 @@ def query_udp(server, port, name, qtype, timeout, attempts):
         try:
             sock = socket.socket(fam, socket.SOCK_DGRAM)
             sock.settimeout(timeout)
-            t0 = time.time()
+            t0 = time.monotonic()
             sock.sendto(packet, (server, port))
             deadline = t0 + timeout
             while True:
-                left = deadline - time.time()
+                left = deadline - time.monotonic()
                 if left <= 0:
                     last = "timed out after %.1fs" % timeout
                     break
@@ -394,7 +399,7 @@ def query_udp(server, port, name, qtype, timeout, attempts):
                 except DNSError as exc:
                     last = str(exc)
                     continue          # not ours: keep waiting on the budget
-                return Reply(True, (time.time() - t0) * 1000.0,
+                return Reply(True, (time.monotonic() - t0) * 1000.0,
                              parsed["rcode"], parsed["answers"],
                              parsed["truncated"], None)
         except socket.timeout:
@@ -421,14 +426,14 @@ def query_tcp(server, port, name, qtype, timeout):
     try:
         sock = socket.socket(fam, socket.SOCK_STREAM)
         sock.settimeout(timeout)
-        t0 = time.time()
+        t0 = time.monotonic()
         sock.connect((server, port))
         sock.sendall(framed)
         head = _recv_exactly(sock, 2)
         length = struct.unpack("!H", head)[0]
         data = _recv_exactly(sock, length)
         parsed = parse_response(data, qid, name, qtype)
-        return Reply(True, (time.time() - t0) * 1000.0, parsed["rcode"],
+        return Reply(True, (time.monotonic() - t0) * 1000.0, parsed["rcode"],
                      parsed["answers"], False, None)
     except (OSError, DNSError, struct.error) as exc:
         return Reply(False, None, None, [], False,
@@ -736,7 +741,7 @@ def collect_facts(args, names):
     f["stub.slowest_ms"] = None
     if names and not args.no_stub:
         for name in names:
-            t0 = time.time()
+            t0 = time.monotonic()
             try:
                 infos = socket.getaddrinfo(name, None)
                 addrs = sorted(set(i[4][0] for i in infos))
@@ -745,7 +750,7 @@ def collect_facts(args, names):
                 addrs, err = [], str(exc)
             except (OSError, UnicodeError) as exc:
                 addrs, err = [], str(exc)
-            f["stub.all"][name] = {"ms": (time.time() - t0) * 1000.0,
+            f["stub.all"][name] = {"ms": (time.monotonic() - t0) * 1000.0,
                                    "addrs": addrs, "error": err}
         ms = [v["ms"] for v in f["stub.all"].values()]
         f["stub.slowest_ms"] = max(ms) if ms else None

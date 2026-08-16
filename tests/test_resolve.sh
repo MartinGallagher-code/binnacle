@@ -168,6 +168,40 @@ t_a_domain_line_is_a_one_entry_search_list() {
     assert_contains "$out" '"corp.example.com"'
 }
 
+t_a_mangled_reply_is_an_error_not_an_answer() {
+    # A record whose rdlength runs past the end of the packet -- a broken
+    # middlebox, a truncating proxy -- used to slice quietly and hand back
+    # a one-byte "address".  That bogus value then fed the cross-server
+    # comparison, which could report NS_DISAGREE off corruption.  Python
+    # slicing never complains; the parser has to.
+    "$PY" - "$RS" <<'PYEOF'
+import importlib.util, struct, sys
+spec = importlib.util.spec_from_file_location("resolve", sys.argv[1])
+resolve = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(resolve)
+
+qid, name = 0x1234, "db01.example.com"
+hdr = struct.pack(">HHHHHH", qid, 0x8180, 1, 1, 0, 0)
+qname = b"".join(bytes([len(l)]) + l.encode() for l in name.split(".")) + b"\x00"
+tail = b"\x00\x01\x00\x01"
+
+# rdlength says 255 bytes; one byte follows
+bad = hdr + qname + tail + b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\xff\x7f"
+try:
+    r = resolve.parse_response(bad, qid, name, 1)
+    sys.exit("parsed a truncated record into %r" % (r["answers"],))
+except resolve.DNSError:
+    pass
+
+# the same record with an honest length still parses
+good = hdr + qname + tail + \
+    b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x7f\x00\x00\x01"
+r = resolve.parse_response(good, qid, name, 1)
+assert r["answers"] == [("A", "127.0.0.1", 60)], r["answers"]
+PYEOF
+    assert_status $? 0
+}
+
 t_answers_a_real_query_on_loopback() {
     port="$(free_port)"
     start_fake_dns "$port" \
@@ -315,4 +349,5 @@ run_test "search cost is measured"             t_search_domains_cost_is_measured
 run_test "--csv does not swallow the name"     t_csv_does_not_swallow_the_name
 run_test "a duplicated nameserver counts once" t_a_duplicated_nameserver_still_counts_once
 run_test "an empty fact file is not health"    t_an_empty_fact_file_is_not_a_clean_bill_of_health
+run_test "a mangled reply is an error"         t_a_mangled_reply_is_an_error_not_an_answer
 finish

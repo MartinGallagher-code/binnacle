@@ -725,7 +725,7 @@ class Agent(object):
         self.pmtu_supported = True
         self.ping_procs = {}
         self.cpu_prev = read_self_cpu()
-        self.cpu_wall = time.time()
+        self.cpu_wall = time.monotonic()
 
     # -- setup ------------------------------------------------------------
     def open_sockets(self):
@@ -940,7 +940,7 @@ class Agent(object):
 
     # -- reporting --------------------------------------------------------
     def _cpu_pct(self):
-        now_cpu, now_wall = read_self_cpu(), time.time()
+        now_cpu, now_wall = read_self_cpu(), time.monotonic()
         out = ""
         if now_cpu is not None and self.cpu_prev is not None:
             dt = now_wall - self.cpu_wall

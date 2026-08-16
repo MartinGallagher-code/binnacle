@@ -201,6 +201,26 @@ t_script_pushes_runs_and_cleans_up() {
     assert_no_file "$FAKE_ROOT/a/agreetmp/s.sh"
 }
 
+t_a_flooding_host_is_killed_not_grouped() {
+    # One box caught in a log storm must not sink the whole fan-out: with
+    # everything buffered, a single runaway host grew this process by the
+    # size of whatever it printed, multiplied by --jobs.  Past --max-output
+    # the host is killed and reported; its front half is not grouped,
+    # because a truncated flood agreeing with anything means nothing.
+    cat > "$TEST_TMPDIR/ssh_flood" <<'SHIM'
+#!/bin/bash
+head -c 2000000 /dev/zero | tr '\0' 'x'
+SHIM
+    chmod +x "$TEST_TMPDIR/ssh_flood"
+    rc=0
+    out="$("$PY" "$AG" run --ssh "$TEST_TMPDIR/ssh_flood" \
+             -H node01 --max-output 100000 --timeout 30 -- uname 2>&1)" || rc=$?
+    assert_status $rc 3
+    assert_contains "$out" "exceeded --max-output"
+    # the captured prefix must not appear as a group's output
+    assert_not_contains "$out" "xxxxxxxxxx"
+}
+
 t_merge_csv_stacks_and_prefixes_ssh_host() {
     install_fake_ssh
     for h in a b; do
@@ -340,4 +360,5 @@ run_test "--first limits the blast radius"     t_first_limits_the_blast_radius
 run_test "sudo is always -n"                   t_sudo_is_always_non_interactive
 run_test "script pushes, runs, cleans up"      t_script_pushes_runs_and_cleans_up
 run_test "--merge-csv stacks with ssh_host"    t_merge_csv_stacks_and_prefixes_ssh_host
+run_test "a flooding host is killed, not grouped" t_a_flooding_host_is_killed_not_grouped
 finish
