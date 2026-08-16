@@ -221,6 +221,27 @@ SHIM
     assert_not_contains "$out" "xxxxxxxxxx"
 }
 
+t_a_bad_argument_is_refused_before_the_fan_out() {
+    # A regex that will not compile used to surface as a traceback from
+    # inside the per-host normalizer once the fan-out was underway, and a
+    # typo'd --hosts path fell through to being a hostname -- a fleet of
+    # one bogus host that then failed as "unreachable", blaming the
+    # network for a typo.
+    rc=0; out="$(ag -H n1 --grep '([unclosed' --quiet -- x 2>&1)" || rc=$?
+    assert_status $rc 2
+    assert_contains "$out" "bad --grep"
+    assert_not_contains "$out" "Traceback"
+    rc=0; out="$(ag -H n1 --scrub '*bad' --quiet -- x 2>&1)" || rc=$?
+    assert_status $rc 2
+    assert_contains "$out" "bad --scrub"
+    rc=0; out="$(ag_verb hosts --hosts ./no/such/hosts.txt 2>&1)" || rc=$?
+    assert_status $rc 2
+    assert_contains "$out" "no such host file"
+    rc=0; out="$(ag_verb hosts --hosts /tmp 2>&1)" || rc=$?
+    assert_status $rc 2
+    assert_contains "$out" "no such host file"
+}
+
 t_a_host_printing_junk_does_not_become_a_column() {
     # Aligning the merge by column name means every host's header joins
     # the merged one -- so a host that printed an error to stdout and
@@ -414,4 +435,5 @@ run_test "--merge-csv stacks with ssh_host"    t_merge_csv_stacks_and_prefixes_s
 run_test "a flooding host is killed, not grouped" t_a_flooding_host_is_killed_not_grouped
 run_test "mixed versions merge by column name" t_mixed_tool_versions_merge_by_column_name
 run_test "junk output is not a column"        t_a_host_printing_junk_does_not_become_a_column
+run_test "bad arguments are refused up front"  t_a_bad_argument_is_refused_before_the_fan_out
 finish

@@ -314,6 +314,19 @@ t_asking_for_neither_a_command_nor_a_window_is_a_usage_error() {
 }
 
 echo "during"
+t_a_foreign_csv_is_not_a_quiet_healthy_run() {
+    # A file with none of the columns a sample carries is some other CSV.
+    # Analysing it classified every row as "not bound" and printed a
+    # confident "this box was not the bottleneck" from data that measured
+    # nothing.
+    printf 'a,b\n1,2\n' > "$TEST_TMPDIR/foreign.csv"
+    rc=0
+    out="$(du_ --from-samples "$TEST_TMPDIR/foreign.csv" 2>&1)" || rc=$?
+    assert_status $rc 2
+    assert_contains "$out" "none of the columns"
+    assert_not_contains "$out" "not the bottleneck"
+}
+
 run_test "no ceiling means not the bottleneck" t_a_run_at_no_ceiling_says_the_box_was_not_the_bottleneck
 run_test "a pinned core is not an idle box"    t_a_pinned_core_is_not_an_idle_box
 run_test "a saturated box is cpu bound"        t_a_saturated_box_is_cpu_bound_not_serialised
@@ -341,4 +354,5 @@ run_test "a series with no hostname says ?"   t_a_series_without_a_hostname_says
 run_test "the series reads back in"            t_the_series_written_out_reads_back_in
 run_test "a too-short window says so"          t_a_window_shorter_than_one_interval_says_so
 run_test "neither command nor window errors"   t_asking_for_neither_a_command_nor_a_window_is_a_usage_error
+run_test "a foreign csv is refused"           t_a_foreign_csv_is_not_a_quiet_healthy_run
 finish
