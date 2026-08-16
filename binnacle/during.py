@@ -1643,6 +1643,14 @@ def read_samples(path):
         die("cannot read samples file: %s" % exc)
     if not rows:
         die("no samples in %s" % path)
+    # A file with none of the columns a sample carries is some other CSV.
+    # Analysing it would classify every row as "not bound" and print a
+    # confident "this box was not the bottleneck" from data that measured
+    # nothing -- the clean-report-you-cannot-trust failure.
+    known = set(SAMPLE_FIELDS) & set(rows[0])
+    if not known - {"host", "ts"}:
+        die("%s has none of the columns during writes -- is this a "
+            "--samples file?" % path)
     return rows
 
 

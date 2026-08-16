@@ -347,6 +347,12 @@ def read_host_file(path):
         text = sys.stdin.read().lstrip("\ufeff")
     else:
         if not os.path.isfile(path):
+            # A spec that was meant as a file must not fall through to
+            # being a hostname: a typo'd path or a directory would become
+            # a fleet of one bogus host.  Nothing with a path separator
+            # is a valid hostname, so refuse it here by name.
+            if os.sep in path or os.path.isdir(path):
+                die("no such host file: %s" % path)
             return None
         try:
             with io.open(path, encoding="utf-8-sig", errors="replace") as f:
@@ -1256,6 +1262,21 @@ def build_parser():
 
 
 def apply_presets(args):
+    # A pattern that will not compile is refused here, naming the flag and
+    # the reason, rather than surfacing as a traceback from inside the
+    # per-host normalizer once the fan-out is already underway.
+    for flag in ("grep", "vgrep"):
+        pat = getattr(args, flag, None)
+        if pat:
+            try:
+                re.compile(pat)
+            except re.error as exc:
+                die("bad --%s pattern %r: %s" % (flag, pat, exc))
+    for pat in (getattr(args, "scrub", None) or []):
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            die("bad --scrub pattern %r: %s" % (pat, exc))
     if args.strict and args.fleet_csv:
         die("--strict and --fleet-csv contradict each other: one turns every "
             "normalization off, the other turns two on")

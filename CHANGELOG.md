@@ -29,6 +29,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   all. Both are now reported as *not merged, output is not this CSV* and
   left out, while genuine skew still merges. Found by probing the merge
   change from this same release rather than by trusting it.
+- **Three bad arguments answered with the wrong thing entirely.** An
+  invalid regex to `agree --grep`/`--vgrep`/`--scrub` surfaced as a raw
+  traceback from inside the per-host normalizer once the fan-out was
+  already underway; it is now refused at startup naming the flag, the
+  pattern and the reason. A typo'd `--hosts` path fell through to being a
+  *hostname* — a fleet of one bogus host that then failed as
+  "unreachable", blaming the network for a typo; nothing with a path
+  separator is a valid hostname, so it is refused by name. And
+  `during --from-samples` on a CSV with none of the columns a sample
+  carries classified every row as "not bound" and printed a confident
+  *"this box was not the bottleneck"* from data that measured nothing —
+  the clean-report-you-cannot-trust failure; a foreign CSV is now refused
+  with the question it raises. A wider sweep in the same pass came back
+  healthy: `agree doctor` exits 3 when a host never answered, the
+  template round-trip marks only the genuinely new shape as NEW,
+  `--recheck-only` restores a recovered host while leaving hand-written
+  comments alone, the `--limit` guard refuses on a non-tty, and every
+  `--explain` of a bogus rule says "no such rule" with the fix.
 
 ## [0.2.0] - 2026-08-16
 
