@@ -92,6 +92,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -151,6 +152,12 @@ def expand_range(spec):
     m = RANGE_RE.search(spec)
     if not m:
         return [spec]
+    # [::1] and [fe80::1]:22 are addresses, not ranges.  Expanding one
+    # strips the brackets and glues the port back on as more colons --
+    # "[::1]:2222" became the valid-looking and completely wrong
+    # address "::1:2222".
+    if ":" in m.group(1):
+        return [spec]
     before, body, after = spec[:m.start()], m.group(1), spec[m.end():]
     items = []
     for part in body.split(","):
@@ -207,6 +214,55 @@ class Host(object):
         return self.name
 
 
+def is_ipv6(addr):
+    """A colon in an address can only be IPv6: v4 and names have none."""
+    return ":" in addr
+
+
+def split_host_port(spec):
+    """'host', 'host:port', '[v6]', '[v6]:port', bare v6 -> (addr, port).
+
+    IPv6 needs the bracket form to carry a port, because the address is
+    made of colons and the last one would otherwise be read as a port
+    separator -- which is how "::1" once became the address ":" on port 1,
+    collapsing every v6 entry in a list to the same nonsense host.  A bare
+    literal is fine and simply has no port.
+
+    Validated with inet_pton rather than a pattern, so "2001:db8::1::2" is
+    refused here instead of failing later as a connection error that names
+    the wrong cause.
+    """
+    spec = spec.strip()
+    port = None
+    if spec.startswith("["):
+        addr, sep, rest = spec[1:].partition("]")
+        if not sep:
+            die("no closing ] in host token %r" % spec)
+        if rest.startswith(":"):
+            if not rest[1:].isdigit():
+                die("bad port %r in host token %r" % (rest[1:], spec))
+            port = int(rest[1:])
+        elif rest:
+            die("unexpected %r after ] in host token %r" % (rest, spec))
+    elif spec.count(":") > 1:
+        addr = spec                       # a bare v6 literal carries no port
+    elif ":" in spec:
+        addr, _, p = spec.rpartition(":")
+        if p.isdigit():
+            port = int(p)
+        else:
+            addr = spec
+    else:
+        addr = spec
+    if is_ipv6(addr):
+        try:
+            socket.inet_pton(socket.AF_INET6, addr)
+        except (OSError, ValueError):
+            die("not a valid IPv6 address: %r (in host token %r)"
+                % (addr, spec))
+    return addr, port
+
+
 def parse_host_token(tok):
     tok = tok.strip()
     bare = "=" not in tok
@@ -215,23 +271,9 @@ def parse_host_token(tok):
     else:
         name, addr = tok.split("=", 1)
         name, addr = name.strip(), addr.strip()
-    # Refuse IPv6 outright rather than mis-parsing it, exactly as netmesh
-    # does: rsplit on the last colon turns "::1" into the address ":" on
-    # port 1, and every v6 host in a list collapses to the same nonsense
-    # entry.  Silently contacting the wrong thing is far worse than saying
-    # this is not supported, and the bracket form is refused too because
-    # nothing downstream here strips the brackets before ssh sees them.
-    if addr.startswith("[") or addr.count(":") > 1:
-        die("IPv6 addresses are not supported yet: %r" % tok)
-    port = None
-    if ":" in addr:
-        addr, p = addr.rsplit(":", 1)
-        if p.isdigit():
-            port = int(p)
-            if bare:
-                name = addr
-        else:
-            addr = "%s:%s" % (addr, p)
+    addr, port = split_host_port(addr)
+    if bare:
+        name = addr
     if not name or not addr:
         die("bad host token %r (want name[=addr[:port]])" % tok)
     return Host(name, addr, port)
@@ -453,7 +495,14 @@ class Runner(object):
         self.remote_dir = args.remote_dir
 
     def target(self, host):
+        """ssh takes a bare address, v6 included: `ssh user@2001:db8::1`."""
         return "%s@%s" % (self.user, host.addr) if self.user else host.addr
+
+    def scp_target(self, host):
+        """scp splits its argument on the last colon to find the path, so a
+        v6 literal has to be bracketed or the address loses its tail."""
+        addr = "[%s]" % host.addr if is_ipv6(host.addr) else host.addr
+        return "%s@%s" % (self.user, addr) if self.user else addr
 
     def ssh_argv(self, host, command):
         argv = list(self.ssh) + SSH_OPTS
@@ -483,7 +532,7 @@ class Runner(object):
             self.ssh_argv(host, "mkdir -p %s" % shlex.quote(d)), 60)
         if rc != 0:
             return rc, err
-        dest = "%s:%s/" % (self.target(host), d)
+        dest = "%s:%s/" % (self.scp_target(host), d)
         argv = list(self.scp) + SSH_OPTS
         if host.port:
             argv += ["-P", str(host.port)]
@@ -498,7 +547,8 @@ class Runner(object):
     def pull_files(self, host, pattern, outdir):
         hostdir = os.path.join(outdir, host.name)
         os.makedirs(hostdir, exist_ok=True)
-        src = "%s:%s/%s" % (self.target(host), self.remote_dir, pattern)
+        src = "%s:%s/%s" % (self.scp_target(host),
+                             self.remote_dir, pattern)
         argv = list(self.scp) + SSH_OPTS
         if host.port:
             argv += ["-P", str(host.port)]
@@ -857,7 +907,13 @@ def cmd_hosts(args):
         if h.name == h.addr and not h.port:
             print(h.name)
         else:
-            print("%s=%s%s" % (h.name, h.addr,
+            # A v6 address carrying a port has to be printed bracketed, or
+            # this output does not round-trip: "fe80::1:2222" reads back as
+            # a different address -- a valid one -- with no port at all,
+            # and this verb exists to be fed to something else.
+            addr = ("[%s]" % h.addr if h.port and is_ipv6(h.addr)
+                    else h.addr)
+            print("%s=%s%s" % (h.name, addr,
                                ":%d" % h.port if h.port else ""))
     return 0
 
@@ -988,6 +1044,7 @@ def _add_common(p):
     p.add_argument("--merge-csv", metavar="PATH")
 
     p.add_argument("--loose", action="store_true")
+    p.add_argument("--fleet-csv", action="store_true")
     p.add_argument("--strict", action="store_true")
     p.add_argument("--no-trim", dest="trim", action="store_false", default=True)
     p.add_argument("--no-strip-ansi", dest="strip_ansi",
@@ -1038,6 +1095,18 @@ def build_parser():
 
 
 def apply_presets(args):
+    if args.strict and args.fleet_csv:
+        die("--strict and --fleet-csv contradict each other: one turns every "
+            "normalization off, the other turns two on")
+    if args.fleet_csv:
+        # Every tool here emits CSV beginning host,ts -- both per-host by
+        # construction, so without these two no host can ever agree with
+        # another and the fleet grouping is impossible.  A preset rather
+        # than a default because the normalizations are still disclosed
+        # with the result, and a reader has to see that the host column
+        # was masked to get there.
+        args.mask_hosts = True
+        args.mask_times = True
     if args.strict:
         for f in ("trim", "strip_ansi", "squeeze_ws", "sort_lines",
                   "ignore_case", "drop_empty", "mask_hosts", "mask_times",

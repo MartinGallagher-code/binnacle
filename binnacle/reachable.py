@@ -83,6 +83,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -153,6 +154,10 @@ def expand_range(spec):
     m = RANGE_RE.search(spec)
     if not m:
         return [spec]
+    # [::1] and [fe80::1]:22 are addresses, not ranges -- expanding one
+    # strips the brackets and glues the port back on as more colons.
+    if ":" in m.group(1):
+        return [spec]
     before, body, after = spec[:m.start()], m.group(1), spec[m.end():]
     items = []
     for part in body.split(","):
@@ -178,6 +183,51 @@ def expand_range(spec):
     return out
 
 
+def is_ipv6(addr):
+    """A colon in an address can only be IPv6: v4 and names have none."""
+    return ":" in addr
+
+
+def split_host_port(spec):
+    """'host', 'host:port', '[v6]', '[v6]:port', bare v6 -> (addr, port).
+
+    canonical copy: binnacle/agree.py split_host_port.  IPv6 needs the
+    bracket form to carry a port, because the address is made of colons
+    and the last one would otherwise be read as a port separator -- which
+    is how "::1" once became the address ":" on port 1, and this tool
+    rewrites the file it is given on the strength of that answer.
+    """
+    spec = spec.strip()
+    port = None
+    if spec.startswith("["):
+        addr, sep, rest = spec[1:].partition("]")
+        if not sep:
+            die("no closing ] in host token %r" % spec)
+        if rest.startswith(":"):
+            if not rest[1:].isdigit():
+                die("bad port %r in host token %r" % (rest[1:], spec))
+            port = int(rest[1:])
+        elif rest:
+            die("unexpected %r after ] in host token %r" % (rest, spec))
+    elif spec.count(":") > 1:
+        addr = spec                       # a bare v6 literal carries no port
+    elif ":" in spec:
+        addr, _, p = spec.rpartition(":")
+        if p.isdigit():
+            port = int(p)
+        else:
+            addr = spec
+    else:
+        addr = spec
+    if is_ipv6(addr):
+        try:
+            socket.inet_pton(socket.AF_INET6, addr)
+        except (OSError, ValueError):
+            die("not a valid IPv6 address: %r (in host token %r)"
+                % (addr, spec))
+    return addr, port
+
+
 def token_address(tok):
     """'name[=addr[:port]]' -> (name, addr, port_or_None)."""
     tok = tok.strip()
@@ -187,23 +237,9 @@ def token_address(tok):
     else:
         name, addr = tok.split("=", 1)
         name, addr = name.strip(), addr.strip()
-    # Refuse IPv6 outright rather than mis-parsing it, exactly as netmesh
-    # does: rsplit on the last colon turns "::1" into the address ":" on
-    # port 1, and every v6 host in a list collapses to the same nonsense
-    # entry.  Silently contacting the wrong thing is far worse than saying
-    # this is not supported, and the bracket form is refused too because
-    # nothing downstream here strips the brackets before ssh sees them.
-    if addr.startswith("[") or addr.count(":") > 1:
-        die("IPv6 addresses are not supported yet: %r" % tok)
-    port = None
-    if ":" in addr:
-        addr, p = addr.rsplit(":", 1)
-        if p.isdigit():
-            port = int(p)
-            if bare:
-                name = addr
-        else:
-            addr = "%s:%s" % (addr, p)
+    addr, port = split_host_port(addr)
+    if bare:
+        name = addr
     return name or tok, addr or tok, port
 
 
@@ -352,6 +388,13 @@ class Result(object):
         self.restored = False     # was commented out, and has come back
 
 
+def _cannot_ping_this_family(err):
+    low = (err or "").lower()
+    return ("invalid option" in low or "unrecognized option" in low
+            or "unknown option" in low or "usage:" in low
+            or "address family not supported" in low)
+
+
 class Prober(object):
     def __init__(self, args):
         self.args = args
@@ -378,13 +421,22 @@ class Prober(object):
     def ping_host(self, addr):
         if not self.have_ping:
             return None
-        argv = list(self.ping_cmd) + [
-            "-n", "-q",
-            "-c", str(self.args.ping_count),
-            "-w", str(int(max(1, self.args.ping_timeout))),
-            addr]
-        rc, _out, _err = self._run(argv, self.args.ping_timeout + 3)
+        argv = list(self.ping_cmd)
+        if is_ipv6(addr):
+            # iputils has taken -6 since 2015; older ones need ping6 and
+            # will reject the flag, which is handled below.
+            argv += ["-6"]
+        argv += ["-n", "-q",
+                 "-c", str(self.args.ping_count),
+                 "-w", str(int(max(1, self.args.ping_timeout))),
+                 addr]
+        rc, _out, err = self._run(argv, self.args.ping_timeout + 3)
         if rc == 127:
+            return None
+        if rc != 0 and _cannot_ping_this_family(err):
+            # "ping does not speak IPv6 here" is not "the host is down".
+            # A probe that could not be run is unknown, never a failure --
+            # and ssh is the gate anyway.
             return None
         return rc == 0
 

@@ -10,8 +10,7 @@ half wasted.
 The composition that motivates the whole set:
 
 ```bash
-agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
-    --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 That pushes `why-slow` to every host, runs it, collects the CSV, and groups
@@ -38,10 +37,11 @@ command. Nothing else does this, and it works because `why-slow --csv` is
 deterministic: two hosts with the same problem emit byte-identical rows, so
 they land in the same group.
 
-### Why `--mask-hosts --mask-times`
+### Why `--fleet-csv`
 
-Both are load-bearing, and leaving either off silently costs you the whole
-result. Every row these tools emit begins `host,ts,...`:
+The preset is exactly `--mask-hosts --mask-times`. Both are load-bearing,
+and leaving either off silently costs you the whole result. Every row these
+tools emit begins `host,ts,...`:
 
 - the **host** column is different on every machine by construction, so
   without `--mask-hosts` no two hosts can ever agree about anything and each
@@ -50,7 +50,8 @@ result. Every row these tools emit begins `host,ts,...`:
   a tick land in different groups for a reason that has nothing to do with
   what is wrong with them
 
-Neither flag touches `--merge-csv`, which stacks the **raw** output: the
+Neither normalization touches `--merge-csv`, which stacks the **raw**
+output: the
 masking exists only so the comparison sees the findings rather than the
 metadata, and the merged artifact keeps the real hostname and the real
 timestamp. That is the distinction worth holding on to — masking is applied
@@ -72,8 +73,7 @@ awk -F, '$5=="CRITICAL"' triage.csv
 ## The same trick for DNS
 
 ```bash
-agree script ./resolve.py --hosts prod.txt --mask-hosts --mask-times \
-    -- db01.example.com --csv
+agree script ./resolve.py --hosts prod.txt --fleet-csv -- db01.example.com --csv
 ```
 
 Hosts get grouped by **what they think a name means**. One rack pointed at a
@@ -83,8 +83,7 @@ otherwise meet as intermittent application errors on a third of the fleet.
 ## The same trick for logs
 
 ```bash
-agree script ./logtriage.py --hosts prod.txt --mask-hosts --mask-times \
-    -- /var/log/syslog --csv
+agree script ./logtriage.py --hosts prod.txt --fleet-csv -- /var/log/syslog --csv
 ```
 
 Hosts get grouped by **which templates they are emitting**. This works for
@@ -105,8 +104,7 @@ what:
 reachable prod.txt -i
 
 # 2. What is wrong, and where?
-agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
-    --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 
 # 3. why-slow says the boxes are fine. Is it DNS?
 resolve db01.example.com
@@ -148,8 +146,7 @@ instant:
 during -- ./benchmark.sh
 
 # The whole fleet, while something else drives the load
-agree script ./during.py --hosts prod.txt --mask-hosts --mask-times \
-    -- --seconds 60 --csv
+agree script ./during.py --hosts prod.txt --fleet-csv -- --seconds 60 --csv
 ```
 
 Run it on the **load generator** as well as the target. A generator that

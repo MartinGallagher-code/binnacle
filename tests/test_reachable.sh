@@ -265,22 +265,28 @@ t_recheck_only_touches_commented_lines() {
     assert_not_contains "$body" "# web01"
 }
 
-t_ipv6_is_refused_rather_than_mis_parsed() {
+t_ipv6_entries_are_probed_not_mangled() {
     # This tool rewrites the file it is given, so mis-parsing "::1" into
-    # the address ":" would comment out working hosts on the strength of a
-    # parse bug.  Refused instead, as netmesh already does.
-    printf 'web01\n::1\n' > "$TEST_TMPDIR/hosts.txt"
+    # the address ":" meant commenting out working hosts on the strength
+    # of a parse bug.
+    printf 'web01\n::1\nv6=[fe80::1]:2222\n' > "$TEST_TMPDIR/hosts.txt"
+    out="$(re "$TEST_TMPDIR/hosts.txt" --dry-run 2>&1)"
+    assert_contains "$out" "::1"
+    assert_contains "$out" "v6=[fe80::1]:2222"
+    # --dry-run contacts nobody and leaves the file exactly as it was.
+    assert_eq "$(cat "$TEST_TMPDIR/hosts.txt")" \
+        "$(printf 'web01\n::1\nv6=[fe80::1]:2222')"
+    # An address that is not an address still stops the run up front.
+    printf 'web01\n2001:db8::1::2\n' > "$TEST_TMPDIR/bad.txt"
     set +e
-    out="$(re "$TEST_TMPDIR/hosts.txt" --dry-run 2>&1)"; status=$?
+    bad="$(re "$TEST_TMPDIR/bad.txt" --dry-run 2>&1)"; rc=$?
     set -e
-    assert_status $status 2
-    assert_contains "$out" "IPv6"
-    # The file it refused to understand is left exactly as it was.
-    assert_eq "$(cat "$TEST_TMPDIR/hosts.txt")" "$(printf 'web01\n::1')"
+    assert_status $rc 2
+    assert_contains "$bad" "not a valid IPv6 address"
 }
 
 echo "reachable"
-run_test "ipv6 refused, not mis-parsed"        t_ipv6_is_refused_rather_than_mis_parsed
+run_test "ipv6 entries are probed"             t_ipv6_entries_are_probed_not_mangled
 run_test "comments out only the failures"      t_comments_out_only_the_failures
 run_test "all reachable: exit 0, no change"    t_all_reachable_exits_zero_and_changes_nothing
 run_test "preserves comments, blanks, notes"   t_preserves_comments_blanks_and_inline_notes
