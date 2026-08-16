@@ -1,7 +1,7 @@
 # Composing them
 
-Each tool is useful alone. The reason to have six is that they fit
-together: three of them produce deterministic CSV, one of them fans things
+Each tool is useful alone. The reason to have seven is that they fit
+together: four of them produce deterministic CSV, one of them fans things
 out across a fleet, and one keeps the host list honest so the fan-out is not
 half wasted.
 
@@ -108,17 +108,38 @@ comments out are re-tested next run and restored when they come back. A
 weekly cron keeps the list true, so every fan-out afterwards is measuring
 what you think it is.
 
+## Benchmarking rather than firefighting
+
+The tools above answer "what is wrong now". Under a benchmark the question
+is different -- what limited the run, and can the number be believed -- and
+that is [`during`](tools/during.md), which watches a window rather than an
+instant:
+
+```bash
+# One box, wrapping the benchmark: its output and exit status pass through
+during -- ./benchmark.sh
+
+# The whole fleet, while something else drives the load
+agree script ./during.py --hosts prod.txt -- --seconds 60 --csv
+```
+
+Run it on the **load generator** as well as the target. A generator that
+reports `cpu` or `one core` while the target reports `not bound` means the
+benchmark measured the generator, which is the most common way a load test
+lies -- and neither machine's own numbers say so on their own.
+
 ## With the rest of the toolchain
 
 `binnacle` measures an **idle** network and a **single** box's health. When
 those come back clean, the question has moved to load, and that is a
-different pair of tools:
+different pair of tools -- with `during` watching while they run:
 
 | Question | Tool |
 |---|---|
 | What does the network do when idle? | `netmesh` |
 | How much TCP bandwidth under load? | [`iperf_orchestrator`](https://github.com/MartinGallagher-code/iperf_orchestrator) |
 | How many packets per second under load? | [`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator) |
+| What was each box doing while that ran? | `during` |
 | Which settings actually matter? | [`doehelper`](https://doehelper.com) |
 
 `netmesh`'s grid CSVs deliberately use the same `src\dst` shape as `mx`'s,

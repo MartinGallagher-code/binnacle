@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`during`** — a seventh instrument: *what limited this run, and can you
+  trust the number?* The others diagnose an instant; this samples a whole
+  window and answers what a point-in-time tool structurally cannot.
+  - Every sample is classified into **exactly one** state — cpu, one core,
+    io, memory, network, throttled, stolen, or not bound — so the shares add
+    up and "bound by two things at once" cannot be reported.
+  - **"This box was not the bottleneck"** is a first-class finding: nothing
+    near a ceiling means the limit was the load generator, the peer, or a
+    lock inside the application.
+  - **`one core` is its own state.** A serialised benchmark pins one core
+    and leaves an eight-core box reading 12% busy, which every whole-box
+    average calls idle — and the usual next step is a bigger instance that
+    changes nothing.
+  - **Trust outranks attribution.** Warmup, an interloping process, a
+    falling clock, an exhausted burst balance, steal and instability all
+    rank above the bottleneck in the verdict, because a bottleneck
+    attributed from an invalid run is a confident wrong answer.
+  - The wrapped command's output and exit status pass straight through, so
+    `during -- make bench` is a drop-in prefix; its process tree is excluded
+    from interloper detection, re-derived every sample so forked workers
+    still count as the benchmark. `^C` still prints the report.
+  - `--samples` writes the raw tidy series; `--csv` writes findings with
+    why-slow's header; `--from-samples` re-runs the whole analysis over a
+    saved series, which is how it is tested; `--baseline` compares two runs.
+
 - **`resolve`** — a sixth instrument: *is it DNS, and which resolver is
   wrong?* Queries every configured nameserver directly on the wire rather
   than through the stub, because the stub is what hides the fault.

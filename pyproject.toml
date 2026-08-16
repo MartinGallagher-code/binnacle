@@ -21,6 +21,8 @@ keywords = [
     "troubleshooting",
     "performance",
     "benchmark",
+    "bottleneck",
+    "profiling",
     "network",
     "latency",
     "path-mtu",
@@ -81,6 +83,7 @@ logtriage = "binnacle.logtriage:main"
 netmesh = "binnacle.netmesh:main"
 reachable = "binnacle.reachable:main"
 resolve = "binnacle.resolve:main"
+during = "binnacle.during:main"
 
 [tool.setuptools]
 packages = ["binnacle"]

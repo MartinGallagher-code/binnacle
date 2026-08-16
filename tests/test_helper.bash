@@ -450,6 +450,70 @@ with open(path, "w") as fh:
 EOF
 }
 
+# during_samples FILE COUNT [col=spec ...] -- a synthetic sample series for
+# during's analysis, which is a pure function of one.  A spec is:
+#     7          constant
+#     10..90     linear ramp from first sample to last
+#     10:90      step change at the halfway point
+#     a,b,c      an explicit list, cycled to COUNT
+# Defaults describe an idle but healthy box, so a case states only the
+# series it is about.
+during_samples() {
+    local path="$1" count="$2"; shift 2
+    "$PY" - "$path" "$count" "$@" <<'EOF'
+import csv, sys
+path, count, overrides = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
+FIELDS = ["host", "ts", "elapsed_s", "cpu_busy_pct", "cpu_sys_pct",
+          "cpu_iowait_pct", "cpu_steal_pct", "cpu_max_core_pct", "cpu_cores",
+          "runnable", "blocked", "psi_cpu_some", "psi_io_some", "psi_io_full",
+          "psi_mem_full", "mem_available_pct", "swap_per_s", "disk",
+          "disk_util_pct", "disk_await_ms", "disk_mbps", "net_if", "net_mbps",
+          "net_link_mbps", "net_drop_per_s", "tcp_retrans_pct",
+          "cg_throttled_pct", "cpu_ghz", "top_comm", "top_cpu_pct"]
+base = {"host": "testbox", "ts": 1786741765, "cpu_busy_pct": 5.0,
+        "cpu_sys_pct": 1.0, "cpu_iowait_pct": 0.2, "cpu_steal_pct": 0.0,
+        "cpu_max_core_pct": 8.0, "cpu_cores": 8, "runnable": 1, "blocked": 0,
+        "psi_cpu_some": 0.0, "psi_io_some": 0.0, "psi_io_full": 0.0,
+        "psi_mem_full": 0.0, "mem_available_pct": 80.0, "swap_per_s": 0.0,
+        "disk": "sda", "disk_util_pct": 2.0, "disk_await_ms": 1.0,
+        "disk_mbps": 1.0, "net_if": "eth0", "net_mbps": 1.0,
+        "net_link_mbps": 10000, "net_drop_per_s": 0.0,
+        "tcp_retrans_pct": 0.0, "cg_throttled_pct": "", "cpu_ghz": 3.4,
+        "top_comm": "", "top_cpu_pct": ""}
+
+
+def series(spec, n):
+    if ".." in spec:
+        a, b = (float(x) for x in spec.split("..", 1))
+        if n == 1:
+            return [a]
+        return [a + (b - a) * i / (n - 1.0) for i in range(n)]
+    if ":" in spec:
+        a, b = (float(x) for x in spec.split(":", 1))
+        return [a if i < n // 2 else b for i in range(n)]
+    if "," in spec:
+        vals = spec.split(",")
+        return [vals[i % len(vals)] for i in range(n)]
+    return [spec] * n
+
+
+cols = {}
+for o in overrides:
+    k, v = o.split("=", 1)
+    cols[k] = series(v, count)
+
+with open(path, "w", newline="") as fh:
+    w = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
+    w.writeheader()
+    for i in range(count):
+        row = dict(base)
+        row["elapsed_s"] = round((i + 1) * 1.0, 2)
+        for k, vals in cols.items():
+            row[k] = vals[i]
+        w.writerow(dict((k, row.get(k, "")) for k in FIELDS))
+EOF
+}
+
 # resolve_facts_json FILE [key=value ...] -- the same idea for resolve: a
 # box whose DNS is healthy, with overrides applied.
 resolve_facts_json() {

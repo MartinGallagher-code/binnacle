@@ -21,8 +21,8 @@ REPO_ROOT = os.path.dirname(DOCS_DIR)
 sys.path.insert(0, REPO_ROOT)
 
 import binnacle  # noqa: E402
-from binnacle import (agree, logtriage, netmesh, reachable, resolve,  # noqa: E402
-                      why_slow)
+from binnacle import (agree, during, logtriage, netmesh,  # noqa: E402
+                      reachable, resolve, why_slow)
 
 project = "binnacle"
 author = "Martin J. Gallagher"
@@ -58,6 +58,7 @@ TOOLS = [
     ("netmesh", netmesh, True),
     ("reachable", reachable, False),
     ("resolve", resolve, False),
+    ("during", during, False),
 ]
 
 
@@ -136,6 +137,8 @@ def _generate_cli_reference():
         "`NETMESH_PORT` |",
         "| `reachable` | `REACHABLE_JOBS`, `REACHABLE_TIMEOUT`, "
         "`REACHABLE_USER`, `REACHABLE_SSH`, `REACHABLE_PING` |",
+        "| `during` | `DURING_SECONDS`, `DURING_INTERVAL`, `DURING_SETTLE`, "
+        "`DURING_MIN_SEVERITY`, `DURING_PROC`, `DURING_SYS`, `NO_COLOR` |",
         "| `resolve` | `RESOLVE_SERVERS`, `RESOLVE_TYPES`, "
         "`RESOLVE_TIMEOUT`, `RESOLVE_ATTEMPTS`, `RESOLVE_MIN_SEVERITY`, "
         "`RESOLVE_CONF`, `RESOLVE_HOSTS`, `NO_COLOR` |",

@@ -8,7 +8,7 @@
 [![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds six, for Linux boxes, the fleets they belong to, and the networks
+one holds seven, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -19,6 +19,7 @@ between them.
 | `netmesh` | Is it the network, and which link is sick? |
 | `reachable` | Which entries in this server list are still real? |
 | `resolve` | Is it DNS, and which resolver is wrong? |
+| `during` | What limited this run, and can I trust the number? |
 
 ```bash
 pip install binnacle
@@ -77,7 +78,7 @@ agree script ./why_slow.py --hosts prod.txt --merge-csv triage.csv -- --csv
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The six, briefly
+## The seven, briefly
 
 ### why-slow
 
@@ -117,6 +118,22 @@ counts what arrived, so **loss splits into forward and return legs**.
 Unprivileged path-MTU discovery catches the black hole where small packets
 echo and large ones vanish.
 
+### during
+
+The others diagnose an instant; a benchmark is a window. Samples the box
+across the run and classifies every sample into exactly one state, so the
+answer is *"io for 78% of the run"* rather than whichever number was
+largest when you looked. **The most useful finding is "this box was not the
+bottleneck"** -- nothing near a ceiling means the limit was the load
+generator, the peer, or a lock in the application, and no amount of
+hardware here will move it. One core pinned while the rest idle gets its
+own state, because a serialised run looks idle in every whole-box average.
+Then it judges whether the number can be believed at all: warmup separated
+from steady state, a cron job that ran inside the window, a clock that fell
+partway through, a burst balance that ran out, a neighbour taking steal.
+**Trust outranks attribution** -- a bottleneck attributed from an invalid
+run is a confident wrong answer.
+
 ### resolve
 
 Asks every configured nameserver separately rather than through the stub,
@@ -149,7 +166,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # six suites, 101 checks
+bash tests/run_tests.sh          # seven suites, 122 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim
