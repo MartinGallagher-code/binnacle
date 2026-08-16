@@ -15,13 +15,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/test_helper.bash"
 
 AG="$BINNACLE_DIR/agree.py"
 
-# The two normalizations every one of these needs, and why:
+# --fleet-csv is exactly --mask-hosts --mask-times, and both are needed:
 #   --mask-hosts   every row starts with the machine's own name, so without
 #                  it no two hosts can ever agree about anything
 #   --mask-times   every row carries an epoch, so two hosts answering either
 #                  side of a tick would land in different groups
 # Neither touches --merge-csv, which stacks the raw output.
-FLEET_NORM=(--mask-hosts --mask-times)
+FLEET_NORM=(--fleet-csv)
 
 fleet() {
     # fleet TOOL -- ARGS...  : push TOOL to node01..node03 and group them
@@ -132,6 +132,29 @@ t_during_groups_hosts_by_what_limited_them() {
 
 # the shared contract -------------------------------------------------------
 
+t_fleet_csv_is_the_two_flags_and_says_so() {
+    # A preset that hid what it did would break the rule that every
+    # normalization is disclosed with the result.
+    setup_three_hosts
+    seed_why_slow
+    preset="$(fleet why_slow.py --fleet-csv \
+                -- --from-facts facts.json --csv 2>&1 || true)"
+    spelt="$(fleet why_slow.py --mask-hosts --mask-times \
+               -- --from-facts facts.json --csv 2>&1 || true)"
+    assert_contains "$preset" "2 groups"
+    assert_contains "$preset" "mask-hosts"
+    assert_contains "$preset" "mask-times"
+    # Identical but for the timing line, so compare the grouping itself.
+    assert_eq "$(printf '%s' "$preset" | grep -c GROUP)" \
+              "$(printf '%s' "$spelt" | grep -c GROUP)"
+    # It contradicts --strict, and says so rather than silently picking.
+    set +e
+    out="$("$PY" "$AG" hosts -H node01 --strict --fleet-csv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "contradict"
+}
+
 t_the_diagnostic_tools_share_one_csv_header() {
     # This is what lets `agree --merge-csv` stack them into one file, so it
     # is worth asserting rather than assuming.
@@ -171,6 +194,7 @@ run_test "without masking, no host can agree"   t_without_masking_every_host_is_
 run_test "--merge-csv keeps the real values"    t_merge_csv_keeps_the_values_masking_hid
 run_test "resolve groups by what a name means"  t_resolve_groups_hosts_by_what_a_name_resolves_to
 run_test "during groups by what limited them"   t_during_groups_hosts_by_what_limited_them
+run_test "--fleet-csv is the two flags"         t_fleet_csv_is_the_two_flags_and_says_so
 run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one_csv_header
 run_test "an unreachable host is a group"       t_an_unreachable_host_is_a_group_not_an_error
 finish

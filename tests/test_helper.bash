@@ -161,7 +161,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 n=${#args[@]}; dest="${args[$((n-1))]}"; srcs=("${args[@]:0:$((n-1))}")
-host="${dest%%:*}"; host="${host#*@}"; path="${dest#*:}"
+# Real scp splits the destination on the last colon, so an IPv6 literal
+# has to arrive bracketed; strip the brackets the way scp does.
+if [[ "$dest" == *"["*"]:"* ]]; then
+  host="${dest#*[}"; host="${host%%]*}"; path="${dest#*]:}"
+else
+  host="${dest%%:*}"; path="${dest#*:}"
+fi
+host="${host#*@}"
 printf 'scp %s %s\n' "$host" "$path" >> "$FAKE_SSH_LOG"
 [ -f "$FAKE_ROOT/$host/.unreachable" ] && exit 1
 # Match real scp: a destination ending in / (or naming an existing

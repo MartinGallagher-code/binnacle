@@ -8,8 +8,7 @@ agree, 3 do not, here is the diff.
 ```bash
 agree -H 'node[01-24]' -- rpm -q openssl
 agree --hosts prod.txt --loose -- uname -r
-agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
-    --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 agree hosts -H 'rack[a-c]-node[01-04]'      # expand without running anything
 agree doctor --hosts prod.txt               # can each host be reached and used?
 ```
@@ -92,6 +91,14 @@ documented, because it matters:
 11. `--trim` *(on by default)*
 12. `--drop-empty`
 13. `--sort-lines`
+
+`--fleet-csv` is the preset for grouping the CSV these tools emit: exactly
+`--mask-hosts --mask-times`, because every one of them writes rows beginning
+`host,ts` and both columns are per-host by construction. It is a preset
+rather than a default because the normalizations are still disclosed with
+the result — a reader has to be able to see that the host column was masked
+to get the grouping. It contradicts `--strict`, and says so rather than
+silently picking one.
 
 Two presets: `--loose` (trim + squeeze-ws + mask-times + mask-hosts +
 mask-numbers) and `--strict` (nothing at all, byte-exact).
@@ -181,8 +188,7 @@ collects files after, and `agree script PATH` is the sugar for the whole
 cycle: push, `chmod +x`, run, collect, clean up.
 
 ```bash
-agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
-    -- --csv --interval 2
+agree script ./why_slow.py --hosts prod.txt --fleet-csv -- --csv --interval 2
 ```
 
 This is the reason `agree` exists in the same distribution as the others.
@@ -215,12 +221,27 @@ That is fleet-wide triage in one command.
 
 ## IPv6
 
-Not supported, and refused rather than guessed at. A host token is
-`name[=addr[:port]]`, so the last colon means a port — which turns `::1`
-into the address `:` on port 1, and collapses every v6 entry in a list to
-the same nonsense host. Contacting the wrong machine silently is worse than
-saying so, and the bracket form is refused too, because nothing downstream
-strips the brackets before `ssh` sees them.
+Supported, in the bracket form when a port is involved:
+
+```text
+::1                    a bare literal, no port
+[fe80::1]:2222         bracketed, because the port needs a separator
+v6=[2001:db8::1]:22    named, like any other entry
+```
+
+A host token is `name[=addr[:port]]`, so the last colon means a port — which
+is why a bare `::1` once became the address `:` on port 1, and why the
+brackets are not optional once a port is involved. Addresses are validated
+with `inet_pton` where they are written, so `2001:db8::1::2` is refused
+there rather than surfacing later as a connection error naming the wrong
+cause. `ssh` is given the address bare and `scp` gets it bracketed, since
+`scp` splits its argument on the last colon to find the path.
+
+`[::1]` is an address, not a range: the expander leaves any bracketed group
+containing a colon alone.
+
+**`netmesh` still refuses IPv6** — its agents bind sockets, echo UDP and
+walk path MTU, so the family reaches much further into it than a host list.
 
 ## Exit codes
 

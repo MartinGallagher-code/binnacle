@@ -8,6 +8,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`agree --fleet-csv`** — the preset for grouping the CSV these tools
+  emit, and exactly `--mask-hosts --mask-times`. Every one of them writes
+  rows beginning `host,ts`, both per-host by construction, so without them
+  no two hosts can agree about anything. A preset rather than a default
+  because the normalizations are still disclosed with the result: a reader
+  has to be able to see that the host column was masked to get the
+  grouping. Contradicting it with `--strict` is refused rather than
+  silently resolved.
+- **IPv6 host lists in `agree` and `reachable`**, replacing the refusal
+  added in the previous change. `::1` bare, `[fe80::1]:2222` bracketed
+  when a port is involved, `name=[2001:db8::1]:22` named — validated with
+  `inet_pton` where they are written, so `2001:db8::1::2` is refused there
+  instead of surfacing later as a connection error naming the wrong cause.
+  `ssh` is given the address bare and `scp` bracketed, since `scp` splits
+  its argument on the last colon to find the path. `agree hosts` prints
+  the bracket form so its output reads back as the same host — without
+  that, `fe80::1:2222` round-tripped into a different and entirely valid
+  address. The range expander leaves any bracketed group containing a
+  colon alone, since `[::1]:2222` would otherwise expand to `::1:2222`.
+  `netmesh` still refuses IPv6: its agents bind sockets, echo UDP and walk
+  path MTU, so the family reaches far further into it than a host list.
+  `reachable` passes `-6` to `ping` for v6 addresses, and treats a ping
+  that cannot speak the family as unknown rather than as a down host.
+
 - **`tests/test_compose.sh`** — the claim on the front page, actually run.
   Real tools pushed to fake hosts through real `agree`, asserting that
   hosts group by what is wrong with them, that `--merge-csv` keeps the

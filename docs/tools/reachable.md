@@ -182,18 +182,32 @@ chore:
 
 ```bash
 reachable prod.txt -i
-agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
-    --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 ## IPv6
 
-Not supported, and refused rather than guessed at. A host token is
-`name[=addr[:port]]`, so the last colon means a port — which turns `::1`
-into the address `:` on port 1, and collapses every v6 entry in a list to
-the same nonsense host. Contacting the wrong machine silently is worse than
-saying so, and the bracket form is refused too, because nothing downstream
-strips the brackets before `ssh` sees them.
+Supported, in the bracket form when a port is involved:
+
+```text
+::1                    a bare literal, no port
+[fe80::1]:2222         bracketed, because the port needs a separator
+v6=[2001:db8::1]:22    named, like any other entry
+```
+
+A host token is `name[=addr[:port]]`, so the last colon means a port — which
+is why a bare `::1` once became the address `:` on port 1, and why the
+brackets are not optional once a port is involved. Addresses are validated
+with `inet_pton` where they are written, so `2001:db8::1::2` is refused
+there rather than surfacing later as a connection error naming the wrong
+cause. `ssh` is given the address bare and `scp` gets it bracketed, since
+`scp` splits its argument on the last colon to find the path.
+
+`[::1]` is an address, not a range: the expander leaves any bracketed group
+containing a colon alone.
+
+**`netmesh` still refuses IPv6** — its agents bind sockets, echo UDP and
+walk path MTU, so the family reaches much further into it than a host list.
 
 ## See also
 

@@ -164,8 +164,7 @@ Determinism is what makes it composable: two hosts with the same problem
 produce byte-identical rows, so [`agree`](agree.md) groups them together:
 
 ```bash
-agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
-    --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 That reports *"44 hosts healthy, 4 agree they are swapping, 2 unreachable"*.

@@ -261,24 +261,42 @@ t_mask_hosts_handles_addresses_and_fqdns() {
     assert_contains "$frag" "peers %HOST% and 192.10.0.0.9"
 }
 
-t_ipv6_is_refused_rather_than_mis_parsed() {
-    # rsplit on the last colon turns "::1" into the address ":" on port 1,
-    # so every v6 host in a list used to collapse to the same nonsense
-    # entry and the fan-out silently contacted nothing.  netmesh already
-    # refuses these; the other two now agree.
+t_ipv6_is_parsed_not_mangled() {
+    # Splitting on the last colon turned "::1" into the address ":" on port
+    # 1, so every v6 host in a list collapsed to the same nonsense entry.
+    # The bracket form carries a port; a bare literal has none.
+    assert_eq "$("$PY" "$AG" hosts -H '::1')" "::1"
+    assert_eq "$("$PY" "$AG" hosts -H 'v6=[fe80::1]:2222')" "v6=[fe80::1]:2222"
+    assert_eq "$("$PY" "$AG" hosts -H '10.0.0.9:2222')" "10.0.0.9=10.0.0.9:2222"
+    # This verb exists to be fed to something else, so its output has to
+    # read back as the same host -- "fe80::1:2222" would be a different
+    # address, and a valid one.
+    out="$("$PY" "$AG" hosts -H 'v6=[fe80::1]:2222')"
+    assert_eq "$("$PY" "$AG" hosts -H "$out")" "$out"
+    # A bracketed address is not a range, however much it looks like one.
+    assert_eq "$("$PY" "$AG" hosts -H '[::1]')" "::1"
+    assert_eq "$("$PY" "$AG" hosts -H 'node[01-02]')" "$(printf 'node01\nnode02')"
+    # Garbage is refused where it is written, not where it fails to connect.
     set +e
-    out="$("$PY" "$AG" hosts -H '::1' 2>&1)"; rc=$?
+    out="$("$PY" "$AG" hosts -H '2001:db8::1::2' 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
-    assert_contains "$out" "IPv6"
-    set +e
-    br="$("$PY" "$AG" hosts -H 'v6=[fe80::1]:2222' 2>&1)"; rc=$?
-    set -e
-    assert_status $rc 2
-    assert_contains "$br" "IPv6"
-    # v4 with a port is untouched, and the port survives.
-    ok="$("$PY" "$AG" hosts -H '10.0.0.9:2222')"
-    assert_eq "$ok" "10.0.0.9=10.0.0.9:2222"
+    assert_contains "$out" "not a valid IPv6 address"
+}
+
+t_ipv6_reaches_ssh_bare_and_scp_bracketed() {
+    # ssh takes `user@::1`; scp splits on the last colon to find the path,
+    # so it needs `[::1]:path` or the address loses its tail.
+    install_fake_ssh
+    fake_host "::1"
+    printf '#!/bin/sh\necho v6 ok\n' > "$TEST_TMPDIR/s.sh"
+    chmod +x "$TEST_TMPDIR/s.sh"
+    out="$(ag_verb script "$TEST_TMPDIR/s.sh" -H '::1' --quiet \
+             --remote-dir agreetmp -- )"
+    assert_contains "$out" "v6 ok"
+    log="$(cat "$FAKE_SSH_LOG")"
+    assert_contains "$log" "ssh ::1"
+    assert_contains "$log" "scp ::1 agreetmp"
 }
 
 t_mask_times_covers_the_machine_readable_one() {
@@ -311,7 +329,8 @@ run_test "output in host-list order"           t_order_is_host_list_order_not_co
 run_test "--mask-hosts makes hostnames agree"  t_mask_hosts_makes_hostname_output_agree
 run_test "--mask-hosts masks names not text"   t_mask_hosts_masks_names_not_substrings
 run_test "--mask-hosts handles addresses"      t_mask_hosts_handles_addresses_and_fqdns
-run_test "ipv6 refused, not mis-parsed"        t_ipv6_is_refused_rather_than_mis_parsed
+run_test "ipv6 is parsed, not mangled"         t_ipv6_is_parsed_not_mangled
+run_test "ipv6 reaches ssh and scp correctly"  t_ipv6_reaches_ssh_bare_and_scp_bracketed
 run_test "--mask-times covers epoch seconds"   t_mask_times_covers_the_machine_readable_one
 run_test "normalizations are disclosed"        t_normalizations_are_disclosed
 run_test "--sort-lines ignores order"          t_sort_lines_ignores_order
