@@ -186,6 +186,15 @@ agree script ./why_slow.py --hosts prod.txt --mask-hosts --mask-times \
     --merge-csv triage.csv -- --csv
 ```
 
+## IPv6
+
+Not supported, and refused rather than guessed at. A host token is
+`name[=addr[:port]]`, so the last colon means a port — which turns `::1`
+into the address `:` on port 1, and collapses every v6 entry in a list to
+the same nonsense host. Contacting the wrong machine silently is worse than
+saying so, and the bracket form is refused too, because nothing downstream
+strips the brackets before `ssh` sees them.
+
 ## See also
 
 - [`agree doctor`](agree.md) — a deeper check (python3, sudo, writable

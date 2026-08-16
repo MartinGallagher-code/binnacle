@@ -524,11 +524,20 @@ def collect_facts(args, names):
     f["res.single_request"] = conf["single_request"] if conf else None
 
     if args.servers:
-        servers = [_split_server(s) for s in args.servers]
+        configured = [_split_server(s) for s in args.servers]
         f["probe.source"] = "--server"
     else:
-        servers = [_split_server(s) for s in (f["res.nameservers"] or [])]
+        configured = [_split_server(s) for s in (f["res.nameservers"] or [])]
         f["probe.source"] = args.resolv_conf
+    # Probe each distinct server once, keeping the configured order: the
+    # results are held in a dict keyed by server, so a repeated nameserver
+    # line would otherwise leave srv.count larger than the number of
+    # results and "all of them are dead" could never be true.
+    servers = []
+    for entry in configured:
+        if entry not in servers:
+            servers.append(entry)
+    f["res.duplicates"] = len(configured) - len(servers)
     f["srv.list"] = ["%s:%d" % (a, p) if p != 53 else a for a, p in servers]
 
     # A stub is not the resolver you think you are measuring -- but only
@@ -555,6 +564,9 @@ def collect_facts(args, names):
                              "rcode": r.rcode, "error": r.error,
                              "names": {}}
     f["srv.count"] = len(servers)
+    # The stub works down the file as written, duplicates and all, so the
+    # wait an application faces is counted from the configured list.
+    f["res.nameserver_count"] = len(configured)
     f["srv.dead"] = sorted(k for k, v in f["srv.all"].items()
                            if not v["alive"]) if servers else None
     f["srv.alive"] = sorted(k for k, v in f["srv.all"].items()
@@ -690,9 +702,9 @@ def collect_facts(args, names):
     # server count the stub knows nothing about.
     f["budget.worst_s"] = None
     if not args.servers and f["res.timeout"] and f["res.attempts"] \
-            and f["srv.count"]:
+            and f["res.nameserver_count"]:
         f["budget.worst_s"] = (f["res.timeout"] * f["res.attempts"]
-                               * f["srv.count"])
+                               * f["res.nameserver_count"])
     return f
 
 

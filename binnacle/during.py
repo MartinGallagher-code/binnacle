@@ -25,7 +25,8 @@ Options:
   --csv [PATH]       findings as CSV, same shape as why-slow's
   --json [PATH]      meta + summary + findings + skipped
   --exit-code        exit 0 ok / 10 warn / 20 critical instead of passing
-                     the wrapped command's status through
+                     the wrapped command's status through -- except when
+                     that command failed, which always wins
   --proc-root DIR    read /proc from here          (DURING_PROC)
   --sys-root DIR     read /sys from here           (DURING_SYS)
   --no-color         plain output (also honours NO_COLOR)
@@ -68,7 +69,9 @@ Robustness properties
   * a fact that could not be measured is blank, never 0, and any rule that
     needed it is reported as skipped with the reason
   * the wrapped command's stdout, stderr and exit status pass straight
-    through, so `during -- make bench` is a drop-in prefix
+    through, so `during -- make bench` is a drop-in prefix -- and a command
+    that failed keeps its status even under --exit-code, because a verdict
+    about a run that never finished is not worth reading
   * the command's own process tree is excluded from interloper detection,
     because the benchmark is not a surprise
   * interrupting with ^C still prints the report for what was sampled --
@@ -1689,6 +1692,12 @@ def main(argv=None):
         sys.stdout.write(render_human(samples, summary, findings, skipped,
                                       passed, args, Colors(use_color)) + "\n")
 
+    # A command that failed outranks any verdict about it, even under
+    # --exit-code: reporting "warn" for a benchmark that never finished
+    # would hide a build failure behind a diagnosis of it, and there is
+    # nothing worth reading in a run that did not complete.
+    if child_status:
+        return child_status
     if args.exit_code and findings:
         worst = max(SEVERITY_ORDER[f.severity] for f in findings)
         # 10/20 rather than 1/2, so a severity can never be mistaken for a

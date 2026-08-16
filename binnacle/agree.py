@@ -215,8 +215,16 @@ def parse_host_token(tok):
     else:
         name, addr = tok.split("=", 1)
         name, addr = name.strip(), addr.strip()
+    # Refuse IPv6 outright rather than mis-parsing it, exactly as netmesh
+    # does: rsplit on the last colon turns "::1" into the address ":" on
+    # port 1, and every v6 host in a list collapses to the same nonsense
+    # entry.  Silently contacting the wrong thing is far worse than saying
+    # this is not supported, and the bracket form is refused too because
+    # nothing downstream here strips the brackets before ssh sees them.
+    if addr.startswith("[") or addr.count(":") > 1:
+        die("IPv6 addresses are not supported yet: %r" % tok)
     port = None
-    if ":" in addr and not addr.startswith("["):
+    if ":" in addr:
         addr, p = addr.rsplit(":", 1)
         if p.isdigit():
             port = int(p)
@@ -367,21 +375,30 @@ def normalize(text, host, args):
         # Per host, and before hashing: without this, anything that echoes
         # the machine's own name can never agree with anything.
         #
-        # On word boundaries, never as a bare substring.  A plain replace
-        # turns a host called "sql" into %HOST% inside "postgresql" and a
-        # host called "a" into %HOST% inside every word containing an a --
-        # which corrupts the comparison instead of enabling it, and does so
-        # differently on each host, so it produces exactly the spurious
-        # groups it was meant to remove.  Single characters are left alone
-        # for the same reason: they appear in ordinary prose far more often
-        # than they appear as a hostname.
+        # Bounded, never a bare substring.  A plain replace turns a host
+        # called "sql" into %HOST% inside "postgresql" and a host called
+        # "a" into %HOST% inside every word containing an a -- which
+        # corrupts the comparison instead of enabling it, and does so
+        # differently on each host, producing exactly the spurious groups
+        # it was meant to remove.
+        #
+        # The boundary is written out rather than using \b, because \b is
+        # defined against word characters and half these tokens do not
+        # start with one: \b::1\b can never match, so an IPv6 address
+        # would silently stop being masked.  A trailing dot is deliberately
+        # allowed, so a bare name still masks the first label of its own
+        # FQDN -- that prefix is the part that differs between hosts, and
+        # the domain after it is what they have in common.
+        #
+        # Single characters are skipped: they appear in ordinary prose far
+        # more often than they appear as a hostname.
         for token in sorted(filter(None, {host.name, host.addr,
                                           host.name.split(".")[0]}),
                             key=len, reverse=True):
             if len(token) < 2:
                 continue
-            lines = [re.sub(r"\b%s\b" % re.escape(token), "%HOST%", l)
-                     for l in lines]
+            rx = re.compile(r"(?<![\w.-])%s(?!\w)" % re.escape(token))
+            lines = [rx.sub("%HOST%", l) for l in lines]
     if args.mask_times:
         for rx in TIME_MASKS:
             lines = [rx.sub("<TS>", l) for l in lines]

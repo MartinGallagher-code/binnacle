@@ -187,8 +187,16 @@ def token_address(tok):
     else:
         name, addr = tok.split("=", 1)
         name, addr = name.strip(), addr.strip()
+    # Refuse IPv6 outright rather than mis-parsing it, exactly as netmesh
+    # does: rsplit on the last colon turns "::1" into the address ":" on
+    # port 1, and every v6 host in a list collapses to the same nonsense
+    # entry.  Silently contacting the wrong thing is far worse than saying
+    # this is not supported, and the bracket form is refused too because
+    # nothing downstream here strips the brackets before ssh sees them.
+    if addr.startswith("[") or addr.count(":") > 1:
+        die("IPv6 addresses are not supported yet: %r" % tok)
     port = None
-    if ":" in addr and not addr.startswith("["):
+    if ":" in addr:
         addr, p = addr.rsplit(":", 1)
         if p.isdigit():
             port = int(p)
@@ -599,6 +607,12 @@ def main(argv=None):
                 specs.append(s)
     if not specs:
         die("no host entries found in %s" % args.path, 1)
+
+    # Parse every token before anything is probed or written.  A token this
+    # tool cannot understand has to stop the run up front, not surface from
+    # inside a worker thread halfway through rewriting the caller's file.
+    for spec in specs:
+        token_address(spec)
 
     if args.dry_run:
         for s in specs:

@@ -171,7 +171,10 @@ forming: a generator reporting `cpu` or `one core` while the target reports
 
 The wrapped command's own status passes through, so `during -- make bench`
 fails exactly when `make` does. `--exit-code` opts into severity instead
-(`0` ok / `10` warn / `20` critical).
+(`0` ok / `10` warn / `20` critical) — **except when the command failed**,
+which always wins: reporting `warn` for a benchmark that never finished
+would hide a build failure behind a diagnosis of it, and there is nothing
+worth reading in a run that did not complete.
 
 `^C` finishes the run and prints the report for what was sampled — losing a
 twenty-minute benchmark's diagnosis to an impatient keystroke would be the

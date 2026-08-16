@@ -171,12 +171,21 @@ t_wrapping_passes_the_commands_status_through() {
 
 t_exit_code_opts_into_severity_instead() {
     set +e
-    du_ --interval 0.2 --exit-code -- sh -c 'sleep 1.2; exit 3' \
+    du_ --interval 0.2 --exit-code -- sh -c 'sleep 1.2' >/dev/null 2>&1; rc=$?
+    set -e
+    # Short window plus an idle box: at least one rule fires, and a command
+    # that succeeded leaves the status free to carry the severity.
+    assert_status $rc 10
+}
+
+t_a_failed_command_outranks_a_severity() {
+    # Reporting "warn" for a benchmark that never finished would hide a
+    # build failure behind a diagnosis of it.
+    set +e
+    du_ --interval 0.2 --exit-code -- sh -c 'sleep 0.9; exit 7' \
         >/dev/null 2>&1; rc=$?
     set -e
-    # Short window plus an idle box: at least one rule fires, and the status
-    # is now a severity rather than the command's 3.
-    assert_status $rc 10
+    assert_status $rc 7
 }
 
 t_the_series_written_out_reads_back_in() {
@@ -226,6 +235,7 @@ run_test "csv header matches why-slow"         t_csv_header_matches_why_slow
 run_test "--rules and --explain generated"     t_rules_and_explain_are_generated
 run_test "wrapping passes status through"      t_wrapping_passes_the_commands_status_through
 run_test "--exit-code opts into severity"      t_exit_code_opts_into_severity_instead
+run_test "a failed command outranks severity" t_a_failed_command_outranks_a_severity
 run_test "the series reads back in"            t_the_series_written_out_reads_back_in
 run_test "a too-short window says so"          t_a_window_shorter_than_one_interval_says_so
 run_test "neither command nor window errors"   t_asking_for_neither_a_command_nor_a_window_is_a_usage_error

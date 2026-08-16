@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`agree` and `reachable` silently destroyed IPv6 host tokens.** A host
+  list entry of `::1` parsed as the address `:` on port 1, so every v6
+  entry in a list collapsed to the same nonsense host — and `reachable`
+  rewrites the file it is given, so it would comment out working machines
+  on the strength of a parse bug. Both now refuse IPv6 outright, which is
+  what `netmesh` has always done and for the reason its own comment gives.
+  `reachable` validates every token **before** it probes or writes
+  anything, so a list it cannot understand stops the run rather than
+  surfacing halfway through a rewrite.
+- **`agree --mask-hosts` could not mask a token that does not start with a
+  word character.** The word-boundary fix in the previous change was
+  written with `\b`, which is defined against word characters, so
+  `\b::1\b` can never match. Replaced with an explicit boundary that also
+  refuses to match a fragment of a longer address — `\b10.0.0.9\b` matches
+  inside `192.10.0.0.9`, because a dot is a word boundary — while still
+  masking a bare name inside its own FQDN, which is the part that differs
+  between hosts.
+- **`resolve` miscounted a repeated `nameserver` line.** Results are held
+  per server, so a duplicated entry left `srv.count` larger than the number
+  of results and `NS_ALL_DEAD` could never fire, however dead every
+  resolver was. Each distinct server is now probed once, while the timeout
+  budget still counts the file as written, because the stub works down it
+  in order.
+- **`during --exit-code` hid a failed command behind a severity.**
+  `during --exit-code -- make bench` returned `10` when `make` exited `7`.
+  A command that failed now always wins: there is nothing worth reading in
+  a verdict about a run that never completed.
+
 ### Added
 
 - **`tests/test_compose.sh`** — the claim on the front page, actually run.
