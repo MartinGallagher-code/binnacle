@@ -584,6 +584,15 @@ def collect_facts(args, names):
 
     if args.servers:
         configured = [_split_server(s) for s in args.servers]
+        for spec, (addr, _port) in zip(args.servers, configured):
+            if not _is_ip(addr):
+                # A name here would have to be resolved by the very stub
+                # this tool is diagnosing, and a typo'd address reported
+                # as "no resolver answered" blames the fleet for a bad
+                # argument.  resolv.conf only ever holds addresses; so
+                # does --server.
+                die("--server %s: give the resolver as an IP address"
+                    % spec)
         f["probe.source"] = "--server"
     else:
         configured = [_split_server(s) for s in (f["res.nameservers"] or [])]
@@ -777,6 +786,16 @@ def _looks_like_a_hostname(value):
     if "." not in value:
         return False
     return value.rsplit(".", 1)[1].lower() not in DATA_SUFFIXES
+
+
+def _is_ip(addr):
+    for fam in (socket.AF_INET, socket.AF_INET6):
+        try:
+            socket.inet_pton(fam, addr)
+            return True
+        except (OSError, ValueError):
+            pass
+    return False
 
 
 def _split_server(spec):
