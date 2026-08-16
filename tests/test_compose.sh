@@ -509,6 +509,57 @@ t_an_unreachable_host_is_a_group_not_an_error() {
     assert_contains "$out" "node01 node02"
 }
 
+t_every_declared_version_agrees() {
+    # The version is written in nine places and nothing checked they match.
+    # PUBLISHING.md named only two of them, so cutting 0.2.0 meant noticing
+    # the other seven by hand -- and the seven are the ones that matter in
+    # the field: a tool scp'd to a bare machine answers --version from its
+    # own constant, and `agree` groups a fleet by what comes back. A module
+    # left at the old number therefore reads as version skew across the
+    # fleet, which is a finding people act on, rather than as a slip.
+    "$PY" - "$BINNACLE_DIR" <<'EOF'
+import io, os, re, sys
+
+root = sys.argv[1]
+repo = os.path.dirname(root)
+found = {}
+
+
+def declared(path, pattern):
+    # Explicit encoding for the same reason the drift test above gives:
+    # the 3.6 container runs under the C locale.
+    for line in io.open(path, encoding="utf-8"):
+        m = re.match(pattern, line)
+        if m:
+            return m.group(1)
+    return None
+
+
+found["pyproject.toml"] = declared(
+    os.path.join(repo, "pyproject.toml"), r'^version = "([^"]+)"')
+for fname in sorted(os.listdir(root)):
+    if fname.endswith(".py"):
+        found[fname] = declared(
+            os.path.join(root, fname), r'^VERSION = "([^"]+)"')
+
+missing = sorted(k for k, v in found.items() if v is None)
+if missing:
+    sys.stderr.write("no version declared in: %s\n" % ", ".join(missing))
+    sys.exit(1)
+
+# __init__.py is the canonical one: it is what docs/conf.py renders and
+# what `import binnacle` reports.
+canon = found["__init__.py"]
+bad = sorted(k for k, v in found.items() if v != canon)
+if bad:
+    for name in bad:
+        sys.stderr.write("%s says %s, __init__.py says %s\n"
+                         % (name, found[name], canon))
+    sys.exit(1)
+EOF
+    assert_status $? 0
+}
+
 echo "compose"
 run_test "fleet triage groups by what is wrong" t_fleet_triage_groups_hosts_by_what_is_wrong
 run_test "without masking, no host can agree"   t_without_masking_every_host_is_its_own_group
@@ -519,6 +570,7 @@ run_test "--fleet-csv is the two flags"         t_fleet_csv_is_the_two_flags_and
 run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one_csv_header
 run_test "every flag appears in --help"         t_every_flag_appears_in_its_tools_help
 run_test "declared copies have not drifted"     t_declared_copies_have_not_drifted
+run_test "every declared version agrees"        t_every_declared_version_agrees
 run_test "a stray utf8 byte is survivable"      t_a_stray_utf8_byte_does_not_lose_the_run
 run_test "an edited host file keeps its bytes"  t_an_edited_host_file_keeps_the_bytes_it_came_with
 run_test "a notepad file still means the same"  t_a_file_saved_by_notepad_still_means_the_same_thing
