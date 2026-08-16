@@ -221,6 +221,32 @@ SHIM
     assert_not_contains "$out" "xxxxxxxxxx"
 }
 
+t_a_host_printing_junk_does_not_become_a_column() {
+    # Aligning the merge by column name means every host's header joins
+    # the merged one -- so a host that printed an error to stdout and
+    # exited 0 could contribute its complaint as a *column*.  Version
+    # skew is a partial overlap; sharing nothing with the schema is a
+    # different tool's output, and is reported rather than merged.
+    cat > "$TEST_TMPDIR/ssh_junk" <<'SHIM'
+#!/bin/bash
+case "$*" in
+  *node01*) printf 'host,ts,rule_id,severity,title,detail,fix\nnode01,1,SWAP,critical,swapping,bad,add ram\n' ;;
+  *node02*) printf 'why_slow.py: cannot read /proc/stat: Permission denied\n' ;;
+esac
+exit 0
+SHIM
+    chmod +x "$TEST_TMPDIR/ssh_junk"
+    rc=0
+    out="$("$PY" "$AG" run -H node01,node02 --ssh "$TEST_TMPDIR/ssh_junk" \
+             --merge-csv "$TEST_TMPDIR/junk.csv" --quiet -- x --csv 2>&1)" || rc=$?
+    assert_contains "$out" "not this CSV"
+    assert_contains "$out" "node02"
+    # the header is the schema, not the schema plus an error message
+    assert_eq "$(head -1 "$TEST_TMPDIR/junk.csv")" \
+        "ssh_host,host,ts,rule_id,severity,title,detail,fix"
+    assert_eq "$(grep -c . "$TEST_TMPDIR/junk.csv")" "2"
+}
+
 t_mixed_tool_versions_merge_by_column_name() {
     # These tools get scp'd to machines and stay there, so a fleet runs
     # mixed versions.  Stacking an older host's rows positionally filed
@@ -387,4 +413,5 @@ run_test "script pushes, runs, cleans up"      t_script_pushes_runs_and_cleans_u
 run_test "--merge-csv stacks with ssh_host"    t_merge_csv_stacks_and_prefixes_ssh_host
 run_test "a flooding host is killed, not grouped" t_a_flooding_host_is_killed_not_grouped
 run_test "mixed versions merge by column name" t_mixed_tool_versions_merge_by_column_name
+run_test "junk output is not a column"        t_a_host_printing_junk_does_not_become_a_column
 finish

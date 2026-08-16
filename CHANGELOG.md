@@ -20,6 +20,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ownership are copied onto the replacement. `netmesh`'s mesh writer got
   the same treatment: a mesh carries hand edits — the `~` ping-only prefix
   is a human's mark — so regenerating it must not widen its mode either.
+- **A host printing an error to stdout could become a *column*.** Aligning
+  the merged CSV by column name (above, this release) meant every host's
+  header joined the merged one — so a host that complained on stdout and
+  exited 0 contributed its complaint as a column heading. Version skew is
+  a *partial* overlap with the schema; sharing nothing with it is a
+  different tool's output, and a single-field header is not a header at
+  all. Both are now reported as *not merged, output is not this CSV* and
+  left out, while genuine skew still merges. Found by probing the merge
+  change from this same release rather than by trusting it.
 
 ## [0.2.0] - 2026-08-16
 
