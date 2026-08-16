@@ -578,12 +578,12 @@ def open_any(path):
     if path == "-":
         return sys.stdin
     if path.endswith(".gz"):
-        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+        return gzip.open(path, "rt", encoding="utf-8-sig", errors="replace")
     if path.endswith(".bz2"):
-        return bz2.open(path, "rt", encoding="utf-8", errors="replace")
+        return bz2.open(path, "rt", encoding="utf-8-sig", errors="replace")
     if path.endswith(".xz") or path.endswith(".lzma"):
-        return lzma.open(path, "rt", encoding="utf-8", errors="replace")
-    return io.open(path, "r", encoding="utf-8", errors="replace")
+        return lzma.open(path, "rt", encoding="utf-8-sig", errors="replace")
+    return io.open(path, "r", encoding="utf-8-sig", errors="replace")
 
 
 def expand_inputs(paths):
@@ -935,7 +935,7 @@ def save_templates(counter, path):
 def load_templates(path):
     out = {}
     try:
-        with io.open(path, newline="", encoding="utf-8", errors="replace") as fh:
+        with io.open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
             for row in csv.DictReader(fh):
                 try:
                     out[row["template_id"]] = int(row["count"])

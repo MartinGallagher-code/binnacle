@@ -363,12 +363,13 @@ def _comment(payload, result, today):
 
 def read_lines(path):
     if path == "-":
-        text = sys.stdin.read()
+        # a pipe can carry a BOM too, e.g. type hosts.txt | ssh box ...
+        text = sys.stdin.read().lstrip("\ufeff")
     else:
         if not os.path.isfile(path):
             die("no such file: %s" % path)
         try:
-            with io.open(path, encoding="utf-8", errors="replace") as f:
+            with io.open(path, encoding="utf-8-sig", errors="replace") as f:
                 text = f.read()
         except OSError as exc:
             die("cannot read %s: %s" % (path, exc))
@@ -431,7 +432,7 @@ class Prober(object):
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.DEVNULL,
                                  universal_newlines=True,
-                                 encoding="utf-8", errors="replace")
+                                 encoding="utf-8-sig", errors="replace")
             out, err = p.communicate(timeout=timeout)
             return p.returncode, out or "", err or ""
         except subprocess.TimeoutExpired:

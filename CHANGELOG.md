@@ -108,6 +108,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A file saved by Notepad or exported from Excel changed its meaning.**
+  Both prepend a UTF-8 byte-order mark, and every reader here glued it to
+  the first token. `reachable` probed `<BOM>web01` — a name that cannot
+  resolve — and would have commented a live machine out of the user's own
+  host file; `agree` fanned out to the same wrong name; `resolve` read a
+  healthy box's `resolv.conf` as having **no resolvers at all** and said so
+  as CRITICAL; `during --from-samples` saw the CSV's `host` column as
+  `<BOM>host` and reported the host as `?`; `logtriage` silently lost the
+  first line's timestamp. Every file read now decodes `utf-8-sig` — byte-
+  identical to `utf-8` unless the file starts with a BOM, in which case
+  the BOM is decoded away — and the two stdin paths strip it explicitly,
+  since a pipe can carry it too. Writes still never emit one, so a file
+  `reachable` rewrites comes out BOM-free: converging on the plain form is
+  the point, the same as its comment markers. CRLF endings, the other
+  thing Windows adds, already worked everywhere — the new test pins both
+  so neither survival depends on an accident of `.strip()`.
 - **One non-ASCII byte anywhere in the input lost the whole run, in all
   seven tools.** The CI failure that prompted this was in the suite rather
   than a tool — the drift check read source with a bare `open()` and died on

@@ -166,7 +166,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # eight suites, 152 checks
+bash tests/run_tests.sh          # eight suites, 153 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim
@@ -177,7 +177,9 @@ themselves over loopback.
 Writing that suite found seven real bugs, three of which looked fine by
 hand: CRLF line endings in a CSV, an IPv6 token mis-parsed into a nonsense
 address rather than refused, and an agent that discarded everything measured
-since the last interval when told to stop.
+since the last interval when told to stop. Extending it has kept finding
+them — the [changelog](CHANGELOG.md)'s *Fixed* sections carry the running
+tally.
 
 ## Related
 

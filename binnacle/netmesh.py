@@ -289,7 +289,7 @@ def read_self_cpu():
     network, and every other number on the page should be distrusted.
     """
     try:
-        with io.open("/proc/self/stat", encoding="utf-8", errors="replace") as f:
+        with io.open("/proc/self/stat", encoding="utf-8-sig", errors="replace") as f:
             fields = f.read().rsplit(") ", 1)[-1].split()
         return (int(fields[11]) + int(fields[12])) / float(_CLK_TCK)
     except (OSError, IndexError, ValueError):
@@ -391,7 +391,7 @@ def load_mesh(path):
     cfg = {}
     data_lines = []
     line_numbers = []
-    with io.open(path, encoding="utf-8", errors="replace") as f:
+    with io.open(path, encoding="utf-8-sig", errors="replace") as f:
         for lineno, line in enumerate(f, start=1):
             if line.startswith("#"):
                 for part in line[1:].split():
@@ -496,7 +496,7 @@ def read_servers(path):
     if not os.path.isfile(path):
         die("server list not found: %s" % path)
     out = []
-    with io.open(path, encoding="utf-8", errors="replace") as f:
+    with io.open(path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
             if line:
@@ -866,7 +866,7 @@ class Agent(object):
             self.ping_procs[st.name] = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, universal_newlines=True,
-                encoding="utf-8", errors="replace")
+                encoding="utf-8-sig", errors="replace")
             st.sent = count
         except OSError:
             st.note = "no-ping-binary"
@@ -1190,7 +1190,7 @@ class Fleet(object):
                                  stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL,
                                  universal_newlines=True,
-                                 encoding="utf-8", errors="replace")
+                                 encoding="utf-8-sig", errors="replace")
             out, _ = p.communicate(timeout=timeout)
             return p.returncode, (out or "").strip()
         except subprocess.TimeoutExpired:
@@ -1432,7 +1432,7 @@ def cmd_collect(args, mesh=None, fleet=None, quiet=False):
         if rc != 0:
             return rc, "no report: %s" % out
         try:
-            n = sum(1 for _ in io.open(dest, encoding="utf-8", errors="replace")) - 1
+            n = sum(1 for _ in io.open(dest, encoding="utf-8-sig", errors="replace")) - 1
         except OSError:
             n = 0
         return 0, "%d rows" % max(0, n)
@@ -1555,7 +1555,7 @@ def read_reports(reports_dir):
             continue
         path = os.path.join(reports_dir, name)
         try:
-            with io.open(path, newline="", encoding="utf-8", errors="replace") as f:
+            with io.open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
                 for row in csv.DictReader(f):
                     rows.append(row)
         except OSError as exc:
@@ -2155,7 +2155,7 @@ def cmd_selftest(args):
             procs.append(subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT,
                                           universal_newlines=True,
-                                          encoding="utf-8", errors="replace"))
+                                          encoding="utf-8-sig", errors="replace"))
         log("[%s] two agents probing over loopback for %s..."
             % (PROG, fmt_secs(secs)))
         for p in procs:

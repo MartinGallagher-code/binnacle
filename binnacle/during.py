@@ -191,7 +191,7 @@ def _env(name, default=None):
 
 def _read(path, default=None):
     try:
-        with io.open(path, encoding="utf-8", errors="replace") as f:
+        with io.open(path, encoding="utf-8-sig", errors="replace") as f:
             return f.read()
     except (OSError, UnicodeDecodeError):
         return default
@@ -1599,7 +1599,7 @@ def write_samples(samples, path):
 
 def read_samples(path):
     try:
-        with io.open(path, encoding="utf-8", errors="replace") as fh:
+        with io.open(path, encoding="utf-8-sig", errors="replace") as fh:
             rows = list(csv.DictReader(fh))
     except (OSError, csv.Error) as exc:
         die("cannot read samples file: %s" % exc)

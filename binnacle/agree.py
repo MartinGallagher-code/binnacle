@@ -309,12 +309,13 @@ def parse_host_token(tok):
 
 def read_host_file(path):
     if path == "-":
-        text = sys.stdin.read()
+        # a pipe can carry a BOM too, e.g. type hosts.txt | ssh box ...
+        text = sys.stdin.read().lstrip("\ufeff")
     else:
         if not os.path.isfile(path):
             return None
         try:
-            with io.open(path, encoding="utf-8", errors="replace") as f:
+            with io.open(path, encoding="utf-8-sig", errors="replace") as f:
                 text = f.read()
         except OSError as exc:
             die("cannot read %s: %s" % (path, exc))
@@ -545,7 +546,7 @@ class Runner(object):
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.DEVNULL,
                                  universal_newlines=True,
-                                 encoding="utf-8", errors="replace")
+                                 encoding="utf-8-sig", errors="replace")
             out, err = p.communicate(timeout=timeout)
             return p.returncode, out or "", err or ""
         except subprocess.TimeoutExpired:
