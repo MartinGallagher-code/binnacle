@@ -317,6 +317,49 @@ SHIM
     return 0
 }
 
+t_a_file_saved_by_notepad_still_means_the_same_thing() {
+    # Host lists get edited wherever the person is, and resolv.confs get
+    # pasted through whatever terminal is handy.  Notepad and Excel prepend
+    # a UTF-8 BOM, and Windows saves CRLF.  Before this test, the BOM glued
+    # itself to the first token: reachable probed <BOM>web01 -- a name that
+    # cannot resolve, so a live machine got commented out of the user's
+    # file -- and resolve read a healthy box as CRITICAL, no resolvers.
+    printf '\xef\xbb\xbfweb01\r\nweb02\r\n' > "$TEST_TMPDIR/bom_hosts.txt"
+    printf '\xef\xbb\xbfnameserver 10.0.0.53\r\n' > "$TEST_TMPDIR/bom_resolv.conf"
+    printf '\xef\xbb\xbfhost,elapsed_s,cpu_busy_pct\nweb01,1.0,95\nweb01,2.0,95\n' \
+        > "$TEST_TMPDIR/bom_s.csv"
+    printf '\xef\xbb\xbfJan  7 04:00:00 web01 sshd[1]: error: failed\n' \
+        > "$TEST_TMPDIR/bom.log"
+
+    out="$("$PY" "$BINNACLE_DIR/reachable.py" "$TEST_TMPDIR/bom_hosts.txt" \
+             --dry-run)"
+    # cat -A style check: the first token must be exactly web01, no BOM, no CR
+    printf '%s\n' "$out" | head -1 | od -An -c | grep -q "357 273 277" \
+        && fail "the BOM is still glued to the first host"
+    assert_contains "$out" "web01"
+
+    out="$("$PY" "$BINNACLE_DIR/resolve.py" --resolv-conf \
+             "$TEST_TMPDIR/bom_resolv.conf" --timeout 0.2 --no-stub --quiet)"
+    assert_contains "$out" "1 resolver"
+    assert_not_contains "$out" "no resolvers"
+
+    out="$("$PY" "$BINNACLE_DIR/during.py" --from-samples "$TEST_TMPDIR/bom_s.csv")"
+    # the host column used to be read as <BOM>host, and the host became "?"
+    assert_contains "$out" "web01"
+
+    out="$("$PY" "$BINNACLE_DIR/logtriage.py" "$TEST_TMPDIR/bom.log")"
+    # the BOM used to hide the first line's timestamp
+    assert_contains "$out" "04:00:00"
+
+    # a pipe can carry the BOM too
+    out="$(printf '\xef\xbb\xbfweb01\n' \
+             | "$PY" "$BINNACLE_DIR/reachable.py" - --dry-run)"
+    printf '%s\n' "$out" | od -An -c | grep -q "357 273 277" \
+        && fail "the BOM survives arriving over stdin"
+    assert_contains "$out" "web01"
+    return 0
+}
+
 t_declared_copies_have_not_drifted() {
     # No module imports another -- each tool is scp'd to machines that have
     # never heard of this package -- so helpers are duplicated on purpose
@@ -425,5 +468,6 @@ run_test "every flag appears in --help"         t_every_flag_appears_in_its_tool
 run_test "declared copies have not drifted"     t_declared_copies_have_not_drifted
 run_test "a stray utf8 byte is survivable"      t_a_stray_utf8_byte_does_not_lose_the_run
 run_test "an edited host file keeps its bytes"  t_an_edited_host_file_keeps_the_bytes_it_came_with
+run_test "a notepad file still means the same"  t_a_file_saved_by_notepad_still_means_the_same_thing
 run_test "an unreachable host is a group"       t_an_unreachable_host_is_a_group_not_an_error
 finish
