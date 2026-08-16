@@ -3,7 +3,7 @@
 """binnacle -- instruments for Linux boxes, fleets and the networks between.
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds seven:
+one holds eight:
 
     why-slow    why is this box slow?
     agree       which hosts in this fleet disagree with the rest?
@@ -12,6 +12,7 @@ one holds seven:
     reachable   which entries in this server list are still real?
     resolve     is it DNS, and which resolver is wrong?
     during      what limited this run, and can you trust the number?
+    skew        does this box know what time it is?
 
 Each is a complete standalone program with no imports from its siblings and
 no dependencies beyond the standard library, because they are routinely
@@ -34,4 +35,5 @@ TOOLS = {
     "reachable": "which entries in this server list are still real?",
     "resolve": "is it DNS, and which resolver is wrong?",
     "during": "what limited this run, and can you trust the number?",
+    "skew": "does this box know what time it is?",
 }

@@ -36,6 +36,10 @@ setup_env() {
     unset WHY_SLOW_BOOT_WINDOW WHY_SLOW_PROC WHY_SLOW_SYS
     unset LOGTRIAGE_TOP LOGTRIAGE_MAX_TEMPLATES LOGTRIAGE_BUCKET
     unset LOGTRIAGE_BASELINE LOGTRIAGE_WEIGHTS
+    unset SKEW_SERVERS SKEW_TIMEOUT SKEW_ATTEMPTS SKEW_SAMPLES
+    unset SKEW_MAX_OFFSET SKEW_WARN_OFFSET SKEW_MIN_SEVERITY
+    unset SKEW_CHRONY_CONF SKEW_NTP_CONF SKEW_TIMESYNCD_CONF
+    unset SKEW_PROC SKEW_RTC
     export LANG=C
 }
 
@@ -46,6 +50,11 @@ teardown_env() {
         while read -r pid; do
             kill "$pid" 2>/dev/null || true
         done < "$TEST_TMPDIR/dns.pid"
+    fi
+    if [ -f "$TEST_TMPDIR/ntp.pid" ]; then
+        while read -r pid; do
+            kill "$pid" 2>/dev/null || true
+        done < "$TEST_TMPDIR/ntp.pid"
     fi
     [ -n "$TEST_TMPDIR" ] && rm -rf "$TEST_TMPDIR"
 }
@@ -389,6 +398,143 @@ EOF
     done
     echo "fake dns on port $port never came up" >&2
     return 1
+}
+
+# start_fake_ntp PORT CFG -- an SNTP responder on 127.0.0.1.
+#
+# Written against RFC 5905 rather than against skew.py: it packs its own
+# replies and reads the client's transmit timestamp out of the request by
+# byte offset, so a bug in the tool's packet code cannot cancel itself out
+# against the same bug here.  That is the same reason the DNS responder
+# above builds its own answers.
+#
+# CFG is JSON:
+#   offset      seconds to add to real time, i.e. how wrong this source
+#               claims the world is relative to us (default 0)
+#   stratum     stratum to report                   (default 2)
+#   leap        leap indicator, 3 = alarm/unsynced  (default 0)
+#   drop        answer nothing at all               (default false)
+#   bad_origin  echo the wrong originate timestamp, which is what a stale
+#               or forged reply looks like          (default false)
+start_fake_ntp() {
+    local port="$1" cfg="$2"
+    cat > "$TEST_TMPDIR/ntpd.py" <<'EOF'
+import json, socket, struct, sys, time
+
+port = int(sys.argv[1])
+cfg = json.loads(sys.argv[2])
+offset = float(cfg.get("offset", 0.0))
+stratum = int(cfg.get("stratum", 2))
+leap = int(cfg.get("leap", 0))
+drop = bool(cfg.get("drop", False))
+bad_origin = bool(cfg.get("bad_origin", False))
+
+NTP_EPOCH = 2208988800
+
+
+def stamp(t):
+    return int(t) + NTP_EPOCH, int((t - int(t)) * (1 << 32)) & 0xFFFFFFFF
+
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", port))
+while True:
+    try:
+        data, peer = sock.recvfrom(512)
+    except OSError:
+        break
+    if len(data) < 48 or drop:
+        continue
+    # The client's transmit timestamp lives at bytes 40..48; it has to come
+    # back as the originate timestamp or the reply is not an answer.
+    orig_sec, orig_frac = struct.unpack("!II", data[40:48])
+    if bad_origin:
+        orig_sec, orig_frac = orig_sec + 7, 0
+    recv_sec, recv_frac = stamp(time.time() + offset)
+    tx_sec, tx_frac = stamp(time.time() + offset)
+    reply = struct.pack(
+        "!BBBb11I",
+        (leap << 6) | (4 << 3) | 4,   # leap, version 4, mode 4 (server)
+        stratum, 6, -20,
+        0, 0, 0x7F7F0101,
+        recv_sec, recv_frac,
+        orig_sec, orig_frac,
+        recv_sec, recv_frac,
+        tx_sec, tx_frac)
+    try:
+        sock.sendto(reply, peer)
+    except OSError:
+        pass
+EOF
+    "$PY" "$TEST_TMPDIR/ntpd.py" "$port" "$cfg" &
+    echo $! >> "$TEST_TMPDIR/ntp.pid"
+    # Wait for the socket rather than sleeping a guessed interval.  A
+    # dropping responder never answers, so its readiness is the bind
+    # itself: the port stops being free.
+    local i=0
+    while [ $i -lt 50 ]; do
+        if ! "$PY" - "$port" <<'EOF'
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)   # taken: the responder has it
+s.close()
+EOF
+        then
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    echo "fake ntp on port $port never came up" >&2
+    return 1
+}
+
+# skew_facts_json FILE [key=value ...] -- a healthy skew fact dict with
+# overrides applied, so a rule test states only what it cares about.
+skew_facts_json() {
+    local path="$1"; shift
+    "$PY" - "$path" "$@" <<'EOF'
+import json, sys
+path, overrides = sys.argv[1], sys.argv[2:]
+f = {
+  "sys.hostname": "testbox",
+  "tz.name": "UTC", "tz.utc_offset_s": 0,
+  "sync.daemon": "chronyd", "sync.daemon_pid": 941,
+  "sync.daemon_running": True,
+  "sync.ntp_enabled": True, "sync.synchronized": True,
+  "cfg.path": "/etc/chrony.conf", "cfg.kind": "chrony",
+  "cfg.servers": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+  "probe.timeout_s": 2.0, "probe.attempts": 2, "probe.samples": 2,
+  "srv.list": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+  "srv.all": {
+      "10.0.0.1": {"reachable": True, "error": None, "offset_s": 0.004,
+                   "delay_ms": 1.2, "stratum": 2, "leap": 0,
+                   "root_dispersion_s": 0.01},
+      "10.0.0.2": {"reachable": True, "error": None, "offset_s": 0.006,
+                   "delay_ms": 1.4, "stratum": 2, "leap": 0,
+                   "root_dispersion_s": 0.01},
+      "10.0.0.3": {"reachable": True, "error": None, "offset_s": 0.005,
+                   "delay_ms": 1.9, "stratum": 3, "leap": 0,
+                   "root_dispersion_s": 0.01}},
+  "srv.count": 3, "srv.dead": [],
+  "srv.alive": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+  "srv.unusable": [], "srv.max_stratum": 3,
+  "clock.offset_s": 0.005, "clock.spread_s": 0.002,
+  "rtc.path": "/sys/class/rtc/rtc0/since_epoch",
+  "rtc.since_epoch": 1786741765, "rtc.delta_s": 0.4,
+  "thresh.max_offset_s": 300.0, "thresh.warn_offset_s": 1.0,
+}
+for o in overrides:
+    k, v = o.split("=", 1)
+    try:
+        f[k] = json.loads(v)
+    except ValueError:
+        f[k] = v
+with open(path, "w") as fh:
+    json.dump(f, fh)
+EOF
 }
 
 # free_port -- a UDP port nothing is listening on, for the responder.

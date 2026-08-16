@@ -84,6 +84,7 @@ netmesh = "binnacle.netmesh:main"
 reachable = "binnacle.reachable:main"
 resolve = "binnacle.resolve:main"
 during = "binnacle.during:main"
+skew = "binnacle.skew:main"
 
 [tool.setuptools]
 packages = ["binnacle"]

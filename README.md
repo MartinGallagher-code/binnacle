@@ -8,7 +8,7 @@
 [![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds seven, for Linux boxes, the fleets they belong to, and the networks
+one holds eight, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -20,6 +20,7 @@ between them.
 | `reachable` | Which entries in this server list are still real? |
 | `resolve` | Is it DNS, and which resolver is wrong? |
 | `during` | What limited this run, and can I trust the number? |
+| `skew` | Does this box know what time it is? |
 
 ```bash
 pip install binnacle
@@ -78,7 +79,7 @@ agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The seven, briefly
+## The eight, briefly
 
 ### why-slow
 
@@ -156,6 +157,22 @@ because ICMP is blocked on plenty of healthy networks. Entries it comments
 out are re-tested next run and **uncommented when they come back**, so the
 list converges instead of decaying.
 
+### skew
+
+Every box runs something that corrects its clock, and the failure that
+matters is not that service crashing -- `why-slow` already catches a failed
+time unit. It is the daemon running perfectly while the clock is still
+wrong: sources unreachable, none ever selected, or a machine resumed from a
+snapshot. `systemctl status` says `active (running)` through all of it. So
+this ignores the daemon's opinion and asks the sources on the wire, using
+the four-timestamp calculation so the path's latency lands in the *delay*
+rather than in the offset. **A box with no reachable source is diagnosed as
+having no reachable source**, not as being four minutes fast -- the drift
+is what that produced. Sources are compared against each other, because two
+that disagree means the daemon may have picked the liar; and stratum 16 is
+separated from both alive and dead, since a source reporting itself
+unsynchronised answers every health check and provides no time.
+
 ## Documentation
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
@@ -166,7 +183,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # eight suites, 164 checks
+bash tests/run_tests.sh          # nine suites, 197 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

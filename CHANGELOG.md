@@ -6,7 +6,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`skew` — an eighth tool: does this box know what time it is?** A
+  crashed time daemon was already caught, by `why-slow`'s failed-unit rule,
+  which says outright that a failed sync unit makes every timestamp on the
+  box a lie. What nothing caught was the daemon running *perfectly* while
+  the clock stayed wrong — sources unreachable, none ever selected, or a
+  machine resumed from a snapshot. `systemctl status chronyd` reports
+  `active (running)` through every one of those, so nothing on the box
+  looks broken.
+
+  It ignores what the daemon says about itself and queries each configured
+  source over SNTP, built here rather than shelled out to `ntpdate`, since
+  these files land on machines that have neither. Offset and delay come
+  from the four-timestamp calculation, so a slow path lands in the delay
+  instead of being charged to the clock, and the best of `--samples`
+  queries is kept so a single sample over a congested link measures the
+  congestion rather than the time. A reply that does not echo the transmit
+  timestamp it was sent is discarded and the wait continues — the same
+  discipline `resolve` applies to a DNS query id, and for the same reason.
+
+  Thirteen rules, causes ahead of symptoms as everywhere else: a box with
+  no reachable source is diagnosed as having **no reachable source**, not
+  as being four minutes fast, because the drift is what that produced and
+  the firewall is what someone has to fix. Sources are compared against
+  each other, since two that disagree means the daemon may have picked the
+  liar and no single query can see it. Stratum 16 and the leap alarm are
+  separated from both *alive* and *dead*: a source reporting itself
+  unsynchronised answers every reachability check and provides no time, and
+  conflating the two is how a box has three working servers and no clock.
+  The hardware clock is read alongside, because it is what the box comes
+  back with after a reboot — and a delta of almost exactly a whole number
+  of hours is reported as an RTC kept in local time rather than as drift,
+  which saves chasing a CMOS battery that is fine.
+
+  It composes like the rest: `agree script ./skew.py --fleet-csv` groups a
+  fleet by what its clocks are doing, which is how six boxes in one rack
+  that have been quietly four minutes out for a week become one line
+  instead of a discovery. The reason it belongs here is that the rest of
+  the package was already working around a wrong clock without ever
+  checking it — `logtriage --split-at` trusts a timestamp, `agree` has to
+  mask the `ts` column before two hosts can agree about anything, and
+  `netmesh` reads only the sender's clock precisely so it never has to
+  trust two at once.
+
+### Fixed
+
+- **A threshold flag was ignored under `--from-facts`.** `--max-offset` and
+  `--warn-offset` were being collected into the fact dictionary, so a
+  saved file's thresholds silently won and the flag did nothing on a
+  replay. Thresholds are policy rather than measurement: they now resolve
+  as flag, then whatever the fact file recorded — which is what makes
+  `--from-facts` reproduce the run it came from — then the default, and
+  are stamped back into the facts either way, so a saved `--json` says
+  which line each finding was judged against instead of leaving a reader
+  to assume the defaults were in force. Found by testing that the flags
+  moved a finding's severity, rather than by testing that they parsed.
 
 ## [0.2.1] - 2026-08-16
 

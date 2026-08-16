@@ -22,7 +22,7 @@ sys.path.insert(0, REPO_ROOT)
 
 import binnacle  # noqa: E402
 from binnacle import (agree, during, logtriage, netmesh,  # noqa: E402
-                      reachable, resolve, why_slow)
+                      reachable, resolve, skew, why_slow)
 
 project = "binnacle"
 author = "Martin J. Gallagher"
@@ -59,6 +59,7 @@ TOOLS = [
     ("reachable", reachable, False),
     ("resolve", resolve, False),
     ("during", during, False),
+    ("skew", skew, False),
 ]
 
 
