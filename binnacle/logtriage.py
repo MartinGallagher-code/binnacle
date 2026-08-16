@@ -81,6 +81,7 @@ import csv
 import glob as globmod
 import gzip
 import hashlib
+import io
 import json
 import lzma
 import os
@@ -96,6 +97,27 @@ MAX_BUCKETS = 4096
 SPARK_COLS = 20
 SPARK_UNI = "▁▂▃▄▅▆▇█"
 SPARK_ASCII = ".:-=+*#%@"
+
+
+def _stdio_safe():
+    """Never lose a report to a character the locale cannot spell.
+
+    On a box with LANG=C -- a RHEL 8 default, and the floor this package
+    targets -- stdout is ASCII, so a single UTF-8 name echoed out of a log,
+    a process table or a remote command turns the whole report into a
+    UnicodeEncodeError.  Degrading the character is the same bargain the
+    rest of these tools already make with --ascii: the run is worth more
+    than the byte.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or not hasattr(stream, "buffer"):
+            continue
+        enc = (getattr(stream, "encoding", None) or "").lower()
+        if enc.replace("-", "_") in ("ascii", "ansi_x3.4_1968", "us_ascii"):
+            setattr(sys, name, io.TextIOWrapper(
+                stream.buffer, encoding=stream.encoding,
+                errors="backslashreplace", line_buffering=True))
 
 
 def die(msg, code=2):
@@ -556,12 +578,12 @@ def open_any(path):
     if path == "-":
         return sys.stdin
     if path.endswith(".gz"):
-        return gzip.open(path, "rt", errors="replace")
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
     if path.endswith(".bz2"):
-        return bz2.open(path, "rt", errors="replace")
+        return bz2.open(path, "rt", encoding="utf-8", errors="replace")
     if path.endswith(".xz") or path.endswith(".lzma"):
-        return lzma.open(path, "rt", errors="replace")
-    return open(path, "r", errors="replace")
+        return lzma.open(path, "rt", encoding="utf-8", errors="replace")
+    return io.open(path, "r", encoding="utf-8", errors="replace")
 
 
 def expand_inputs(paths):
@@ -852,7 +874,7 @@ CSV_FIELDS = ["template_id", "rank", "count", "pct", "first_seen",
 
 
 def render_csv(counter, rows, path):
-    fh = open(path, "w", newline="") if path else sys.stdout
+    fh = io.open(path, "w", newline="", encoding="utf-8") if path else sys.stdout
     try:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
         w.writeheader()
@@ -896,14 +918,14 @@ def render_json(counter, rows, path):
     }
     text = json.dumps(doc, indent=2, sort_keys=True, default=str)
     if path:
-        with open(path, "w") as fh:
+        with io.open(path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     else:
         sys.stdout.write(text + "\n")
 
 
 def save_templates(counter, path):
-    with open(path, "w", newline="") as fh:
+    with io.open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, lineterminator="\n")
         w.writerow(["template_id", "count", "program", "example"])
         for t in sorted(counter.templates.values(), key=lambda x: -x.count):
@@ -913,7 +935,7 @@ def save_templates(counter, path):
 def load_templates(path):
     out = {}
     try:
-        with open(path, newline="") as fh:
+        with io.open(path, newline="", encoding="utf-8", errors="replace") as fh:
             for row in csv.DictReader(fh):
                 try:
                     out[row["template_id"]] = int(row["count"])
@@ -1008,6 +1030,7 @@ def build_parser():
 
 
 def main(argv=None):
+    _stdio_safe()
     args = build_parser().parse_args(argv)
     args.weights = parse_weights(args.weights)
     args.min_severity_level = SEV_LEVELS[args.min_severity]

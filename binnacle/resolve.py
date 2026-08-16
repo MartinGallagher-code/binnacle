@@ -84,6 +84,7 @@ Robustness properties
 
 import argparse
 import csv
+import io
 import json
 import os
 import socket
@@ -110,6 +111,27 @@ STUB_ADDRS = {"127.0.0.53": "systemd-resolved", "127.0.0.1": "a local resolver",
               "::1": "a local resolver"}
 
 
+def _stdio_safe():
+    """Never lose a report to a character the locale cannot spell.
+
+    On a box with LANG=C -- a RHEL 8 default, and the floor this package
+    targets -- stdout is ASCII, so a single UTF-8 name echoed out of a log,
+    a process table or a remote command turns the whole report into a
+    UnicodeEncodeError.  Degrading the character is the same bargain the
+    rest of these tools already make with --ascii: the run is worth more
+    than the byte.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or not hasattr(stream, "buffer"):
+            continue
+        enc = (getattr(stream, "encoding", None) or "").lower()
+        if enc.replace("-", "_") in ("ascii", "ansi_x3.4_1968", "us_ascii"):
+            setattr(sys, name, io.TextIOWrapper(
+                stream.buffer, encoding=stream.encoding,
+                errors="backslashreplace", line_buffering=True))
+
+
 def die(msg, code=2):
     sys.stderr.write("%s: %s\n" % (PROG, msg))
     raise SystemExit(code)
@@ -122,7 +144,7 @@ def _env(name, default=None):
 
 def _read(path, default=None):
     try:
-        with open(path) as f:
+        with io.open(path, encoding="utf-8", errors="replace") as f:
             return f.read()
     except (OSError, UnicodeDecodeError):
         return default
@@ -136,7 +158,8 @@ def _run(cmd, timeout=5):
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL,
                              stdin=subprocess.DEVNULL,
-                             universal_newlines=True)
+                             universal_newlines=True,
+                             encoding="utf-8", errors="replace")
         out, _ = p.communicate(timeout=timeout)
         return out if p.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
@@ -1415,7 +1438,7 @@ CSV_FIELDS = ["host", "ts", "rule_id", "severity", "title", "detail", "fix"]
 
 
 def render_csv(facts, findings, path):
-    fh = open(path, "w", newline="") if path else sys.stdout
+    fh = io.open(path, "w", newline="", encoding="utf-8") if path else sys.stdout
     try:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
         w.writeheader()
@@ -1446,7 +1469,7 @@ def render_json(facts, findings, skipped, path):
     }
     text = json.dumps(doc, indent=2, sort_keys=True, default=str)
     if path:
-        with open(path, "w") as fh:
+        with io.open(path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     else:
         sys.stdout.write(text + "\n")
@@ -1514,6 +1537,7 @@ def cmd_explain(rid):
 
 
 def main(argv=None):
+    _stdio_safe()
     global NO_EXEC
     args = build_parser().parse_args(argv)
 
@@ -1546,7 +1570,7 @@ def main(argv=None):
 
     if args.from_facts:
         try:
-            with open(args.from_facts) as fh:
+            with io.open(args.from_facts, encoding="utf-8", errors="replace") as fh:
                 facts = json.load(fh)
         except (OSError, ValueError) as exc:
             die("cannot read facts file: %s" % exc)
