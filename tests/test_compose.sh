@@ -170,6 +170,70 @@ t_the_diagnostic_tools_share_one_csv_header() {
     assert_eq "$c" "$a"
 }
 
+t_every_flag_appears_in_its_tools_help() {
+    # "Documentation cannot drift" is enforced two ways -- --help prints the
+    # module docstring, and the CLI reference is generated from the live
+    # parsers -- but nothing checked that the hand-written docstring lists
+    # every flag the parser accepts.  --fleet-csv was added and worked and
+    # was invisible to --help, and it was not the only one.
+    #
+    # netmesh is exempt and says so in its own words: its docstring lists
+    # "Common options" and it carries a `help` verb that prints every flag
+    # of every verb, which is checked separately below.
+    "$PY" - "$BINNACLE_DIR" <<'EOF'
+import argparse, importlib.util, os, sys
+
+root = sys.argv[1]
+SKIP = {"--help", "--version"}
+bad = []
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(root, name + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def walk(parser, flags, seen):
+    if not isinstance(parser, argparse.ArgumentParser) or id(parser) in seen:
+        return
+    seen.add(id(parser))
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                walk(sub, flags, seen)
+            continue
+        for opt in action.option_strings:
+            if opt.startswith("--"):
+                flags.add(opt)
+
+
+for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
+             "during"):
+    mod = load(name)
+    built = mod.build_parser()
+    parsers = list(built) if isinstance(built, tuple) else [built]
+    flags, seen = set(), set()
+    for parser in parsers:
+        walk(parser, flags, seen)
+    for flag in sorted(flags - SKIP):
+        if flag not in (mod.__doc__ or ""):
+            bad.append("%s: %s is not in --help" % (name, flag))
+
+if bad:
+    sys.stderr.write("\n".join(bad) + "\n")
+    sys.exit(1)
+EOF
+    assert_status $? 0
+    # netmesh's escape hatch has to actually work: its help verb must name
+    # the per-verb flags its docstring leaves out.
+    nm="$("$PY" "$BINNACLE_DIR/netmesh.py" help)"
+    assert_contains "$nm" "--pairs"
+    assert_contains "$nm" "--mtu-ceiling"
+}
+
 t_an_unreachable_host_is_a_group_not_an_error() {
     # The convention that matters most in a fleet run: a host that never
     # answered has to survive as a finding rather than a line on stderr,
@@ -196,5 +260,6 @@ run_test "resolve groups by what a name means"  t_resolve_groups_hosts_by_what_a
 run_test "during groups by what limited them"   t_during_groups_hosts_by_what_limited_them
 run_test "--fleet-csv is the two flags"         t_fleet_csv_is_the_two_flags_and_says_so
 run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one_csv_header
+run_test "every flag appears in --help"         t_every_flag_appears_in_its_tools_help
 run_test "an unreachable host is a group"       t_an_unreachable_host_is_a_group_not_an_error
 finish

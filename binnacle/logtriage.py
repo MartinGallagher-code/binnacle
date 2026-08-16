@@ -30,6 +30,7 @@ Options:
   --rule 'RE=>NAME'    mask something of your own, before the built-ins
   --keep-paths / --keep-quoted / --keep-numbers   turn off a built-in mask
   --max-templates N    memory guard; the rest are pooled       (20000)
+  --max-template-len N truncate a template at this many chars   (512)
   --example-len N      how much of an example line to keep     (300)
   --csv [PATH] / --json [PATH]
   --ascii              plain sparklines (automatic when LANG is C/POSIX)

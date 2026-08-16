@@ -8,6 +8,7 @@ Usage: during.py -- ./benchmark.sh          wrap a command, diagnose the window
        during.py --samples run.csv -- make  keep the raw time series too
        during.py --from-samples run.csv     re-analyse a saved series
        during.py --rules                    every rule and its thresholds
+       during.py --explain RULE_ID          why one rule exists
 
 Options:
   --seconds S        how long to watch when not wrapping a command
