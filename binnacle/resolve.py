@@ -524,11 +524,20 @@ def collect_facts(args, names):
     f["res.single_request"] = conf["single_request"] if conf else None
 
     if args.servers:
-        servers = [_split_server(s) for s in args.servers]
+        configured = [_split_server(s) for s in args.servers]
         f["probe.source"] = "--server"
     else:
-        servers = [_split_server(s) for s in (f["res.nameservers"] or [])]
+        configured = [_split_server(s) for s in (f["res.nameservers"] or [])]
         f["probe.source"] = args.resolv_conf
+    # Probe each distinct server once, keeping the configured order: the
+    # results are held in a dict keyed by server, so a repeated nameserver
+    # line would otherwise leave srv.count larger than the number of
+    # results and "all of them are dead" could never be true.
+    servers = []
+    for entry in configured:
+        if entry not in servers:
+            servers.append(entry)
+    f["res.duplicates"] = len(configured) - len(servers)
     f["srv.list"] = ["%s:%d" % (a, p) if p != 53 else a for a, p in servers]
 
     # A stub is not the resolver you think you are measuring -- but only
@@ -555,6 +564,9 @@ def collect_facts(args, names):
                              "rcode": r.rcode, "error": r.error,
                              "names": {}}
     f["srv.count"] = len(servers)
+    # The stub works down the file as written, duplicates and all, so the
+    # wait an application faces is counted from the configured list.
+    f["res.nameserver_count"] = len(configured)
     f["srv.dead"] = sorted(k for k, v in f["srv.all"].items()
                            if not v["alive"]) if servers else None
     f["srv.alive"] = sorted(k for k, v in f["srv.all"].items()
@@ -690,9 +702,9 @@ def collect_facts(args, names):
     # server count the stub knows nothing about.
     f["budget.worst_s"] = None
     if not args.servers and f["res.timeout"] and f["res.attempts"] \
-            and f["srv.count"]:
+            and f["res.nameserver_count"]:
         f["budget.worst_s"] = (f["res.timeout"] * f["res.attempts"]
-                               * f["srv.count"])
+                               * f["res.nameserver_count"])
     return f
 
 
@@ -1177,6 +1189,13 @@ VERDICT_PRECEDENCE = [
 
 Finding = namedtuple("Finding", "rule severity say fix")
 
+# Not in RULES: it is not a rule about DNS, it is a statement that no rule
+# could be evaluated at all.
+NOTHING_CHECKED = Rule("NOTHING_CHECKED", "nothing could be checked", (),
+                       None, None, None,
+                       "Every rule was skipped for want of the facts it "
+                       "needs, so the run says nothing about resolution.")
+
 
 def missing_reason(f, key):
     if key in MISSING_REASONS:
@@ -1236,6 +1255,10 @@ def verdict_line(findings, facts):
                          "name works.",
         "NS_SLOW": "Your resolvers answer, slowly.  That latency is paid "
                    "before every request this box makes.",
+        "NOTHING_CHECKED": "Nothing about resolution was measured here, so "
+                           "this says nothing about whether DNS works.  It "
+                           "is not a clean bill of health -- it is an empty "
+                           "one.",
     }
     return consequences.get(top.rule.id,
                             "%s: %s" % (top.rule.title.capitalize(), top.say))
@@ -1293,8 +1316,8 @@ def render_human(facts, findings, skipped, passed, args, C):
                                    else "s"))
     if facts.get("probe.source"):
         bits.append("from %s" % facts["probe.source"])
-    out.append("%s -- %s, %s" % (PROG, facts.get("sys.hostname", "?"),
-                                 ", ".join(bits)))
+    head = "%s -- %s" % (PROG, facts.get("sys.hostname") or "?")
+    out.append("%s, %s" % (head, ", ".join(bits)) if bits else head)
     out.append("")
 
     out.append("  %s   %s" % (C.bold("VERDICT"),
@@ -1308,8 +1331,11 @@ def render_human(facts, findings, skipped, passed, args, C):
                INFO: C.info("INFO    ")}[f.severity]
         out.append("  %s  %-26s %s" % (tag, f.rule.title, f.say))
     if passed and not args.quiet:
-        names = ", ".join(sorted(set(r.title for r in passed))[:5])
-        out.append("  %s        %s" % (C.dim("ok"), C.dim(names)))
+        titles = sorted(set(r.title for r in passed))
+        names = ", ".join(titles[:5])
+        if len(titles) > 5:
+            names += " (+%d)" % (len(titles) - 5)
+        out.append("  %s        %s" % (C.dim("ok"), C.dim(_wrap(names, 12))))
     if args.all:
         for r, why in skipped:
             out.append("  %s   %-26s %s" % (C.dim("skipped"), r.title,
@@ -1524,8 +1550,13 @@ def main(argv=None):
                 facts = json.load(fh)
         except (OSError, ValueError) as exc:
             die("cannot read facts file: %s" % exc)
-        if "facts" in facts and isinstance(facts["facts"], dict):
+        if isinstance(facts, dict) and "facts" in facts \
+                and isinstance(facts["facts"], dict):
             facts = facts["facts"]
+        if not isinstance(facts, dict):
+            die("%s does not hold a fact dictionary (found %s) -- pass a "
+                "file written by --facts or --json"
+                % (args.from_facts, type(facts).__name__))
     else:
         facts = collect_facts(args, args.names)
 
@@ -1535,6 +1566,14 @@ def main(argv=None):
         return 0
 
     findings, skipped, passed = evaluate(facts)
+    if not findings and not passed:
+        findings = [Finding(NOTHING_CHECKED, WARN,
+                            "none of the %d rules could run: every fact they "
+                            "need is missing" % len(RULES),
+                            "The fact dictionary is empty or unrecognisable, "
+                            "so this says nothing about whether DNS works.  "
+                            "Run %s where the resolvers are, or pass a file "
+                            "written by --facts." % PROG)]
 
     if args.csv is not None:
         render_csv(facts, findings, args.csv or None)

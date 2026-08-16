@@ -213,6 +213,15 @@ deterministic — so hosts with the same problem land in the same group:
 
 That is fleet-wide triage in one command.
 
+## IPv6
+
+Not supported, and refused rather than guessed at. A host token is
+`name[=addr[:port]]`, so the last colon means a port — which turns `::1`
+into the address `:` on port 1, and collapses every v6 entry in a list to
+the same nonsense host. Contacting the wrong machine silently is worse than
+saying so, and the bracket form is refused too, because nothing downstream
+strips the brackets before `ssh` sees them.
+
 ## Exit codes
 
 | Code | Meaning |

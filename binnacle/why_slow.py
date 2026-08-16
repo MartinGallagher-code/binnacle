@@ -1809,6 +1809,13 @@ VERDICT_PRECEDENCE = [
 
 Finding = namedtuple("Finding", "rule severity say fix")
 
+# Not in RULES: it is not a rule about the machine, it is a statement that
+# no rule could be evaluated at all.
+NOTHING_CHECKED = Rule("NOTHING_CHECKED", "nothing could be checked", (),
+                       None, None, None,
+                       "Every rule was skipped for want of the facts it "
+                       "needs, so the run says nothing about the machine.")
+
 
 def missing_reason(f, key):
     if key in MISSING_REASONS:
@@ -1867,6 +1874,9 @@ def verdict_line(findings, facts):
                    "everywhere until it is not.",
         "CGROUP_THROTTLED": "This cgroup is being throttled against its CPU "
                             "quota, which is why it stalls on an idle box.",
+        "NOTHING_CHECKED": "Nothing here was measured, so this report says "
+                           "nothing about the machine.  It is not a clean "
+                           "bill of health -- it is an empty one.",
         # These read differently from everything above: the box is not slow,
         # it is refusing.  Saying so plainly stops the reader from going
         # looking for a bottleneck that is not there.
@@ -1927,7 +1937,7 @@ class Colors(object):
 def render_human(facts, findings, skipped, passed, args, C):
     out = []
     ncpu = facts.get("cpu.count")
-    head = "%s -- %s" % (PROG, facts.get("sys.hostname", "?"))
+    head = "%s -- %s" % (PROG, facts.get("sys.hostname") or "?")
     bits = []
     if facts.get("sample.interval_s"):
         bits.append("%.1fs sample" % facts["sample.interval_s"])
@@ -1959,15 +1969,19 @@ def render_human(facts, findings, skipped, passed, args, C):
                INFO: C.info("INFO    ")}[f.severity]
         out.append("  %s  %-22s %s" % (tag, f.rule.title, f.say))
     if passed and not args.quiet:
-        names = ", ".join(sorted(set(r.title for r in passed))[:6])
-        out.append("  %s        %s" % (C.dim("ok"), C.dim(names)))
+        titles = sorted(set(r.title for r in passed))
+        names = ", ".join(titles[:6])
+        if len(titles) > 6:
+            names += " (+%d)" % (len(titles) - 6)
+        out.append("  %s        %s" % (C.dim("ok"), C.dim(_wrap(names, 12))))
     if skipped and (args.all or not facts.get("kern.available", True)):
         for r, why in skipped if args.all else []:
             out.append("  %s   %-22s %s" % (C.dim("skipped"), r.title,
                                             C.dim(why)))
         if not args.all:
-            out.append("  %s   %s" % (C.dim("skipped"),
-                                      C.dim(MISSING_REASONS["kern.oom"])))
+            out.append("  %s   %s"
+                       % (C.dim("skipped"),
+                          C.dim(_wrap(MISSING_REASONS["kern.oom"], 12))))
     out.append("")
 
     if not args.quiet:
@@ -2168,8 +2182,13 @@ def main(argv=None):
                 facts = json.load(fh)
         except (OSError, ValueError) as exc:
             die("cannot read facts file: %s" % exc)
-        if "facts" in facts and isinstance(facts["facts"], dict):
+        if isinstance(facts, dict) and "facts" in facts \
+                and isinstance(facts["facts"], dict):
             facts = facts["facts"]
+        if not isinstance(facts, dict):
+            die("%s does not hold a fact dictionary (found %s) -- pass a "
+                "file written by --facts or --json"
+                % (args.from_facts, type(facts).__name__))
     else:
         if not os.path.isdir(PROC):
             die("%s is not readable -- this tool needs /proc (Linux only)"
@@ -2183,6 +2202,20 @@ def main(argv=None):
         return 0
 
     findings, skipped, passed = evaluate(facts)
+    if not findings and not passed:
+        # Nothing was measurable, so nothing was checked.  Saying "this box
+        # is not slow" here would be the exact failure the skip-with-a-
+        # reason convention exists to prevent, one step further along: not
+        # a report that quietly checked less, but one that checked nothing
+        # at all and still came back clean.
+        findings = [Finding(NOTHING_CHECKED, WARN,
+                            "none of the %d rules could run: every fact they "
+                            "need is missing" % len(RULES),
+                            "The fact dictionary is empty or unrecognisable, "
+                            "so this is not a healthy box -- it is no box at "
+                            "all.  Run %s on the machine itself, or pass a "
+                            "file written by --facts.  `--all` lists every "
+                            "rule and the fact it wanted." % PROG)]
 
     if args.csv is not None:
         render_csv(facts, findings, args.csv or None)

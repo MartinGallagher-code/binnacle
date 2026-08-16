@@ -235,6 +235,52 @@ t_mask_hosts_masks_names_not_substrings() {
     assert_contains "$out" "%HOST%"
 }
 
+t_mask_hosts_handles_addresses_and_fqdns() {
+    # \b is defined against word characters, and half these tokens do not
+    # start with one -- \b::1\b can never match, so an IPv6 address would
+    # silently stop being masked.  A bare name must still mask the first
+    # label of its own FQDN, since that is the part that differs.
+    install_fake_ssh
+    for h in node01 node02; do
+        fake_host "$h"
+        printf 'echo "%s.example.com bound ::1 and 10.0.0.9"\n' "$h" \
+            > "$FAKE_ROOT/$h/run.sh"
+    done
+    out="$(ag -H node01,node02 --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
+    assert_contains "$out" "%HOST%.example.com"
+    assert_not_contains "$out" "node01.example.com"
+    # The two hosts differ only in their own name, so they must now agree.
+    assert_not_contains "$out" "GROUP 2"
+    # An address must not be masked where it is only a fragment of a
+    # longer one: \b treats a dot as a boundary, so \b10.0.0.9\b matches
+    # inside 192.10.0.0.9 and would mask a different machine's address.
+    fake_host 10.0.0.9
+    printf 'echo "peers 10.0.0.9 and 192.10.0.0.9"\n' \
+        > "$FAKE_ROOT/10.0.0.9/run.sh"
+    frag="$(ag -H 10.0.0.9 --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
+    assert_contains "$frag" "peers %HOST% and 192.10.0.0.9"
+}
+
+t_ipv6_is_refused_rather_than_mis_parsed() {
+    # rsplit on the last colon turns "::1" into the address ":" on port 1,
+    # so every v6 host in a list used to collapse to the same nonsense
+    # entry and the fan-out silently contacted nothing.  netmesh already
+    # refuses these; the other two now agree.
+    set +e
+    out="$("$PY" "$AG" hosts -H '::1' 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "IPv6"
+    set +e
+    br="$("$PY" "$AG" hosts -H 'v6=[fe80::1]:2222' 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$br" "IPv6"
+    # v4 with a port is untouched, and the port survives.
+    ok="$("$PY" "$AG" hosts -H '10.0.0.9:2222')"
+    assert_eq "$ok" "10.0.0.9=10.0.0.9:2222"
+}
+
 t_mask_times_covers_the_machine_readable_one() {
     # Every tool in this package stamps its CSV with epoch seconds, so two
     # hosts answering either side of a tick would otherwise never agree.
@@ -264,6 +310,8 @@ run_test "same output, different rc, splits"   t_same_output_different_exit_code
 run_test "output in host-list order"           t_order_is_host_list_order_not_completion
 run_test "--mask-hosts makes hostnames agree"  t_mask_hosts_makes_hostname_output_agree
 run_test "--mask-hosts masks names not text"   t_mask_hosts_masks_names_not_substrings
+run_test "--mask-hosts handles addresses"      t_mask_hosts_handles_addresses_and_fqdns
+run_test "ipv6 refused, not mis-parsed"        t_ipv6_is_refused_rather_than_mis_parsed
 run_test "--mask-times covers epoch seconds"   t_mask_times_covers_the_machine_readable_one
 run_test "normalizations are disclosed"        t_normalizations_are_disclosed
 run_test "--sort-lines ignores order"          t_sort_lines_ignores_order

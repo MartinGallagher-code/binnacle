@@ -6,6 +6,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An empty fact file read as a clean bill of health.**
+  `why-slow --from-facts` on a `{}` document skipped all thirty rules and
+  printed *"This box is not slow"* — the clean-report-you-cannot-trust
+  failure one step further along: not a run that quietly checked less, but
+  one that checked nothing at all and still came back healthy. Both it and
+  `resolve` now report `NOTHING_CHECKED`, which carries through the CSV and
+  the exit status, so a monitoring wrapper cannot read it as healthy either.
+  A fact file that is not a dictionary is refused with a message rather
+  than an `AttributeError` traceback.
+- **A NaN or an infinity in a `during` sample column was treated as a
+  measurement**, quietly distorting every mean and threshold downstream of
+  it. Corrupt input now reads as blank, which is what the rest of the
+  package means by "not measured". A series with no `host` column printed
+  the literal `None` as the hostname; all three rule tools now print `?`
+  when the name is missing or null.
+- **`during`'s timeline grew without bound.** A ten-minute run at the
+  default interval is 600 samples, and one character per sample is a
+  600-character line that survives neither a terminal nor a paste into a
+  ticket. Bucketed to 60 columns, showing each bucket's peak, with the
+  samples-per-column stated so the picture cannot be misread.
+- **The "ok" line listing passed rules had no bound either**, and grew as
+  rules were added — 175 characters on a healthy box after the seven new
+  `why-slow` rules. Wrapped, with a count of the rules not named, in all
+  three rule-driven tools. `during`'s rule titles were full sentences where
+  the rest of the package uses short noun phrases; shortened to match.
+- **`agree` and `reachable` silently destroyed IPv6 host tokens.** A host
+  list entry of `::1` parsed as the address `:` on port 1, so every v6
+  entry in a list collapsed to the same nonsense host — and `reachable`
+  rewrites the file it is given, so it would comment out working machines
+  on the strength of a parse bug. Both now refuse IPv6 outright, which is
+  what `netmesh` has always done and for the reason its own comment gives.
+  `reachable` validates every token **before** it probes or writes
+  anything, so a list it cannot understand stops the run rather than
+  surfacing halfway through a rewrite.
+- **`agree --mask-hosts` could not mask a token that does not start with a
+  word character.** The word-boundary fix in the previous change was
+  written with `\b`, which is defined against word characters, so
+  `\b::1\b` can never match. Replaced with an explicit boundary that also
+  refuses to match a fragment of a longer address — `\b10.0.0.9\b` matches
+  inside `192.10.0.0.9`, because a dot is a word boundary — while still
+  masking a bare name inside its own FQDN, which is the part that differs
+  between hosts.
+- **`resolve` miscounted a repeated `nameserver` line.** Results are held
+  per server, so a duplicated entry left `srv.count` larger than the number
+  of results and `NS_ALL_DEAD` could never fire, however dead every
+  resolver was. Each distinct server is now probed once, while the timeout
+  budget still counts the file as written, because the stub works down it
+  in order.
+- **`during --exit-code` hid a failed command behind a severity.**
+  `during --exit-code -- make bench` returned `10` when `make` exited `7`.
+  A command that failed now always wins: there is nothing worth reading in
+  a verdict about a run that never completed.
+
 ### Added
 
 - **`tests/test_compose.sh`** — the claim on the front page, actually run.

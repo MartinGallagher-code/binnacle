@@ -25,7 +25,8 @@ Options:
   --csv [PATH]       findings as CSV, same shape as why-slow's
   --json [PATH]      meta + summary + findings + skipped
   --exit-code        exit 0 ok / 10 warn / 20 critical instead of passing
-                     the wrapped command's status through
+                     the wrapped command's status through -- except when
+                     that command failed, which always wins
   --proc-root DIR    read /proc from here          (DURING_PROC)
   --sys-root DIR     read /sys from here           (DURING_SYS)
   --no-color         plain output (also honours NO_COLOR)
@@ -68,7 +69,9 @@ Robustness properties
   * a fact that could not be measured is blank, never 0, and any rule that
     needed it is reported as skipped with the reason
   * the wrapped command's stdout, stderr and exit status pass straight
-    through, so `during -- make bench` is a drop-in prefix
+    through, so `during -- make bench` is a drop-in prefix -- and a command
+    that failed keeps its status even under --exit-code, because a verdict
+    about a run that never finished is not worth reading
   * the command's own process tree is excluded from interloper detection,
     because the benchmark is not a surprise
   * interrupting with ^C still prints the report for what was sampled --
@@ -627,9 +630,15 @@ def _num(s, key):
     if v is None or v == "":
         return None
     try:
-        return float(v)
+        v = float(v)
     except (TypeError, ValueError):
         return None
+    # A NaN or an infinity in a numeric column is corrupt input, not a
+    # measurement, and letting one through would quietly poison every mean
+    # and threshold downstream of it.  Blank means not measured.
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
 
 
 def classify(s):
@@ -883,7 +892,7 @@ def _g(f, key, default=None):
 
 
 # 1 ------------------------------------------------------------------------
-@rule("NOT_BOUND", "this box was not the bottleneck",
+@rule("NOT_BOUND", "not the bottleneck",
       ("bound.free_share",),
       "The most useful benchmark finding there is: if nothing here was near "
       "a ceiling, the limit was the load generator, the peer, or a lock "
@@ -911,7 +920,7 @@ def _not_bound():
 
 
 # 2 ------------------------------------------------------------------------
-@rule("BOUND_BY", "what the run was limited by",
+@rule("BOUND_BY", "what limited the run",
       ("bound.by", "bound.share"),
       "The bottleneck is the resource at its ceiling for the longest, not "
       "the one with the biggest number when you happened to look -- a single "
@@ -963,7 +972,7 @@ def _bound_by():
 
 
 # 3 ------------------------------------------------------------------------
-@rule("UNSTABLE", "the run never settled", ("steady.cov_pct",),
+@rule("UNSTABLE", "never settled", ("steady.cov_pct",),
       "A benchmark whose own load varies by a third from sample to sample "
       "cannot be compared with anything, including itself an hour later.")
 def _unstable():
@@ -989,7 +998,7 @@ def _unstable():
 
 
 # 4 ------------------------------------------------------------------------
-@rule("WARMUP", "the first part of the run was not the run",
+@rule("WARMUP", "warmup in the average",
       ("steady.warmup_pct", "steady.from_s"),
       "Averaging warmup in with steady state reports a number the system "
       "never actually sustained, in whichever direction the warmup went.")
@@ -1015,7 +1024,7 @@ def _warmup():
 
 
 # 5 ------------------------------------------------------------------------
-@rule("INTRUDER", "something else ran during the window", ("intruders",),
+@rule("INTRUDER", "something else ran", ("intruders",),
       "A backup, a cron job or somebody's ad-hoc query inside the benchmark "
       "window makes the result a measurement of that instead, and it leaves "
       "no trace in the benchmark's own output.")
@@ -1053,7 +1062,7 @@ def _intruder():
 
 
 # 6 ------------------------------------------------------------------------
-@rule("CLOCK_DRIFT", "the CPU slowed down during the run",
+@rule("CLOCK_DRIFT", "cpu clock fell",
       ("drift.freq_start_ghz", "drift.freq_end_ghz"),
       "A clock that falls partway through means the second half of the run "
       "was done on a slower machine than the first, and the average is of "
@@ -1086,7 +1095,7 @@ def _clock_drift():
 
 
 # 7 ------------------------------------------------------------------------
-@rule("BURST_EXHAUSTED", "storage got slower as the run went on",
+@rule("BURST_EXHAUSTED", "storage throttled",
       ("drift.disk_mbps_head", "drift.disk_mbps_tail", "drift.disk_util_tail"),
       "A cloud volume whose burst balance runs out mid-run keeps its "
       "utilisation pinned while its throughput collapses, which reads as "
@@ -1116,7 +1125,7 @@ def _burst_exhausted():
 
 
 # 8 ------------------------------------------------------------------------
-@rule("STEAL", "the hypervisor took time during the run",
+@rule("STEAL", "hypervisor took time",
       ("drift.steal_pct",),
       "Steal time is capacity given to another tenant. It cannot be tuned "
       "away from inside the guest, and it makes a result unrepeatable by "
@@ -1143,7 +1152,7 @@ def _steal():
 
 
 # 9 ------------------------------------------------------------------------
-@rule("SHIFTED", "the bottleneck moved during the run", ("bound.changed",),
+@rule("SHIFTED", "the limit moved", ("bound.changed",),
       "A run that is CPU-bound early and I/O-bound late has no single "
       "answer, and any average over it describes a machine that never "
       "existed.")
@@ -1168,7 +1177,7 @@ def _shifted():
 
 
 # 10 -----------------------------------------------------------------------
-@rule("SHORT_RUN", "the window was too short to conclude anything",
+@rule("SHORT_RUN", "window too short",
       ("run.samples",),
       "Under about ten samples, steady state cannot be separated from noise "
       "and every share below is a coin toss dressed as a percentage.")
@@ -1195,7 +1204,7 @@ def _short_run():
 
 
 # 11 -----------------------------------------------------------------------
-@rule("BASELINE_DRIFT", "this run differs from the baseline",
+@rule("BASELINE_DRIFT", "differs from baseline",
       ("baseline.key_delta_pct",),
       "Two runs of the same benchmark on the same box should load it the "
       "same way; when they do not, the difference is the finding, whatever "
@@ -1351,6 +1360,12 @@ def _wrap(text, indent, width=76):
 
 BARS = " .:-=+*#%@"
 
+# The timeline is a fixed width whatever the run's length: a ten-minute run
+# at the default interval is 600 samples, and a 600-character line survives
+# neither a terminal nor a paste into a ticket.  logtriage sets the same
+# precedent with its sparklines.
+TIMELINE_COLS = 60
+
 
 def _bar(pct):
     """One character of utilisation, so a whole run fits on one line."""
@@ -1360,15 +1375,27 @@ def _bar(pct):
     return BARS[i]
 
 
+def _buckets(n, cols=TIMELINE_COLS):
+    """Index ranges for at most `cols` columns over n samples."""
+    per = max(1, -(-n // cols))          # ceiling division, no float
+    return [(i, min(i + per, n)) for i in range(0, n, per)], per
+
+
 def render_timeline(samples, summary, C):
-    """One character per sample per row: the shape of the run at a glance.
+    """One column per bucket of samples: the shape of the run at a glance.
 
     Deliberately not a chart -- this has to survive ssh, a pipe and a paste
     into a ticket, and the CSV is there for anything that needs drawing.
+    Long runs are bucketed rather than truncated, and each column shows the
+    *peak* of its bucket, because a spike that a mean would smooth away is
+    the thing worth seeing.  The header says how many samples went into a
+    column so nobody reads a 60-wide picture as a 60-sample run.
     """
-    out = ["  %s  (%d samples, %ss apart)"
+    ranges, per = _buckets(len(samples))
+    out = ["  %s  (%d samples, %ss apart%s)"
            % (C.bold("TIMELINE"), len(samples),
-              summary.get("run.interval_s") or "?")]
+              summary.get("run.interval_s") or "?",
+              ", %d per column, peak shown" % per if per > 1 else "")]
     rows = [("cpu", "cpu_busy_pct", None),
             ("core", "cpu_max_core_pct", None),
             ("io", "disk_util_pct", None),
@@ -1386,20 +1413,33 @@ def render_timeline(samples, summary, C):
             vals.append(v)
         if all(v is None for v in vals):
             continue
-        out.append("    %-5s %s" % (label, "".join(_bar(v) for v in vals)))
+        cells = []
+        for lo, hi in ranges:
+            window = [v for v in vals[lo:hi] if v is not None]
+            cells.append(max(window) if window else None)
+        out.append("    %-5s %s" % (label, "".join(_bar(v) for v in cells)))
     states = summary.get("bound.states") or []
     if states:
+        cells = []
+        for lo, hi in ranges:
+            window = states[lo:hi]
+            # The state holding the most samples in the bucket, ties broken
+            # by precedence -- the same rule the headline attribution uses,
+            # so the picture and the verdict cannot disagree.
+            cells.append(max(STATES, key=lambda st: (window.count(st),
+                                                     -STATES.index(st))))
         out.append("    %-5s %s" % ("bound",
                                      "".join(STATE_LETTER.get(st, "?")
-                                             for st in states)))
-        out.append("    %s" % C.dim("C cpu  1 one core  I io  M memory  "
-                                    "N network  T throttled  S stolen  "
+                                             for st in cells)))
+        out.append("    %s" % C.dim("C cpu  1 one core  I io  M mem  "
+                                    "N net  T throttled  S stolen  "
                                     ". not bound"))
     idx = summary.get("steady.from_index")
     if idx:
         # 6 = the width of the label field plus its separator, so the caret
-        # sits under the sample it refers to rather than near it.
-        out.append("    %s" % C.dim("%s^ steady from here" % (" " * (idx + 6))))
+        # sits under the column it refers to rather than near it.
+        col = idx // per
+        out.append("    %s" % C.dim("%s^ steady from here" % (" " * (col + 6))))
     return out
 
 
@@ -1413,7 +1453,7 @@ def render_human(samples, summary, findings, skipped, passed, args, C):
         bits.append("wrapping %s" % summary["run.wrapped"])
     if summary.get("run.interrupted"):
         bits.append("interrupted")
-    out.append("%s -- %s, %s" % (PROG, summary.get("run.host", "?"),
+    out.append("%s -- %s, %s" % (PROG, summary.get("run.host") or "?",
                                  ", ".join(bits)))
     out.append("")
     out.append("  %s   %s" % (C.bold("VERDICT"),
@@ -1425,13 +1465,16 @@ def render_human(samples, summary, findings, skipped, passed, args, C):
     for f in shown:
         tag = {CRITICAL: C.crit("CRITICAL"), WARN: C.warn("WARN    "),
                INFO: C.info("INFO    ")}[f.severity]
-        out.append("  %s  %-30s %s" % (tag, f.rule.title, f.say))
+        out.append("  %s  %-22s %s" % (tag, f.rule.title, f.say))
     if passed and not args.quiet:
-        names = ", ".join(sorted(set(r.title for r in passed))[:4])
-        out.append("  %s        %s" % (C.dim("ok"), C.dim(names)))
+        titles = sorted(set(r.title for r in passed))
+        names = ", ".join(titles[:4])
+        if len(titles) > 4:
+            names += " (+%d)" % (len(titles) - 4)
+        out.append("  %s        %s" % (C.dim("ok"), C.dim(_wrap(names, 12))))
     if args.all:
         for r, why in skipped:
-            out.append("  %s   %-30s %s" % (C.dim("skipped"), r.title,
+            out.append("  %s   %-22s %s" % (C.dim("skipped"), r.title,
                                             C.dim(why)))
     out.append("")
 
@@ -1689,6 +1732,12 @@ def main(argv=None):
         sys.stdout.write(render_human(samples, summary, findings, skipped,
                                       passed, args, Colors(use_color)) + "\n")
 
+    # A command that failed outranks any verdict about it, even under
+    # --exit-code: reporting "warn" for a benchmark that never finished
+    # would hide a build failure behind a diagnosis of it, and there is
+    # nothing worth reading in a run that did not complete.
+    if child_status:
+        return child_status
     if args.exit_code and findings:
         worst = max(SEVERITY_ORDER[f.severity] for f in findings)
         # 10/20 rather than 1/2, so a severity can never be mistaken for a

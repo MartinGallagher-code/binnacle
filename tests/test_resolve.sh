@@ -257,6 +257,39 @@ t_csv_does_not_swallow_the_name() {
     assert_file_exists "$TEST_TMPDIR/out.csv"
 }
 
+t_a_duplicated_nameserver_still_counts_once() {
+    # Results are held per server, so a repeated line used to leave
+    # srv.count larger than the number of results -- and "every resolver
+    # failed" could then never be true, however dead they all were.
+    dead="$(free_port)"
+    printf 'nameserver 127.0.0.1\nnameserver 127.0.0.1\noptions timeout:3 attempts:2\n' \
+        > "$TEST_TMPDIR/resolv.conf"
+    out="$(rs --server "127.0.0.1:$dead" --server "127.0.0.1:$dead" \
+             --resolv-conf "$TEST_TMPDIR/resolv.conf" --no-stub \
+             --timeout 0.3 --csv)"
+    assert_contains "$out" "NS_ALL_DEAD"
+    # The wait an application faces still counts the file as written,
+    # duplicates and all, because the stub works down it in order.
+    facts="$(rs --resolv-conf "$TEST_TMPDIR/resolv.conf" --no-stub \
+               --timeout 0.3 --facts)"
+    assert_contains "$facts" '"res.nameserver_count": 2'
+    assert_contains "$facts" '"srv.count": 1'
+    assert_contains "$facts" '"budget.worst_s": 12'
+}
+
+t_an_empty_fact_file_is_not_a_clean_bill_of_health() {
+    printf '{}' > "$TEST_TMPDIR/empty.json"
+    out="$(rs --from-facts "$TEST_TMPDIR/empty.json")"
+    assert_contains "$out" "nothing could be checked"
+    assert_not_contains "$out" "DNS is not the problem"
+    printf '[]' > "$TEST_TMPDIR/list.json"
+    set +e
+    out2="$(rs --from-facts "$TEST_TMPDIR/list.json" 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out2" "does not hold a fact dictionary"
+}
+
 echo "resolve"
 run_test "healthy dns says so"                 t_healthy_dns_says_so
 run_test "dead resolver outranks its slowness" t_dead_first_resolver_outranks_the_slowness_it_causes
@@ -280,4 +313,6 @@ run_test "a dropped AAAA is a black hole"      t_a_dropped_aaaa_is_a_black_hole_
 run_test "truncation with no tcp reported"     t_truncation_with_no_tcp_is_reported
 run_test "search cost is measured"             t_search_domains_cost_is_measured_not_assumed
 run_test "--csv does not swallow the name"     t_csv_does_not_swallow_the_name
+run_test "a duplicated nameserver counts once" t_a_duplicated_nameserver_still_counts_once
+run_test "an empty fact file is not health"    t_an_empty_fact_file_is_not_a_clean_bill_of_health
 finish
