@@ -126,6 +126,36 @@ newer than the floor that a syntax check cannot see. It is load-bearing
 because these files run on whatever `python3` the fleet has, and RHEL 8
 ships 3.6.
 
+## Name the codec — a byte is never worth the run
+
+The boxes these tools land on often run `LANG=C`, where Python's default
+encoding is ASCII, and the files they read were edited wherever the person
+happened to be — including by Notepad and Excel, which prepend a UTF-8
+byte-order mark. Neither may change a tool's answer, so every I/O boundary
+names its codec instead of taking what the locale offers:
+
+* **Reads decode `utf-8-sig` with `errors="replace"`** — byte-identical to
+  UTF-8 unless the file opens with a BOM, in which case the mark is decoded
+  away instead of glued to the first token; an undecodable byte costs one
+  character, never the finding it appeared in. Subprocess output is decoded
+  the same way, and the stdin paths strip a leading BOM themselves.
+* **Writes encode plain UTF-8** — a UTF-8 read round-trips, so a comment in
+  a file `reachable` rewrites comes back as the bytes it arrived as, and
+  nothing here ever emits a BOM.
+* **`_stdio_safe()` runs first in every `main`** — when the locale claims
+  ASCII, stdout and stderr are rewrapped with `backslashreplace` so a
+  report is never lost to the terminal printing it. It is one of the
+  verbatim-duplicated helpers below, so the seven copies are held identical.
+
+The failure this prevents is not hypothetical or even a crash: before the
+rule, a BOM made `resolve` read a healthy box's `resolv.conf` as empty and
+report **no resolvers, CRITICAL** — a missing measurement rendered as a
+finding, the exact thing the first convention on this page forbids. To
+reproduce that class locally you must defeat PEP 538 with
+`PYTHONCOERCECLOCALE=0 PYTHONUTF8=0` as well as setting `LC_ALL=C`, because
+modern Python quietly coerces the C locale to UTF-8 — which is why none of
+it surfaces on a developer machine and all of it surfaces on the fleet.
+
 ## Testing
 
 ```bash
@@ -149,7 +179,12 @@ including boundary cases either side of every threshold. `--proc-root` and
 Writing this suite found seven real bugs, three of which looked fine when
 run by hand: CRLF line endings in a CSV, an IPv6 token mis-parsed into a
 nonsense address rather than refused, and an agent that discarded everything
-measured since the last interval when told to stop.
+measured since the last interval when told to stop. Extending it has kept
+finding them — the [changelog](changelog.md)'s *Fixed* sections carry the
+running tally — and the pattern has held throughout: degenerate inputs,
+long runs, signals and hostile locales find bugs; reading the code finds
+far fewer. Almost everything above exists because executing something
+proved a documented claim false.
 
 ## Documentation cannot drift
 
