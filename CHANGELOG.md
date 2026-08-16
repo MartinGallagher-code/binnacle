@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An empty fact file read as a clean bill of health.**
+  `why-slow --from-facts` on a `{}` document skipped all thirty rules and
+  printed *"This box is not slow"* — the clean-report-you-cannot-trust
+  failure one step further along: not a run that quietly checked less, but
+  one that checked nothing at all and still came back healthy. Both it and
+  `resolve` now report `NOTHING_CHECKED`, which carries through the CSV and
+  the exit status, so a monitoring wrapper cannot read it as healthy either.
+  A fact file that is not a dictionary is refused with a message rather
+  than an `AttributeError` traceback.
+- **`during`'s timeline grew without bound.** A ten-minute run at the
+  default interval is 600 samples, and one character per sample is a
+  600-character line that survives neither a terminal nor a paste into a
+  ticket. Bucketed to 60 columns, showing each bucket's peak, with the
+  samples-per-column stated so the picture cannot be misread.
+- **The "ok" line listing passed rules had no bound either**, and grew as
+  rules were added — 175 characters on a healthy box after the seven new
+  `why-slow` rules. Wrapped, with a count of the rules not named, in all
+  three rule-driven tools. `during`'s rule titles were full sentences where
+  the rest of the package uses short noun phrases; shortened to match.
 - **`agree` and `reachable` silently destroyed IPv6 host tokens.** A host
   list entry of `::1` parsed as the address `:` on port 1, so every v6
   entry in a list collapsed to the same nonsense host — and `reachable`

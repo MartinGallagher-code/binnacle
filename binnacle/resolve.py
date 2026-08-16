@@ -1189,6 +1189,13 @@ VERDICT_PRECEDENCE = [
 
 Finding = namedtuple("Finding", "rule severity say fix")
 
+# Not in RULES: it is not a rule about DNS, it is a statement that no rule
+# could be evaluated at all.
+NOTHING_CHECKED = Rule("NOTHING_CHECKED", "nothing could be checked", (),
+                       None, None, None,
+                       "Every rule was skipped for want of the facts it "
+                       "needs, so the run says nothing about resolution.")
+
 
 def missing_reason(f, key):
     if key in MISSING_REASONS:
@@ -1248,6 +1255,10 @@ def verdict_line(findings, facts):
                          "name works.",
         "NS_SLOW": "Your resolvers answer, slowly.  That latency is paid "
                    "before every request this box makes.",
+        "NOTHING_CHECKED": "Nothing about resolution was measured here, so "
+                           "this says nothing about whether DNS works.  It "
+                           "is not a clean bill of health -- it is an empty "
+                           "one.",
     }
     return consequences.get(top.rule.id,
                             "%s: %s" % (top.rule.title.capitalize(), top.say))
@@ -1305,8 +1316,8 @@ def render_human(facts, findings, skipped, passed, args, C):
                                    else "s"))
     if facts.get("probe.source"):
         bits.append("from %s" % facts["probe.source"])
-    out.append("%s -- %s, %s" % (PROG, facts.get("sys.hostname", "?"),
-                                 ", ".join(bits)))
+    head = "%s -- %s" % (PROG, facts.get("sys.hostname", "?"))
+    out.append("%s, %s" % (head, ", ".join(bits)) if bits else head)
     out.append("")
 
     out.append("  %s   %s" % (C.bold("VERDICT"),
@@ -1320,8 +1331,11 @@ def render_human(facts, findings, skipped, passed, args, C):
                INFO: C.info("INFO    ")}[f.severity]
         out.append("  %s  %-26s %s" % (tag, f.rule.title, f.say))
     if passed and not args.quiet:
-        names = ", ".join(sorted(set(r.title for r in passed))[:5])
-        out.append("  %s        %s" % (C.dim("ok"), C.dim(names)))
+        titles = sorted(set(r.title for r in passed))
+        names = ", ".join(titles[:5])
+        if len(titles) > 5:
+            names += " (+%d)" % (len(titles) - 5)
+        out.append("  %s        %s" % (C.dim("ok"), C.dim(_wrap(names, 12))))
     if args.all:
         for r, why in skipped:
             out.append("  %s   %-26s %s" % (C.dim("skipped"), r.title,
@@ -1536,8 +1550,13 @@ def main(argv=None):
                 facts = json.load(fh)
         except (OSError, ValueError) as exc:
             die("cannot read facts file: %s" % exc)
-        if "facts" in facts and isinstance(facts["facts"], dict):
+        if isinstance(facts, dict) and "facts" in facts \
+                and isinstance(facts["facts"], dict):
             facts = facts["facts"]
+        if not isinstance(facts, dict):
+            die("%s does not hold a fact dictionary (found %s) -- pass a "
+                "file written by --facts or --json"
+                % (args.from_facts, type(facts).__name__))
     else:
         facts = collect_facts(args, args.names)
 
@@ -1547,6 +1566,14 @@ def main(argv=None):
         return 0
 
     findings, skipped, passed = evaluate(facts)
+    if not findings and not passed:
+        findings = [Finding(NOTHING_CHECKED, WARN,
+                            "none of the %d rules could run: every fact they "
+                            "need is missing" % len(RULES),
+                            "The fact dictionary is empty or unrecognisable, "
+                            "so this says nothing about whether DNS works.  "
+                            "Run %s where the resolvers are, or pass a file "
+                            "written by --facts." % PROG)]
 
     if args.csv is not None:
         render_csv(facts, findings, args.csv or None)

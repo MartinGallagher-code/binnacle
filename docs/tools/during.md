@@ -44,17 +44,17 @@ during -- node07, 60s window, 60 samples, wrapping benchmark.sh
             result measures both.  Fix that before reading the bottleneck
             below.
 
-  WARN      something else ran during the window  backup took 71% CPU in 18% of the samples
-  INFO      what the run was limited by           io for 68% of the run (waiting on storage)
-  INFO      the first part of the run was not the run  steady only from 9s, so 15% of the samples are warmup
-  ok        the hypervisor took time during the run, the CPU slowed down during the run
+  WARN      something else ran     backup took 71% CPU in 18% of the samples
+  INFO      what limited the run   io for 68% of the run (waiting on storage)
+  INFO      warmup in the average  steady only from 9s, so 15% of the samples are warmup
+  ok        cpu clock fell, hypervisor took time, storage throttled (+3)
 
   TIMELINE  (60 samples, 1.0s apart)
     cpu  ..::=++**###########**###########**#########**####
     core :::==++**##################################**#####
     io   ..::==++*#########################################
     bound .....IIIIIIIIIIIIIIIIIIIIIIIIIIIICCCIIIIIIIIIIIII
-    C cpu  1 one core  I io  M memory  N network  T throttled  S stolen  . not bound
+    C cpu  1 one core  I io  M mem  N net  T throttled  S stolen  . not bound
               ^ steady from here
 
   SHARES
@@ -121,6 +121,18 @@ the verdict, while still appearing as findings in their own right.
 | `STEAL` | ≥ 3% steal across the run | not repeatable by anyone, including you |
 | `SHIFTED` | the binding state changed during the run | there is no single bottleneck to report |
 | `BASELINE_DRIFT` | `--baseline` differs by ≥ 10%, or hit a different ceiling | the two runs are different experiments |
+
+## The timeline is a fixed width
+
+One column per sample up to 60, and buckets after that — a ten-minute run at
+the default interval is 600 samples, and one character each would be a
+600-character line that survives neither a terminal nor a paste into a
+ticket. Each column shows the **peak** of its bucket, because a spike a mean
+would smooth away is the thing worth seeing, and the header says how many
+samples went into a column so a 60-wide picture is not misread as a
+60-sample run. The `bound` row shows the state holding the most samples in
+each bucket, ties broken by the same precedence the headline attribution
+uses — so the picture and the verdict cannot disagree.
 
 ## The benchmark is not its own interloper
 

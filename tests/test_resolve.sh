@@ -277,6 +277,19 @@ t_a_duplicated_nameserver_still_counts_once() {
     assert_contains "$facts" '"budget.worst_s": 12'
 }
 
+t_an_empty_fact_file_is_not_a_clean_bill_of_health() {
+    printf '{}' > "$TEST_TMPDIR/empty.json"
+    out="$(rs --from-facts "$TEST_TMPDIR/empty.json")"
+    assert_contains "$out" "nothing could be checked"
+    assert_not_contains "$out" "DNS is not the problem"
+    printf '[]' > "$TEST_TMPDIR/list.json"
+    set +e
+    out2="$(rs --from-facts "$TEST_TMPDIR/list.json" 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out2" "does not hold a fact dictionary"
+}
+
 echo "resolve"
 run_test "healthy dns says so"                 t_healthy_dns_says_so
 run_test "dead resolver outranks its slowness" t_dead_first_resolver_outranks_the_slowness_it_causes
@@ -301,4 +314,5 @@ run_test "truncation with no tcp reported"     t_truncation_with_no_tcp_is_repor
 run_test "search cost is measured"             t_search_domains_cost_is_measured_not_assumed
 run_test "--csv does not swallow the name"     t_csv_does_not_swallow_the_name
 run_test "a duplicated nameserver counts once" t_a_duplicated_nameserver_still_counts_once
+run_test "an empty fact file is not health"    t_an_empty_fact_file_is_not_a_clean_bill_of_health
 finish

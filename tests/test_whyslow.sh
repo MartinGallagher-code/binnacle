@@ -247,6 +247,34 @@ t_an_absent_conntrack_table_is_not_an_empty_one() {
     assert_not_contains "$out" "conntrack entries in use (0%)"
 }
 
+t_an_empty_fact_file_is_not_a_clean_bill_of_health() {
+    # Every rule skipped used to print "This box is not slow", which is the
+    # clean-report-you-cannot-trust failure one step further along: not a
+    # run that quietly checked less, but one that checked nothing at all
+    # and still came back healthy.
+    printf '{}' > "$TEST_TMPDIR/empty.json"
+    out="$(ws --from-facts "$TEST_TMPDIR/empty.json")"
+    assert_contains "$out" "nothing could be checked"
+    assert_not_contains "$out" "This box is not slow"
+    csv="$(ws --from-facts "$TEST_TMPDIR/empty.json" --csv)"
+    assert_contains "$csv" "NOTHING_CHECKED,WARN"
+    # And a monitoring wrapper must not read it as healthy either.
+    set +e
+    ws --from-facts "$TEST_TMPDIR/empty.json" --exit-code >/dev/null; rc=$?
+    set -e
+    assert_status $rc 10
+}
+
+t_a_facts_file_that_is_not_a_dictionary_is_refused() {
+    printf '[]' > "$TEST_TMPDIR/list.json"
+    set +e
+    out="$(ws --from-facts "$TEST_TMPDIR/list.json" 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "does not hold a fact dictionary"
+    assert_not_contains "$out" "Traceback"
+}
+
 echo "why-slow"
 run_test "healthy box says so"                t_healthy_box_says_so
 run_test "swap outranks cpu in the verdict"   t_swap_outranks_cpu_in_verdict
@@ -267,4 +295,6 @@ run_test "cgroup task limit beats the host"   t_cgroup_task_limit_beats_host_hea
 run_test "ceiling thresholds are boundaries"  t_exhaustion_thresholds_are_boundaries
 run_test "ceilings read from a /proc tree"    t_ceilings_are_read_from_a_synthetic_proc_tree
 run_test "absent conntrack is not empty"      t_an_absent_conntrack_table_is_not_an_empty_one
+run_test "an empty fact file is not health"   t_an_empty_fact_file_is_not_a_clean_bill_of_health
+run_test "a non-dict fact file is refused"    t_a_facts_file_that_is_not_a_dictionary_is_refused
 finish

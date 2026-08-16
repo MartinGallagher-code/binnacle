@@ -178,6 +178,24 @@ t_exit_code_opts_into_severity_instead() {
     assert_status $rc 10
 }
 
+t_a_long_run_still_fits_on_a_line() {
+    # A ten-minute run at the default interval is 600 samples, and one
+    # character per sample is a 600-character line: unreadable in a
+    # terminal and unpasteable into a ticket.
+    during_samples "$TEST_TMPDIR/long.csv" 600 cpu_busy_pct=95 \
+        cpu_max_core_pct=97
+    out="$(du_ --from-samples "$TEST_TMPDIR/long.csv")"
+    widest="$(printf '%s' "$out" | awk '{ print length($0) }' | sort -n | tail -1)"
+    assert_between "$widest" 0 90
+    # The reader has to be told the columns are buckets, not samples.
+    assert_contains "$out" "10 per column"
+    # A short run is still one column per sample, with no note.
+    during_samples "$TEST_TMPDIR/short.csv" 30 cpu_busy_pct=95 \
+        cpu_max_core_pct=97
+    short="$(du_ --from-samples "$TEST_TMPDIR/short.csv")"
+    assert_not_contains "$short" "per column"
+}
+
 t_a_failed_command_outranks_a_severity() {
     # Reporting "warn" for a benchmark that never finished would hide a
     # build failure behind a diagnosis of it.
@@ -236,6 +254,7 @@ run_test "--rules and --explain generated"     t_rules_and_explain_are_generated
 run_test "wrapping passes status through"      t_wrapping_passes_the_commands_status_through
 run_test "--exit-code opts into severity"      t_exit_code_opts_into_severity_instead
 run_test "a failed command outranks severity" t_a_failed_command_outranks_a_severity
+run_test "a long run still fits on a line"    t_a_long_run_still_fits_on_a_line
 run_test "the series reads back in"            t_the_series_written_out_reads_back_in
 run_test "a too-short window says so"          t_a_window_shorter_than_one_interval_says_so
 run_test "neither command nor window errors"   t_asking_for_neither_a_command_nor_a_window_is_a_usage_error

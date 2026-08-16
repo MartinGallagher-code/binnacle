@@ -112,7 +112,7 @@ ships 3.6.
 ## Testing
 
 ```bash
-bash tests/run_tests.sh              # all eight suites, 138 checks
+bash tests/run_tests.sh              # all eight suites, 142 checks
 bash tests/run_tests.sh agree        # one suite
 ```
 
