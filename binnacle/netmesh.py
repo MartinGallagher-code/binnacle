@@ -151,6 +151,7 @@ REPORT_FIELDS = [
     "sent", "recv", "loss_pct",
     "rtt_min_us", "rtt_avg_us", "rtt_p50_us", "rtt_p99_us", "rtt_max_us",
     "jitter_us", "path_mtu", "mtu_state", "agent_cpu_pct", "note",
+    "rx_usecs",
 ]
 
 CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every")
@@ -740,6 +741,10 @@ class Agent(object):
         self.ping_procs = {}
         self.cpu_prev = read_self_cpu()
         self.cpu_wall = time.monotonic()
+        # Read once: it is a setting, not a measurement, and shelling out
+        # to ethtool every interval would be a cost paid per second for a
+        # number that does not move.
+        self.rx_usecs = read_rx_usecs(default_iface())
 
     # -- setup ------------------------------------------------------------
     def open_sockets(self):
@@ -1007,6 +1012,7 @@ class Agent(object):
         writer.writerow({
             "ts": ts, "host": self.me, "dir": "host", "peer": "*",
             "probe": "udp", "agent_cpu_pct": cpu,
+            "rx_usecs": self.rx_usecs if self.rx_usecs is not None else "",
         })
 
     # -- the loop ---------------------------------------------------------
@@ -1709,6 +1715,95 @@ def under_load(rows, split_ts):
     return out or None
 
 
+def default_iface():
+    """The interface carrying the default route, from /proc/net/route.
+
+    Read rather than exec'd, and best-effort: this is only used to label a
+    measurement, so a box whose egress cannot be identified reports None
+    and the check that needs it skips.
+    """
+    try:
+        with io.open("/proc/net/route", encoding="utf-8-sig",
+                     errors="replace") as fh:
+            txt = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in txt.splitlines()[1:]:
+        f = line.split()
+        # destination 00000000 with the UP|GATEWAY flags is the default.
+        if len(f) >= 4 and f[1] == "00000000":
+            return f[0]
+    return None
+
+
+def read_rx_usecs(iface):
+    """The card's receive interrupt coalescing timer, in microseconds.
+
+    This is the one setting that can make netmesh's own answer wrong
+    without anything looking wrong: a card told to wait 200us before
+    raising an interrupt cannot report a round trip faster than that, so
+    a p50 near the timer is a measurement of the timer.  There is no
+    sysfs for it, so ethtool it is -- and if ethtool is absent the value
+    is None and the finding skips, rather than being assumed to be zero.
+    """
+    if not iface:
+        return None
+    try:
+        p = subprocess.Popen(["ethtool", "-c", iface],
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL,
+                             universal_newlines=True)
+        out, _ = p.communicate(timeout=5)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not out:
+        return None
+    m = re.search(r"^rx-usecs:\s*(\d+)", out, re.M)
+    return int(m.group(1)) if m else None
+
+
+def host_coalescing(rows):
+    """rx-usecs per host, out of the agents' own host rows."""
+    out = {}
+    for r in rows:
+        if r.get("dir") != "host":
+            continue
+        v = r.get("rx_usecs")
+        if v in (None, ""):
+            continue
+        try:
+            out[r.get("host")] = int(float(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def coalescing_notes(rows, measured, floor_pct=50.0):
+    """Where the card's timer is a large share of what was measured.
+
+    Same rule as the rest of the package: say what was done to the data.
+    agree discloses its normalizations and netmesh marks ping-only rows,
+    and this is that discipline turned on netmesh's own instrument.
+    """
+    notes = []
+    for host, us in sorted(host_coalescing(rows).items()):
+        p50s = [_pair_p50(p) for p in measured if p.src == host]
+        p50s = [v for v in p50s if v]
+        if not p50s or us <= 0:
+            continue
+        best = min(p50s)
+        if us * 100.0 / best >= floor_pct:
+            notes.append(
+                "rx-usecs is %dus on %s and its fastest pair p50 is %s, so "
+                "that number is the card's coalescing timer rather than the "
+                "path.  `ethtool -C <iface> rx-usecs 0` on %s before reading "
+                "latency from this run -- and put it back afterwards, since "
+                "coalescing is there to buy throughput."
+                % (us, host, fmt_us(best), host))
+    return notes
+
+
 def _wrap_text(text, indent, width=76):
     """Fold a finding onto the report's width.
 
@@ -1991,6 +2086,10 @@ def cmd_summarize(args, mesh=None, fleet=None):
         log("      mx run --for 60           (packets per second)")
         log("      iperf_orchestrator.sh all (TCP bandwidth)")
     log("")
+
+    for note in coalescing_notes(rows, measured):
+        log("  %s   %s" % ("MEASUREMENT", _wrap_text(note, 17)))
+        log("")
 
     split = getattr(args, "load_split", None)
     if split:

@@ -244,6 +244,34 @@ file, copied by scp and run from a working directory that `clean` removes.
 `stop` sends SIGTERM, and the agent flushes its current interval before
 exiting rather than discarding everything measured since the last one.
 
+### When the number is the card's timer
+
+Receive interrupt coalescing (`rx-usecs`) is the one setting that can make
+`netmesh`'s own answer wrong with nothing looking wrong. A card told to wait
+200 µs before raising an interrupt **cannot report a round trip faster than
+that**, so a p50 near the timer is a measurement of the timer:
+
+```text
+  MEASUREMENT   rx-usecs is 200us on web03 and its fastest pair p50 is
+                210us, so that number is the card's coalescing timer
+                rather than the path. `ethtool -C <iface> rx-usecs 0` on
+                web03 before reading latency from this run -- and put it
+                back afterwards, since coalescing is there to buy
+                throughput.
+```
+
+This is the *say what was done to the data* convention turned on the
+instrument itself, the same way `agree` discloses its normalizations and
+ping-only rows are marked `probe=ping`.
+
+The agent reads it once at start — it is a setting, not a measurement, and
+shelling out every interval would cost a subprocess a second for a number
+that does not move — and records it on its own `host` row as `rx_usecs`.
+There is no sysfs for it, so `ethtool` is required; where `ethtool` is
+absent the value is **blank and the note is simply absent**, rather than
+being taken as "coalescing is off". The note only appears when the timer is
+at least half the fastest measured p50, so it stays quiet on healthy runs.
+
 ## Latency under load
 
 `netmesh` measures an **idle** network. `iperf_orchestrator` measures TCP
