@@ -171,10 +171,17 @@ t_wrapping_passes_the_commands_status_through() {
 
 t_exit_code_opts_into_severity_instead() {
     set +e
-    du_ --interval 0.2 --exit-code -- sh -c 'sleep 1.2' >/dev/null 2>&1; rc=$?
+    du_ --interval 0.5 --exit-code -- sh -c 'sleep 1.2' >/dev/null 2>&1; rc=$?
     set -e
-    # Short window plus an idle box: at least one rule fires, and a command
-    # that succeeded leaves the status free to carry the severity.
+    # The interval is chosen so the severity does not depend on the machine.
+    # At 0.2s this asked for 5-6 samples, and both routes to WARN sat on a
+    # boundary: SHORT_RUN is WARN only below 5 samples (5-9 is INFO), and
+    # NOT_BOUND only at 80% free share, which a loaded runner never reaches.
+    # On a busy CI box everything landed at INFO and the status was 0.  At
+    # 0.5s the window yields two samples, so SHORT_RUN is WARN whatever else
+    # the box happens to be doing -- which is what this case is really
+    # about: --exit-code carries the worst severity, and a command that
+    # succeeded leaves the status free to do so.
     assert_status $rc 10
 }
 

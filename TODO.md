@@ -156,6 +156,14 @@ Worth reading before touching the suite — each of these cost a red run.
 - **The version lives in ten places** — `pyproject.toml`,
   `binnacle/__init__.py`, and each of the eight modules. The compose suite's
   `every declared version agrees` case enforces it.
+- **Live-machine assertions need margin, not luck.** `--exit-code opts into
+  severity` asked for 5-6 samples and asserted WARN, but `SHORT_RUN` is WARN
+  only below 5 samples and `NOT_BOUND` only at 80% free share — two boundary
+  conditions, both of which a loaded CI runner falls the wrong side of. It
+  passed for months and then failed on a commit that only added a markdown
+  file. If a case asserts on a live run, pick parameters that put the
+  expected finding well inside its threshold, and reproduce under load
+  (`nproc`×2 busy loops) before believing it.
 - **Thresholds are policy, not measurement.** Do not collect them into a
   fact dictionary, or a saved file's values silently win under
   `--from-facts` and the flag does nothing. Resolve flag → fact file →
