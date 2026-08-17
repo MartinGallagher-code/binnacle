@@ -1,34 +1,41 @@
 # What to do next
 
-Written 2026-08-17. Everything here is enough to pick the work up cold.
+Written 2026-08-17, refreshed after the 0.3.0 merges. Everything here is
+enough to pick the work up cold.
 
 ## Where things stand
 
-`main` is at **`a56da7d`** and carries: `skew` (eighth tool), `during`'s
-receive-path and two-ended work, and `netmesh`'s latency-under-load.
-**227 checks across nine suites**, CI green on all ten jobs.
+`main` is at **`7eed30f`** and is **release-ready at 0.3.0**, unpublished.
+It carries `skew` (eighth tool), `during`'s receive-path, two-ended and
+`--expect-mbps` work, and `netmesh`'s latency-under-load and rx-usecs
+disclosure. Nothing is open: PRs #21 (release prep) and #22 (the two
+follow-on features) are both merged, and no branch is ahead of `main`.
 
-Two pull requests are open, both green, neither merged:
+**227 checks across nine suites.** The merged combination was verified
+directly rather than trusted, because #21 and #22 were each tested against
+the *previous* `main` and nothing had tested them together: full suite,
+shellcheck, the 3.6 floor, `sphinx-build -W`, `reuse lint`, both artifacts
+through `twine check`, all eight console scripts reporting `0.3.0` from the
+installed wheel, and `netmesh selftest`.
 
-| PR | Branch | What it is |
-|---|---|---|
-| [#21](https://github.com/MartinGallagher-code/binnacle/pull/21) | `claude/project-status-tlkmrg` | 0.3.0 release prep — version bump in all ten places, `Unreleased` rolled under a dated `## [0.3.0]`, compare links updated. Deliberately nothing else. |
-| [#22](https://github.com/MartinGallagher-code/binnacle/pull/22) | `claude/network-test-depth` | `during --expect-mbps` and `netmesh`'s rx-usecs disclosure. Branched off `main`, not off #21. |
-
-`#22` is branched from `main`, so it does **not** contain the 0.3.0 bump.
-Whichever merges second will need the other's changes; neither touches the
-same lines, so it should merge cleanly either way.
+One thing that went right by luck rather than design and is worth knowing:
+#22 branched from `main` *before* the `Unreleased` section was rolled into
+`0.3.0`, so its two changelog entries could have been stranded. Git placed
+them inside the `0.3.0` `### Added` block instead, which is where they
+belong — the release section covers all six items. If a future branch is
+long-lived across a release roll, check that by hand rather than assuming.
 
 ---
 
-## 1. Cut the 0.3.0 release
+## 1. Publish 0.3.0
 
-Deferred by choice, not blocked. **Order matters** — `publish.yml` fires the
-moment the GitHub Release is published, so the PyPI side has to exist first
-or the run dies on OIDC with `invalid-publisher`.
+The tree is ready and verified; only the publishing steps remain, and none
+of them can be done from a Claude Code session — they need repo settings,
+tags, releases and PyPI. **Order matters**: `publish.yml` fires the moment
+the GitHub Release is published, so the PyPI side has to exist first or the
+run dies on OIDC with `invalid-publisher`.
 
-1. **Merge PR #21.**
-2. **PyPI trusted publisher** (one-time, and this is the *first* publish):
+1. **PyPI trusted publisher** (one-time, and this is the *first* publish):
    - On PyPI: *Your projects → Publishing* → add a GitHub publisher with
      owner `MartinGallagher-code`, repository `binnacle`, workflow
      `publish.yml`, environment `pypi`.
@@ -37,18 +44,18 @@ or the run dies on OIDC with `invalid-publisher`.
      before anything reaches PyPI.
    - The workflow name and environment must match exactly; a mismatch is the
      usual cause of `invalid-publisher`.
-3. **Tag and push:**
+2. **Tag and push:**
    ```bash
    git checkout main && git pull
    git tag -a v0.3.0 -m "binnacle 0.3.0"
    git push origin v0.3.0
    ```
-4. **Publish a GitHub Release** for `v0.3.0`. That triggers the build, which
+3. **Publish a GitHub Release** for `v0.3.0`. That triggers the build, which
    re-runs the rehearsal before uploading.
-5. **Import the repo on Read the Docs** — one-off; `.readthedocs.yaml`
+4. **Import the repo on Read the Docs** — one-off; `.readthedocs.yaml`
    already configures the build.
 
-Until step 4 lands, `pip install binnacle` 404s and the README's PyPI and
+Until step 3 lands, `pip install binnacle` 404s and the README's PyPI and
 Read the Docs badges promise things that do not resolve.
 
 **Why 0.3.0 and not 0.2.1:** `PUBLISHING.md`'s own rule makes a new tool, a
@@ -56,6 +63,9 @@ new flag, a new rule or a new output column a minor bump. This release has
 all four. Nothing was removed or changed incompatibly — the shared CSV
 header is untouched, no exit code moved, and the new `during` columns are
 additive, which `agree`'s merged CSV accepts as a superset.
+
+**After publishing**, the next change starts a fresh `Unreleased` section;
+it currently reads "Nothing yet." and the compare links are already correct.
 
 ---
 
