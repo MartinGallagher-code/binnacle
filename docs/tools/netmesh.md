@@ -244,6 +244,64 @@ file, copied by scp and run from a working directory that `clean` removes.
 `stop` sends SIGTERM, and the agent flushes its current interval before
 exiting rather than discarding everything measured since the last one.
 
+## Latency under load
+
+`netmesh` measures an **idle** network. `iperf_orchestrator` measures TCP
+bandwidth and `matrix_orchestrator` measures packets per second, both under
+load. Nothing measured **what the load did to the latency** — and that is
+the number everything else sharing the path actually experiences.
+
+```bash
+netmesh run --mesh mesh.txt --baseline 20 -- ./iperf_orchestrator.sh all
+```
+
+Probe idle for twenty seconds, note the split, then keep probing while the
+load runs. The report gains a section comparing the two windows:
+
+```text
+  UNDER LOAD   idle -> loaded, split at 14:22:31
+
+    web03 -> db01     p50    139us -> 8.4ms    (60x)   p99    210us -> 42.1ms  (200x)
+
+    Latency under load rose 200x on web03 -> db01: p99 210us idle, 42.1ms
+    loaded. That is the queue in front of the bottleneck filling up. The
+    throughput number is real, and this is what everything else sharing
+    the path paid for it -- an interactive session over this link is
+    42.1ms of lag per round trip while the test runs.
+```
+
+A 9.4 Gbit/s result at 300 µs and a 9.4 Gbit/s result at 42 ms are
+different results. Without this section they are the same number.
+
+### Nothing extra is measured
+
+The agents already write one row per interval with the timestamp on it, so
+idle and loaded are two filters over rows that are on disk. That means a run
+collected days ago can be re-split after the fact:
+
+```bash
+netmesh summarize --reports ./reports --load-split 1786741765
+```
+
+which is the same replay property `--from-facts` gives the diagnostic tools.
+
+### Loss that only appears under load
+
+A path that drops only when busy is a queue running out, not a broken link,
+and it will not reproduce on an idle `check`. It gets its own finding for
+that reason — it is the loss most likely to be dismissed as noise and then
+rediscovered in production.
+
+### When there is nothing to compare
+
+A split with no rows on one side of it is reported as exactly that, rather
+than as an idle baseline of zero and an infinite regression against it.
+**Blank means not measured**, here as everywhere else in this package.
+
+`--bloat-factor` moves the line (default 4×). It is a ratio rather than an
+absolute, because 200 µs to 800 µs on a LAN and 20 ms to 80 ms across a WAN
+are the same finding about the same queue.
+
 ## See also
 
 - [`why-slow`](why-slow.md) — check the box before blaming the network

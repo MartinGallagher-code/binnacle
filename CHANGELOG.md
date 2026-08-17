@@ -8,6 +8,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`netmesh` measures latency under load — the number neither half of the
+  toolchain had.** `netmesh` measured an *idle* network; `iperf_orchestrator`
+  and `matrix_orchestrator` measure throughput and packets per second *under*
+  load. Nothing measured what the load did to the latency, which is what
+  everything else sharing the path actually experiences. A 9.4 Gbit/s result
+  at 300 µs and a 9.4 Gbit/s result at 42 ms are different results, and
+  without this they are the same number.
+
+  `netmesh run --baseline 20 -- ./iperf_orchestrator.sh all` probes idle for
+  twenty seconds, notes the split, then keeps probing while the load runs,
+  and the report gains an idle-versus-loaded section per pair with the
+  finding attached: *"latency under load rose 200x: p99 210us idle, 42.1ms
+  loaded — that is the queue in front of the bottleneck filling up."*
+
+  Nothing extra is measured and nothing twice. The agents already write one
+  row per interval with the timestamp on it, so idle and loaded are two
+  filters over rows that are on disk — which also means a run collected days
+  ago can be re-split with `summarize --load-split`, the same replay
+  property `--from-facts` gives the diagnostic tools.
+
+  Loss that appears only under load gets its own finding, because a path
+  that drops only when busy is a queue running out rather than a broken
+  link and will not reproduce on an idle `check`. A split with nothing on
+  one side of it is reported as exactly that rather than as an idle
+  baseline of zero with an infinite regression against it: **blank means
+  not measured**, here as everywhere else. `--bloat-factor` moves the line
+  (default 4×) and is deliberately a ratio, since 200 µs to 800 µs on a LAN
+  and 20 ms to 80 ms across a WAN are the same finding about the same
+  queue.
+
 - **`during --peer-samples`: one verdict from both ends of a test.** A
   network test has two machines in it and every tool here watches one. The
   composing guide has described the consequence since before anything

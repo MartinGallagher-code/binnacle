@@ -170,6 +170,7 @@ different pair of tools -- with `during` watching while they run:
 | How much TCP bandwidth under load? | [`iperf_orchestrator`](https://github.com/MartinGallagher-code/iperf_orchestrator) |
 | How many packets per second under load? | [`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator) |
 | What was each box doing while that ran? | `during` |
+| What did the load do to the latency? | `netmesh run --baseline` |
 | Do the boxes agree what time it is? | `skew` |
 | Which settings actually matter? | [`doehelper`](https://doehelper.com) |
 
