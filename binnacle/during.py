@@ -106,7 +106,7 @@ import sys
 import time
 from collections import namedtuple
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 PROG = os.path.basename(sys.argv[0]) or "during.py"
 
 CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"
