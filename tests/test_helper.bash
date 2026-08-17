@@ -537,6 +537,48 @@ with open(path, "w") as fh:
 EOF
 }
 
+# netmesh_reports DIR SPLIT -- a two-window report file for one pair.
+#
+# Rows before SPLIT are the idle baseline and rows at or after it are the
+# loaded window, which is exactly the split `summarize --load-split` makes.
+# Written by hand rather than by running agents: the arithmetic of idle
+# versus loaded is what is under test, and real agents on an idle loopback
+# cannot be made to bufferbloat on demand.
+#
+# Usage: netmesh_reports DIR SPLIT IDLE_P50 IDLE_P99 LOAD_P50 LOAD_P99 \
+#                        [IDLE_LOSS LOAD_LOSS]
+netmesh_reports() {
+    "$PY" - "$@" <<'EOF'
+import csv, io, os, sys
+d, split = sys.argv[1], int(sys.argv[2])
+ip50, ip99, lp50, lp99 = (float(x) for x in sys.argv[3:7])
+iloss, lloss = (float(x) for x in (sys.argv[7:9] or ["0", "0"]))
+FIELDS = ["ts", "host", "dir", "peer", "probe", "size", "target_pps",
+          "sent", "recv", "loss_pct", "rtt_min_us", "rtt_avg_us",
+          "rtt_p50_us", "rtt_p99_us", "rtt_max_us", "jitter_us",
+          "path_mtu", "mtu_state", "agent_cpu_pct", "note"]
+os.makedirs(d, exist_ok=True)
+with io.open(os.path.join(d, "web03.csv"), "w", newline="",
+             encoding="utf-8") as fh:
+    w = csv.DictWriter(fh, fieldnames=FIELDS, restval="",
+                       lineterminator="\n")
+    w.writeheader()
+    for i in range(10):
+        loaded = i >= 5
+        ts = split + (i - 5) * 10 if loaded else split - (5 - i) * 10
+        p50, p99 = (lp50, lp99) if loaded else (ip50, ip99)
+        loss = lloss if loaded else iloss
+        sent = 1000
+        recv = int(sent * (100.0 - loss) / 100.0)
+        w.writerow({"ts": ts, "host": "web03", "dir": "tx", "peer": "db01",
+                    "probe": "udp", "sent": sent, "recv": recv,
+                    "rtt_avg_us": p50, "rtt_p50_us": p50, "rtt_p99_us": p99,
+                    "rtt_max_us": p99, "jitter_us": 10})
+        w.writerow({"ts": ts, "host": "db01", "dir": "rx", "peer": "web03",
+                    "probe": "udp", "sent": 0, "recv": recv})
+EOF
+}
+
 # free_port -- a UDP port nothing is listening on, for the responder.
 free_port() {
     "$PY" - <<'EOF'

@@ -1668,6 +1668,136 @@ def _pair_p50(ps):
     return ps.p50.mean if ps.p50.n else ps.avg.mean
 
 
+def _pair_p99(ps):
+    return ps.p99.mean if ps.p99.n else None
+
+
+def under_load(rows, split_ts):
+    """The same pairs, before and after the load started.
+
+    Nothing extra is measured and nothing is measured twice: the agents
+    already write one row per interval with the timestamp on it, so idle
+    and loaded are two filters over the rows that are on disk.  That also
+    means a run collected days ago can be re-split, which is the same
+    replay property --from-facts gives the diagnostic tools.
+
+    Returns None when either window is empty, because a comparison with
+    one side missing is not a quiet zero -- it is not a comparison.
+    """
+    idle_rows, load_rows = [], []
+    for r in rows:
+        ts = _int(r.get("ts"))
+        if not ts:
+            continue
+        (idle_rows if ts < split_ts else load_rows).append(r)
+    if not idle_rows or not load_rows:
+        return None
+
+    idle_pairs = build_pairs(idle_rows)[0]
+    load_pairs = build_pairs(load_rows)[0]
+    out = []
+    for key in sorted(set(idle_pairs) & set(load_pairs)):
+        a, b = idle_pairs[key], load_pairs[key]
+        if not a.sent or not b.sent:
+            continue
+        out.append({
+            "src": a.src, "dst": a.dst,
+            "idle_p50": _pair_p50(a), "load_p50": _pair_p50(b),
+            "idle_p99": _pair_p99(a), "load_p99": _pair_p99(b),
+            "idle_loss": a.loss_pct, "load_loss": b.loss_pct,
+        })
+    return out or None
+
+
+def _wrap_text(text, indent, width=76):
+    """Fold a finding onto the report's width.
+
+    Written here rather than taken from why_slow's _wrap: that one is a
+    declared verbatim copy in three modules and adding a fourth would mean
+    holding this file to it forever for one paragraph of output.
+    """
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width - indent:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w) if cur else w
+    if cur:
+        lines.append(cur)
+    return ("\n" + " " * indent).join(lines)
+
+
+def _ratio(idle, loaded):
+    """How much worse, or None when there is nothing to compare.
+
+    Guarded against a zero idle figure rather than allowed to divide by
+    it: a pair whose idle p99 rounded to zero would otherwise report an
+    infinite regression and lead the report.
+    """
+    if idle is None or loaded is None or idle <= 0:
+        return None
+    return loaded / idle
+
+
+def render_under_load(recs, factor, split_ts):
+    """The idle-versus-loaded section, and the finding it carries.
+
+    This is the measurement the rest of the toolchain does not have.
+    iperf_orchestrator says what the link carried and netmesh says what it
+    costs when idle; neither says what the carrying did to the latency,
+    and that is the number everything else sharing the path actually
+    experiences.
+    """
+    lines = ["", "  UNDER LOAD   idle -> loaded, split at %s"
+             % time.strftime("%H:%M:%S", time.localtime(split_ts)), ""]
+    worst = None
+    for r in sorted(recs, key=lambda x: -(_ratio(x["idle_p99"],
+                                                 x["load_p99"]) or 0)):
+        r99 = _ratio(r["idle_p99"], r["load_p99"])
+        r50 = _ratio(r["idle_p50"], r["load_p50"])
+        lines.append("    %-24s p50 %8s -> %-8s %-7s p99 %8s -> %-8s %s"
+                     % ("%s -> %s" % (r["src"], r["dst"]),
+                        fmt_us(r["idle_p50"]), fmt_us(r["load_p50"]),
+                        ("(%.0fx)" % r50) if r50 else "",
+                        fmt_us(r["idle_p99"]), fmt_us(r["load_p99"]),
+                        ("(%.0fx)" % r99) if r99 else ""))
+        if r99 and (worst is None or r99 > worst[0]):
+            worst = (r99, r)
+
+    findings = []
+    if worst and worst[0] >= factor:
+        r99, r = worst
+        findings.append(
+            "Latency under load rose %.0fx on %s -> %s: p99 %s idle, %s "
+            "loaded.  That is the queue in front of the bottleneck "
+            "filling up.  The throughput number is real, and this is what "
+            "everything else sharing the path paid for it -- an "
+            "interactive session over this link is %s of lag per round "
+            "trip while the test runs."
+            % (r99, r["src"], r["dst"], fmt_us(r["idle_p99"]),
+               fmt_us(r["load_p99"]), fmt_us(r["load_p99"])))
+
+    lost = [r for r in recs
+            if r["load_loss"] is not None and r["idle_loss"] is not None
+            and r["load_loss"] - r["idle_loss"] >= 1.0]
+    if lost:
+        w = max(lost, key=lambda r: r["load_loss"] - r["idle_loss"])
+        findings.append(
+            "Loss appeared under load on %s -> %s: %.2f%% idle, %.2f%% "
+            "loaded.  A path that only drops when busy is a queue running "
+            "out, not a broken link, and it will not reproduce on an idle "
+            "check."
+            % (w["src"], w["dst"], w["idle_loss"], w["load_loss"]))
+
+    if not findings:
+        findings.append(
+            "Latency held up under load: nothing rose by %.0fx or more, "
+            "and no pair started dropping.  The link carried the traffic "
+            "without filling a queue in front of it." % factor)
+    return lines, findings
+
+
 def diagnose(pairs, bad, hosts):
     """Three cheap rules.  Nothing cleverer than this in v1 -- a wrong
     confident diagnosis is worse than none."""
@@ -1862,6 +1992,23 @@ def cmd_summarize(args, mesh=None, fleet=None):
         log("      iperf_orchestrator.sh all (TCP bandwidth)")
     log("")
 
+    split = getattr(args, "load_split", None)
+    if split:
+        recs = under_load(rows, int(split))
+        if recs is None:
+            log("  UNDER LOAD   nothing to compare: the split at %s leaves "
+                "one side of it empty" % int(split))
+            log("")
+        else:
+            lines, findings = render_under_load(
+                recs, getattr(args, "bloat_factor", 4.0), int(split))
+            for line in lines:
+                log(line)
+            log("")
+            for f in findings:
+                log("    %s" % _wrap_text(f, 4))
+            log("")
+
     if args.grid:
         _write_grids(args.grid, pairs, hosts)
         log("[%s] grids written to %s/" % (PROG, args.grid))
@@ -1939,15 +2086,44 @@ def _emit_json(measured, med, jit, sent, recv, black):
 def cmd_run(args, mesh=None, fleet=None):
     mesh = mesh or load_mesh(args.mesh)
     fleet = fleet or Fleet(mesh, args)
-    args.duration = args.duration or args.for_secs
+    load_cmd = [c for c in (getattr(args, "cmd", None) or []) if c != "--"]
+    baseline = getattr(args, "baseline", 0.0) or 0.0
+
+    # With a baseline, or a command whose length is not known in advance,
+    # the agents must not stop partway: an explicit --duration is honoured,
+    # otherwise they run until `stop` says so.
+    if baseline or load_cmd:
+        args.duration = args.duration or 0.0
+    else:
+        args.duration = args.duration or args.for_secs
     rc = cmd_start(args, mesh, fleet)
     if rc and not args.keep_going:
         return rc
-    log("[%s] probing for %s" % (PROG, fmt_secs(args.for_secs)))
+
+    split = None
     try:
-        time.sleep(args.for_secs + 1.0)
+        if baseline:
+            log("[%s] idle baseline for %s" % (PROG, fmt_secs(baseline)))
+            time.sleep(baseline)
+            # Taken after the idle window and before the load, so every
+            # interval either side of it belongs to exactly one of them.
+            split = int(time.time())
+        if load_cmd:
+            log("[%s] probing while: %s" % (PROG, " ".join(load_cmd)))
+            try:
+                child = subprocess.Popen(load_cmd)
+            except OSError as exc:
+                cmd_stop(args, mesh, fleet)
+                die("cannot run %s: %s" % (load_cmd[0], exc))
+            child.wait()
+        else:
+            log("[%s] probing for %s" % (PROG, fmt_secs(args.for_secs)))
+            time.sleep(args.for_secs + 1.0)
     except KeyboardInterrupt:
         log("[%s] interrupted -- summarizing what we have" % PROG)
+
+    if split is not None:
+        args.load_split = split
     cmd_summarize(args, mesh, fleet)
     cmd_stop(args, mesh, fleet)
     return 0
@@ -2332,6 +2508,12 @@ def _add_summary_flags(p):
                    help="relative asymmetry floor before flagging (%%)")
     p.add_argument("--slow-us", type=float, default=500.0,
                    help="a pair at or above this p50 counts as slow")
+    p.add_argument("--load-split", type=float, default=None, metavar="TS",
+                   help="epoch second the load began: report latency "
+                        "before it against latency after")
+    p.add_argument("--bloat-factor", type=float, default=4.0, metavar="F",
+                   help="p99 this many times its idle value under load "
+                        "is the finding")
 
 
 def build_parser():
@@ -2391,6 +2573,12 @@ def build_parser():
     r.add_argument("--interval", type=float, default=DEFAULT_INTERVAL)
     r.add_argument("--duration", type=float, default=0.0)
     r.add_argument("--bind", default="")
+    r.add_argument("--baseline", type=float, default=0.0, metavar="SECS",
+                   help="probe this long idle first, then report latency "
+                        "under whatever runs next against it")
+    r.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- CMD",
+                   help="the load to run while probing; without it the "
+                        "loaded window is --for seconds long")
     _add_fleet_flags(r)
     _add_summary_flags(r)
     r.set_defaults(func=cmd_run)

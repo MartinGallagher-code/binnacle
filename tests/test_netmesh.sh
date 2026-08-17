@@ -225,6 +225,71 @@ t_clean_run_says_the_network_is_fine() {
     assert_contains "$out" "iperf_orchestrator"
 }
 
+# --- latency under load ----------------------------------------------------
+#
+# The measurement neither half of the toolchain had: iperf_orchestrator says
+# what the link carried and netmesh says what it costs idle, and until now
+# nothing said what the carrying did to the latency.
+
+t_latency_under_load_is_reported_against_the_idle_baseline() {
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 139 210 8400 42100
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent --load-split 2000000)"
+    assert_contains "$out" "UNDER LOAD"
+    assert_contains "$out" "139us"
+    assert_contains "$out" "42.1ms"
+    assert_contains "$out" "(200x)"
+    assert_contains "$out" "queue in front of the bottleneck"
+}
+
+t_a_link_that_held_up_says_so_plainly() {
+    # A clean run must not read like breakage: the same rule the rest of
+    # the package follows.
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 139 210 145 240
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent --load-split 2000000)"
+    assert_contains "$out" "Latency held up under load"
+    assert_not_contains "$out" "queue in front of the bottleneck"
+}
+
+t_the_bloat_threshold_moves() {
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 100 100 100 300
+    # 3x is under the default factor of 4 and over a factor of 2.
+    assert_contains "$(nm summarize --reports "$TEST_TMPDIR/reports" \
+        --no-collect --mesh /nonexistent --load-split 2000000)" \
+        "Latency held up"
+    assert_contains "$(nm summarize --reports "$TEST_TMPDIR/reports" \
+        --no-collect --mesh /nonexistent --load-split 2000000 \
+        --bloat-factor 2)" "rose 3x"
+}
+
+t_loss_that_only_appears_under_load_is_its_own_finding() {
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 100 200 110 220 0 4
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent --load-split 2000000)"
+    assert_contains "$out" "Loss appeared under load"
+    # Short fragment: the finding is wrapped at 76 columns.
+    assert_contains "$out" "a queue running out"
+}
+
+t_a_split_with_nothing_on_one_side_is_not_a_comparison() {
+    # Blank means not measured: a one-sided split must say so rather than
+    # report an idle baseline of zero and a huge regression against it.
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 139 210 8400 42100
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent --load-split 1000000)"
+    assert_contains "$out" "leaves one side of it empty"
+    assert_not_contains "$out" "queue in front of the bottleneck"
+}
+
+t_without_a_split_the_report_is_unchanged() {
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 139 210 8400 42100
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent)"
+    assert_not_contains "$out" "UNDER LOAD"
+}
+
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -237,4 +302,10 @@ run_test "dead peer leaves rtt blank not 0"    t_loss_columns_go_blank_not_zero_
 run_test "fleet lifecycle through fake ssh"    t_fleet_lifecycle_through_fake_ssh
 run_test "summarize runs from fixtures"        t_summarize_reads_fixtures_without_a_network
 run_test "clean run says so plainly"           t_clean_run_says_the_network_is_fine
+run_test "latency under load vs the baseline"   t_latency_under_load_is_reported_against_the_idle_baseline
+run_test "a link that held up says so"         t_a_link_that_held_up_says_so_plainly
+run_test "the bloat threshold moves"           t_the_bloat_threshold_moves
+run_test "load-only loss is its own finding"   t_loss_that_only_appears_under_load_is_its_own_finding
+run_test "a one-sided split is not compared"   t_a_split_with_nothing_on_one_side_is_not_a_comparison
+run_test "without a split nothing changes"     t_without_a_split_the_report_is_unchanged
 finish
