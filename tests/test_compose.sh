@@ -130,6 +130,26 @@ t_during_groups_hosts_by_what_limited_them() {
     assert_contains "$out" "io"
 }
 
+# skew ----------------------------------------------------------------------
+
+t_skew_groups_hosts_by_what_their_clock_is_doing() {
+    setup_three_hosts
+    # node01 and node02 have working clocks; node03 cannot reach a source,
+    # which is the finding that hides behind a healthy-looking daemon.
+    for h in node01 node02; do
+        skew_facts_json "$FAKE_ROOT/$h/clock.json" "sys.hostname=$h"
+    done
+    skew_facts_json "$FAKE_ROOT/node03/clock.json" sys.hostname=node03 \
+        'srv.dead=["10.0.0.1","10.0.0.2","10.0.0.3"]' 'srv.alive=[]' \
+        clock.offset_s=252.0 'clock.spread_s=null' 'srv.max_stratum=null'
+    out="$(fleet skew.py "${FLEET_NORM[@]}" \
+             -- --from-facts clock.json --csv 2>&1 || true)"
+    assert_contains "$out" "2 groups"
+    assert_contains "$out" "node01 node02"
+    # Named by the cause, not by how far the clock had drifted.
+    assert_contains "$out" "NO_SYNC_SOURCE"
+}
+
 # the shared contract -------------------------------------------------------
 
 t_fleet_csv_is_the_two_flags_and_says_so() {
@@ -165,9 +185,12 @@ t_the_diagnostic_tools_share_one_csv_header() {
     a="$("$PY" "$BINNACLE_DIR/why_slow.py" --from-facts "$TEST_TMPDIR/f.json" --csv | head -1)"
     b="$("$PY" "$BINNACLE_DIR/resolve.py" --from-facts "$TEST_TMPDIR/d.json" --csv | head -1)"
     c="$("$PY" "$BINNACLE_DIR/during.py" --from-samples "$TEST_TMPDIR/s.csv" --csv | head -1)"
+    skew_facts_json "$TEST_TMPDIR/k.json"
+    d="$("$PY" "$BINNACLE_DIR/skew.py" --from-facts "$TEST_TMPDIR/k.json" --csv | head -1)"
     assert_eq "$a" "host,ts,rule_id,severity,title,detail,fix"
     assert_eq "$b" "$a"
     assert_eq "$c" "$a"
+    assert_eq "$d" "$a"
 }
 
 t_every_flag_appears_in_its_tools_help() {
@@ -211,7 +234,7 @@ def walk(parser, flags, seen):
 
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
-             "during"):
+             "during", "skew"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -422,19 +445,22 @@ VERBATIM = [
     ("read_meminfo", "why_slow.py", "during.py"),
     ("read_pressure", "why_slow.py", "during.py"),
     ("_read", "why_slow.py", "resolve.py"),
-    # Duplicated into all seven, so all seven are held to it.
+    ("_read", "why_slow.py", "skew.py"),
+    # Duplicated into all eight, so all eight are held to it.
     ("_stdio_safe", "why_slow.py", "agree.py"),
     ("_stdio_safe", "why_slow.py", "logtriage.py"),
     ("_stdio_safe", "why_slow.py", "netmesh.py"),
     ("_stdio_safe", "why_slow.py", "reachable.py"),
     ("_stdio_safe", "why_slow.py", "resolve.py"),
     ("_stdio_safe", "why_slow.py", "during.py"),
+    ("_stdio_safe", "why_slow.py", "skew.py"),
     ("_WriteGuard", "why_slow.py", "agree.py"),
     ("_WriteGuard", "why_slow.py", "logtriage.py"),
     ("_WriteGuard", "why_slow.py", "netmesh.py"),
     ("_WriteGuard", "why_slow.py", "reachable.py"),
     ("_WriteGuard", "why_slow.py", "resolve.py"),
     ("_WriteGuard", "why_slow.py", "during.py"),
+    ("_WriteGuard", "why_slow.py", "skew.py"),
     ("expand_range", "agree.py", "reachable.py"),
     ("split_host_port", "agree.py", "reachable.py"),
     ("is_ipv6", "agree.py", "reachable.py"),
@@ -566,6 +592,7 @@ run_test "without masking, no host can agree"   t_without_masking_every_host_is_
 run_test "--merge-csv keeps the real values"    t_merge_csv_keeps_the_values_masking_hid
 run_test "resolve groups by what a name means"  t_resolve_groups_hosts_by_what_a_name_resolves_to
 run_test "during groups by what limited them"   t_during_groups_hosts_by_what_limited_them
+run_test "skew groups by what clocks are doing" t_skew_groups_hosts_by_what_their_clock_is_doing
 run_test "--fleet-csv is the two flags"         t_fleet_csv_is_the_two_flags_and_says_so
 run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one_csv_header
 run_test "every flag appears in --help"         t_every_flag_appears_in_its_tools_help

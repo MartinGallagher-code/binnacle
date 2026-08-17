@@ -1,7 +1,7 @@
 # binnacle
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds seven, for Linux boxes, the fleets they belong to, and the networks
+one holds eight, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 ```{toctree}
@@ -23,6 +23,7 @@ tools/netmesh
 tools/reachable
 tools/resolve
 tools/during
+tools/skew
 ```
 
 ```{toctree}
@@ -35,7 +36,7 @@ changelog
 publishing
 ```
 
-## The seven
+## The eight
 
 | Tool | The question it answers |
 |---|---|
@@ -46,6 +47,7 @@ publishing
 | [`reachable`](tools/reachable.md) | Which entries in this server list are still real? |
 | [`resolve`](tools/resolve.md) | Is it DNS, and which resolver is wrong? |
 | [`during`](tools/during.md) | What limited this run, and can I trust the number? |
+| [`skew`](tools/skew.md) | Does this box know what time it is? |
 
 ## Diagnose, don't dump
 

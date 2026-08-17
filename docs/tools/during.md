@@ -201,6 +201,124 @@ so its real status can be collected, and is then reported as still running
 rather than killed: stopping somebody's benchmark uninvited would be
 destructive without saying so, and saying so is cheaper.
 
+## The receive path
+
+Everything above watches the box as a whole, and a whole-box average is
+structurally incapable of showing the one failure a network test lives or
+dies on: **a machine that cannot pick packets up fast enough is not busy.**
+Its work is in softirq, on one core, and every aggregate number on the page
+reports it as almost idle.
+
+So five more facts are sampled, all from procfs and sysfs, no root and no
+`ethtool` needed:
+
+| Column | From | What it catches |
+|---|---|---|
+| `softirq_max_core_pct` | per-CPU `/proc/stat` | receive processing pinned to one core |
+| `softnet_drop_per_s` | `/proc/net/softnet_stat` | the kernel backlog overflowing |
+| `time_squeeze_per_s` | `/proc/net/softnet_stat` | NAPI polls cut off with work still queued |
+| `net_rx_missed_per_s` | `/sys/class/net/*/statistics/` | the card dropping because the ring was full |
+| `net_cc`, `net_rmem_max_kb`, `net_numa` | sysctl and sysfs | whether the run could have reached line rate at all |
+
+These are aggregated **worst-of, not mean-of**. A ring that overflowed for
+ten seconds of a five-minute run dropped packets, and averaging that toward
+zero would report a clean run.
+
+### The cause outranks the state it produced
+
+A box pinned in softirq is *why* the run looks network bound. Reporting
+"network" as the verdict sends someone to the switch — the same mistake
+`why-slow` refuses to make when it puts swapping ahead of the CPU number
+that swapping caused. So a receive-path cause leads the verdict:
+
+```text
+  VERDICT   This box could not pick packets up fast enough: receive
+            processing saturated a single core while the others idled.
+            That is a host limit rather than a network one, and any loss
+            or throughput figure from the far end is measuring it.
+
+  CRITICAL  one core pinned in softirq   one core reached 96% softirq while
+                                         the box averaged 12% busy
+```
+
+Note the second half of that verdict. Packets dropped **on this box** are
+losses the network never caused, and every network-side measurement will
+blame the path for them.
+
+### Was the number even reachable?
+
+Throughput on a single TCP flow cannot exceed *window ÷ round trip*,
+whatever the link can do. A test whose ceiling was the receive buffer
+measured the buffer and reports a number the network had no part in — which
+is `during`'s existing **trust outranks attribution** rule applied to the
+network, so `WINDOW_LIMITED` leads the verdict rather than sitting among the
+findings.
+
+The round trip is not measured here — `during` watches one box and a round
+trip needs two — so it arrives by flag from whatever did measure it:
+
+```bash
+netmesh check web03 db01            # p50 comes out of this
+during --rtt-ms 40 -- ./bench.sh    # ...and goes in here
+```
+
+Without it the rule **skips and says so**, naming the flag and `netmesh`,
+rather than assuming a number. A 10 Gbit link at 40 ms is a ~49 MB
+bandwidth-delay product; the common 6 MB `tcp_rmem` ceiling caps one flow
+near 1.2 Gbit/s, and a test that reports 1.2 Gbit/s as "what the path can
+carry" is wrong by a factor of eight.
+
+## The other end
+
+A network test has **two** machines in it, and every tool in this package
+watches one. The composing guide has told you to run `during` on the load
+generator as well as the target since before anything computed it:
+
+> A generator that reports `cpu` or `one core` while the target reports
+> `not bound` means the benchmark measured the generator, which is the most
+> common way a load test lies — and neither machine's own numbers say so on
+> their own.
+
+`--peer-samples` makes that a finding instead of something you notice by
+reading two reports side by side:
+
+```bash
+# on each end, over the same window
+during --seconds 60 --samples target.csv
+during --seconds 60 --samples loadgen.csv
+
+# then, from either one
+during --from-samples target.csv --peer-samples loadgen.csv
+```
+
+```text
+  VERDICT   This box was not the bottleneck -- loadgen was, at its cpu
+            ceiling. The result describes that machine, and neither end's
+            own report could have said so.
+```
+
+Both ends go through the same `analyse()`, so the peer's facts are derived
+exactly as this run's were. Four rules need both machines:
+
+| Rule | Fires when |
+|---|---|
+| `PEER_NOT_CONCURRENT` | the two windows did not overlap |
+| `PEER_WAS_THE_LIMIT` | this box at no ceiling, the far end at one |
+| `NEITHER_END_BOUND` | both idle — the limit is the path or the application |
+| `PEER_DROPPED` | the far end's card dropped packets |
+
+`PEER_NOT_CONCURRENT` is a **trust** rule and leads the verdict, because two
+windows that never coincided are two experiments and every conclusion below
+is drawn from comparing them. It is also the one place two of these tools
+meet: two machines that disagree about the time will report windows that did
+not overlap when they did, and [`skew`](skew.md) is what tells you that is
+what happened.
+
+`NEITHER_END_BOUND` is the finding that most needs two machines. Both ends
+with capacity to spare and the number still short means the limit is between
+them or inside the application — the path, a lock, or a single flow that
+cannot fill the link. No single box's report can reach it.
+
 ## See also
 
 - [`why-slow`](why-slow.md) — the same reasoning applied to a single instant

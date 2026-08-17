@@ -6,7 +6,137 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`during --peer-samples`: one verdict from both ends of a test.** A
+  network test has two machines in it and every tool here watches one. The
+  composing guide has described the consequence since before anything
+  computed it — *"a generator that reports cpu or one core while the target
+  reports not bound means the benchmark measured the generator, which is
+  the most common way a load test lies, and neither machine's own numbers
+  say so on their own."* That stayed a thing you had to notice by reading
+  two reports side by side.
+
+  Both ends now go through the same `analyse()`, so the peer's facts are
+  derived exactly as this run's are, and four rules read across them.
+  `PEER_WAS_THE_LIMIT` fires when this box was at no ceiling and the far
+  end was at one, and the verdict names that machine outright.
+  `NEITHER_END_BOUND` is the finding that most needs two: both ends with
+  capacity to spare means the limit is between them or inside the
+  application — the path, a lock, or a single flow that cannot fill the
+  link. `PEER_DROPPED` reports loss at the far end's card, which from this
+  end is indistinguishable from a lossy path and is not the path's fault.
+
+  `PEER_NOT_CONCURRENT` is a trust rule and leads the verdict, because two
+  windows that never coincided are two experiments and every conclusion
+  drawn from comparing them is meaningless. It is also where two of these
+  tools meet: two machines that disagree about the time report windows that
+  did not overlap when they did, and `skew` is what says that is what
+  happened.
+
+- **`during` now watches the receive path, which is where a network test
+  actually fails.** Everything it sampled before was whole-box, and a
+  whole-box average is structurally unable to show the failure that matters
+  most under load: a machine that cannot pick packets up fast enough **is
+  not busy**. Its work is in softirq on a single core, and every aggregate
+  number reports it as almost idle while throughput sits at a third of line
+  rate.
+
+  Five new sampled columns, all procfs and sysfs, no root and no `ethtool`:
+  `softirq_max_core_pct` from per-CPU `/proc/stat`, `softnet_drop_per_s` and
+  `time_squeeze_per_s` from `/proc/net/softnet_stat`, `net_rx_missed_per_s`
+  from the interface's sysfs statistics, and `net_cc` / `net_rmem_max_kb` /
+  `net_numa` for whether the run could have reached line rate at all. They
+  aggregate **worst-of, not mean-of**: a ring that overflowed for ten
+  seconds of a five-minute run dropped packets, and averaging that towards
+  zero would report a clean run.
+
+  Six rules on top of them. `SOFTIRQ_BOUND` separates one core saturated in
+  receive processing from a box that is genuinely busy — half a core in
+  softirq only means something while the rest idle. `RING_OVERFLOW` and
+  `BACKLOG_DROPS` are kept apart because they are opposite problems: the
+  card had nowhere to put a packet, versus the card kept up and the host's
+  own backlog did not. `TIME_SQUEEZE` catches NAPI polls cut off with work
+  still queued. `NIC_NUMA` names the node the card is on, on multi-socket
+  boxes only.
+
+  The verdict follows the same discipline as the rest of the package: **a
+  receive-path cause leads over the state it produced.** A box pinned in
+  softirq is *why* the run looks network bound, and reporting "network" as
+  the verdict sends someone to the switch — the same mistake `why-slow`
+  refuses to make when it puts swapping ahead of the CPU number swapping
+  caused. The verdict also says outright that packets dropped on this box
+  are losses the network never caused, because every network-side
+  measurement will otherwise blame the path for them.
+
+- **`during --rtt-ms`, and a `WINDOW_LIMITED` rule.** Throughput on a single
+  TCP flow cannot exceed window ÷ round trip whatever the link can do, so a
+  test whose ceiling was the receive buffer measured the buffer and reports
+  a number the network had no part in. That is **trust outranks
+  attribution** applied to the network, so it leads the verdict rather than
+  sitting among the findings. A 10 Gbit link at 40 ms is a ~49 MB
+  bandwidth-delay product against the common 6 MB `tcp_rmem` ceiling, which
+  caps one flow near 1.2 Gbit/s — wrong by a factor of eight if recorded as
+  what the path can carry. The round trip is not measured here, because
+  `during` watches one box and a round trip needs two; it arrives by flag
+  from `netmesh` or anything else that measured it, and without it the rule
+  **skips and names the flag** rather than assuming a number.
+
+- **`skew` — an eighth tool: does this box know what time it is?** A
+  crashed time daemon was already caught, by `why-slow`'s failed-unit rule,
+  which says outright that a failed sync unit makes every timestamp on the
+  box a lie. What nothing caught was the daemon running *perfectly* while
+  the clock stayed wrong — sources unreachable, none ever selected, or a
+  machine resumed from a snapshot. `systemctl status chronyd` reports
+  `active (running)` through every one of those, so nothing on the box
+  looks broken.
+
+  It ignores what the daemon says about itself and queries each configured
+  source over SNTP, built here rather than shelled out to `ntpdate`, since
+  these files land on machines that have neither. Offset and delay come
+  from the four-timestamp calculation, so a slow path lands in the delay
+  instead of being charged to the clock, and the best of `--samples`
+  queries is kept so a single sample over a congested link measures the
+  congestion rather than the time. A reply that does not echo the transmit
+  timestamp it was sent is discarded and the wait continues — the same
+  discipline `resolve` applies to a DNS query id, and for the same reason.
+
+  Thirteen rules, causes ahead of symptoms as everywhere else: a box with
+  no reachable source is diagnosed as having **no reachable source**, not
+  as being four minutes fast, because the drift is what that produced and
+  the firewall is what someone has to fix. Sources are compared against
+  each other, since two that disagree means the daemon may have picked the
+  liar and no single query can see it. Stratum 16 and the leap alarm are
+  separated from both *alive* and *dead*: a source reporting itself
+  unsynchronised answers every reachability check and provides no time, and
+  conflating the two is how a box has three working servers and no clock.
+  The hardware clock is read alongside, because it is what the box comes
+  back with after a reboot — and a delta of almost exactly a whole number
+  of hours is reported as an RTC kept in local time rather than as drift,
+  which saves chasing a CMOS battery that is fine.
+
+  It composes like the rest: `agree script ./skew.py --fleet-csv` groups a
+  fleet by what its clocks are doing, which is how six boxes in one rack
+  that have been quietly four minutes out for a week become one line
+  instead of a discovery. The reason it belongs here is that the rest of
+  the package was already working around a wrong clock without ever
+  checking it — `logtriage --split-at` trusts a timestamp, `agree` has to
+  mask the `ts` column before two hosts can agree about anything, and
+  `netmesh` reads only the sender's clock precisely so it never has to
+  trust two at once.
+
+### Fixed
+
+- **A threshold flag was ignored under `--from-facts`.** `--max-offset` and
+  `--warn-offset` were being collected into the fact dictionary, so a
+  saved file's thresholds silently won and the flag did nothing on a
+  replay. Thresholds are policy rather than measurement: they now resolve
+  as flag, then whatever the fact file recorded — which is what makes
+  `--from-facts` reproduce the run it came from — then the default, and
+  are stamped back into the facts either way, so a saved `--json` says
+  which line each finding was judged against instead of leaving a reader
+  to assume the defaults were in force. Found by testing that the flags
+  moved a finding's severity, rather than by testing that they parsed.
 
 ## [0.2.1] - 2026-08-16
 

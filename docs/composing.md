@@ -1,6 +1,6 @@
 # Composing them
 
-Each tool is useful alone. The reason to have seven is that they fit
+Each tool is useful alone. The reason to have eight is that they fit
 together: four of them produce deterministic CSV, one of them fans things
 out across a fleet, and one keeps the host list honest so the fan-out is not
 half wasted.
@@ -114,6 +114,10 @@ netmesh check web03 db01
 
 # 5. The network is fine too. What changed, and when?
 logtriage /var/log/syslog --split-at 14:20
+
+# 0. ...and if two hosts' logs will not line up at step 5, they may not
+#    agree about what time it is. This is cheap enough to run first.
+skew
 ```
 
 Each step either finds the problem or rules out a layer. The tools
@@ -166,6 +170,7 @@ different pair of tools -- with `during` watching while they run:
 | How much TCP bandwidth under load? | [`iperf_orchestrator`](https://github.com/MartinGallagher-code/iperf_orchestrator) |
 | How many packets per second under load? | [`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator) |
 | What was each box doing while that ran? | `during` |
+| Do the boxes agree what time it is? | `skew` |
 | Which settings actually matter? | [`doehelper`](https://doehelper.com) |
 
 `netmesh`'s grid CSVs deliberately use the same `src\dst` shape as `mx`'s,
