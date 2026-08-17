@@ -622,7 +622,10 @@ FIELDS = ["host", "ts", "elapsed_s", "cpu_busy_pct", "cpu_sys_pct",
           "psi_mem_full", "mem_available_pct", "swap_per_s", "disk",
           "disk_util_pct", "disk_await_ms", "disk_mbps", "net_if", "net_mbps",
           "net_link_mbps", "net_drop_per_s", "tcp_retrans_pct",
-          "cg_throttled_pct", "cpu_ghz", "top_comm", "top_cpu_pct"]
+          "cg_throttled_pct", "cpu_ghz", "softirq_max_core_pct",
+          "softnet_drop_per_s", "time_squeeze_per_s",
+          "net_rx_missed_per_s", "net_cc", "net_rmem_max_kb", "net_numa",
+          "top_comm", "top_cpu_pct"]
 base = {"host": "testbox", "ts": 1786741765, "cpu_busy_pct": 5.0,
         "cpu_sys_pct": 1.0, "cpu_iowait_pct": 0.2, "cpu_steal_pct": 0.0,
         "cpu_max_core_pct": 8.0, "cpu_cores": 8, "runnable": 1, "blocked": 0,
@@ -632,6 +635,9 @@ base = {"host": "testbox", "ts": 1786741765, "cpu_busy_pct": 5.0,
         "disk_mbps": 1.0, "net_if": "eth0", "net_mbps": 1.0,
         "net_link_mbps": 10000, "net_drop_per_s": 0.0,
         "tcp_retrans_pct": 0.0, "cg_throttled_pct": "", "cpu_ghz": 3.4,
+        "softirq_max_core_pct": 3.0, "softnet_drop_per_s": 0.0,
+        "time_squeeze_per_s": 0.0, "net_rx_missed_per_s": 0.0,
+        "net_cc": "cubic", "net_rmem_max_kb": 6144, "net_numa": "",
         "top_comm": "", "top_cpu_pct": ""}
 
 

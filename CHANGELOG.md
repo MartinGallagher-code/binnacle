@@ -8,6 +8,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`during` now watches the receive path, which is where a network test
+  actually fails.** Everything it sampled before was whole-box, and a
+  whole-box average is structurally unable to show the failure that matters
+  most under load: a machine that cannot pick packets up fast enough **is
+  not busy**. Its work is in softirq on a single core, and every aggregate
+  number reports it as almost idle while throughput sits at a third of line
+  rate.
+
+  Five new sampled columns, all procfs and sysfs, no root and no `ethtool`:
+  `softirq_max_core_pct` from per-CPU `/proc/stat`, `softnet_drop_per_s` and
+  `time_squeeze_per_s` from `/proc/net/softnet_stat`, `net_rx_missed_per_s`
+  from the interface's sysfs statistics, and `net_cc` / `net_rmem_max_kb` /
+  `net_numa` for whether the run could have reached line rate at all. They
+  aggregate **worst-of, not mean-of**: a ring that overflowed for ten
+  seconds of a five-minute run dropped packets, and averaging that towards
+  zero would report a clean run.
+
+  Six rules on top of them. `SOFTIRQ_BOUND` separates one core saturated in
+  receive processing from a box that is genuinely busy — half a core in
+  softirq only means something while the rest idle. `RING_OVERFLOW` and
+  `BACKLOG_DROPS` are kept apart because they are opposite problems: the
+  card had nowhere to put a packet, versus the card kept up and the host's
+  own backlog did not. `TIME_SQUEEZE` catches NAPI polls cut off with work
+  still queued. `NIC_NUMA` names the node the card is on, on multi-socket
+  boxes only.
+
+  The verdict follows the same discipline as the rest of the package: **a
+  receive-path cause leads over the state it produced.** A box pinned in
+  softirq is *why* the run looks network bound, and reporting "network" as
+  the verdict sends someone to the switch — the same mistake `why-slow`
+  refuses to make when it puts swapping ahead of the CPU number swapping
+  caused. The verdict also says outright that packets dropped on this box
+  are losses the network never caused, because every network-side
+  measurement will otherwise blame the path for them.
+
+- **`during --rtt-ms`, and a `WINDOW_LIMITED` rule.** Throughput on a single
+  TCP flow cannot exceed window ÷ round trip whatever the link can do, so a
+  test whose ceiling was the receive buffer measured the buffer and reports
+  a number the network had no part in. That is **trust outranks
+  attribution** applied to the network, so it leads the verdict rather than
+  sitting among the findings. A 10 Gbit link at 40 ms is a ~49 MB
+  bandwidth-delay product against the common 6 MB `tcp_rmem` ceiling, which
+  caps one flow near 1.2 Gbit/s — wrong by a factor of eight if recorded as
+  what the path can carry. The round trip is not measured here, because
+  `during` watches one box and a round trip needs two; it arrives by flag
+  from `netmesh` or anything else that measured it, and without it the rule
+  **skips and names the flag** rather than assuming a number.
+
 - **`skew` — an eighth tool: does this box know what time it is?** A
   crashed time daemon was already caught, by `why-slow`'s failed-unit rule,
   which says outright that a failed sync unit makes every timestamp on the

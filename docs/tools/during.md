@@ -201,6 +201,73 @@ so its real status can be collected, and is then reported as still running
 rather than killed: stopping somebody's benchmark uninvited would be
 destructive without saying so, and saying so is cheaper.
 
+## The receive path
+
+Everything above watches the box as a whole, and a whole-box average is
+structurally incapable of showing the one failure a network test lives or
+dies on: **a machine that cannot pick packets up fast enough is not busy.**
+Its work is in softirq, on one core, and every aggregate number on the page
+reports it as almost idle.
+
+So five more facts are sampled, all from procfs and sysfs, no root and no
+`ethtool` needed:
+
+| Column | From | What it catches |
+|---|---|---|
+| `softirq_max_core_pct` | per-CPU `/proc/stat` | receive processing pinned to one core |
+| `softnet_drop_per_s` | `/proc/net/softnet_stat` | the kernel backlog overflowing |
+| `time_squeeze_per_s` | `/proc/net/softnet_stat` | NAPI polls cut off with work still queued |
+| `net_rx_missed_per_s` | `/sys/class/net/*/statistics/` | the card dropping because the ring was full |
+| `net_cc`, `net_rmem_max_kb`, `net_numa` | sysctl and sysfs | whether the run could have reached line rate at all |
+
+These are aggregated **worst-of, not mean-of**. A ring that overflowed for
+ten seconds of a five-minute run dropped packets, and averaging that toward
+zero would report a clean run.
+
+### The cause outranks the state it produced
+
+A box pinned in softirq is *why* the run looks network bound. Reporting
+"network" as the verdict sends someone to the switch — the same mistake
+`why-slow` refuses to make when it puts swapping ahead of the CPU number
+that swapping caused. So a receive-path cause leads the verdict:
+
+```text
+  VERDICT   This box could not pick packets up fast enough: receive
+            processing saturated a single core while the others idled.
+            That is a host limit rather than a network one, and any loss
+            or throughput figure from the far end is measuring it.
+
+  CRITICAL  one core pinned in softirq   one core reached 96% softirq while
+                                         the box averaged 12% busy
+```
+
+Note the second half of that verdict. Packets dropped **on this box** are
+losses the network never caused, and every network-side measurement will
+blame the path for them.
+
+### Was the number even reachable?
+
+Throughput on a single TCP flow cannot exceed *window ÷ round trip*,
+whatever the link can do. A test whose ceiling was the receive buffer
+measured the buffer and reports a number the network had no part in — which
+is `during`'s existing **trust outranks attribution** rule applied to the
+network, so `WINDOW_LIMITED` leads the verdict rather than sitting among the
+findings.
+
+The round trip is not measured here — `during` watches one box and a round
+trip needs two — so it arrives by flag from whatever did measure it:
+
+```bash
+netmesh check web03 db01            # p50 comes out of this
+during --rtt-ms 40 -- ./bench.sh    # ...and goes in here
+```
+
+Without it the rule **skips and says so**, naming the flag and `netmesh`,
+rather than assuming a number. A 10 Gbit link at 40 ms is a ~49 MB
+bandwidth-delay product; the common 6 MB `tcp_rmem` ceiling caps one flow
+near 1.2 Gbit/s, and a test that reports 1.2 Gbit/s as "what the path can
+carry" is wrong by a factor of eight.
+
 ## See also
 
 - [`why-slow`](why-slow.md) — the same reasoning applied to a single instant
