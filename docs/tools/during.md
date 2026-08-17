@@ -268,6 +268,30 @@ bandwidth-delay product; the common 6 MB `tcp_rmem` ceiling caps one flow
 near 1.2 Gbit/s, and a test that reports 1.2 Gbit/s as "what the path can
 carry" is wrong by a factor of eight.
 
+### Traffic that was not yours
+
+`during` has always checked the CPU equivalent — `INTRUDER`, something else
+running inside your window makes the result a measurement of both. The link
+was never checked, and it is the easier one to miss: a backup or a
+replication stream through the same interface leaves no trace in the
+benchmark's own output and is indistinguishable from your own traffic in
+every whole-interface number.
+
+```bash
+during --expect-mbps 1000 -- ./iperf_orchestrator.sh all
+```
+
+Tell it what the test should have been pushing, and the interface total is
+checked against it. Like `--rtt-ms`, the fact arrives from outside because
+`during` cannot know it, and without the flag the rule **skips and names
+it** rather than guessing. It is a trust rule, so it leads the verdict:
+
+```text
+  VERDICT   The interface carried substantially more than this test says
+            it sent, so the window includes traffic that was not yours and
+            the throughput number is a measurement of both.
+```
+
 ## The other end
 
 A network test has **two** machines in it, and every tool in this package

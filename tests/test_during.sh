@@ -171,10 +171,17 @@ t_wrapping_passes_the_commands_status_through() {
 
 t_exit_code_opts_into_severity_instead() {
     set +e
-    du_ --interval 0.2 --exit-code -- sh -c 'sleep 1.2' >/dev/null 2>&1; rc=$?
+    du_ --interval 0.5 --exit-code -- sh -c 'sleep 1.2' >/dev/null 2>&1; rc=$?
     set -e
-    # Short window plus an idle box: at least one rule fires, and a command
-    # that succeeded leaves the status free to carry the severity.
+    # The interval is chosen so the severity does not depend on the machine.
+    # At 0.2s this asked for 5-6 samples, and both routes to WARN sat on a
+    # boundary: SHORT_RUN is WARN only below 5 samples (5-9 is INFO), and
+    # NOT_BOUND only at 80% free share, which a loaded runner never reaches.
+    # On a busy CI box everything landed at INFO and the status was 0.  At
+    # 0.5s the window yields two samples, so SHORT_RUN is WARN whatever else
+    # the box happens to be doing -- which is what this case is really
+    # about: --exit-code carries the worst severity, and a command that
+    # succeeded leaves the status free to do so.
     assert_status $rc 10
 }
 
@@ -334,6 +341,41 @@ run_test "trust outranks attribution"          t_trust_outranks_attribution_in_t
 run_test "warmup separated from steady"        t_warmup_is_separated_from_the_steady_window
 run_test "a steady run reports no warmup"      t_a_steady_run_reports_no_warmup
 run_test "an interloper is named"              t_an_interloper_is_named
+t_traffic_that_was_not_yours_is_a_finding() {
+    # The CPU equivalent (INTRUDER) has always been checked; the link was
+    # not, and a backup stream through the same interface leaves no trace
+    # in the benchmark's own output.
+    during_samples "$TEST_TMPDIR/run.csv" 40 net_mbps=4200
+    out="$(du_ --from-samples "$TEST_TMPDIR/run.csv" --expect-mbps 1000)"
+    assert_contains "$out" "traffic that was not yours"
+    assert_contains "$out" "4200 Mbit/s"
+    # Trust outranks attribution: a contaminated window leads the verdict.
+    # Short fragment -- the verdict is wrapped at 76 columns.
+    assert_contains "$out" "measurement of both"
+}
+
+t_a_link_carrying_what_you_sent_is_not_a_finding() {
+    during_samples "$TEST_TMPDIR/run.csv" 40 net_mbps=1020
+    assert_not_contains "$(du_ --from-samples "$TEST_TMPDIR/run.csv" \
+        --expect-mbps 1000 --csv)" "NET_INTRUDER"
+}
+
+t_the_intruder_severity_scales_with_how_much_was_not_yours() {
+    during_samples "$TEST_TMPDIR/some.csv" 40 net_mbps=1400
+    during_samples "$TEST_TMPDIR/lots.csv" 40 net_mbps=2500
+    assert_contains "$(du_ --from-samples "$TEST_TMPDIR/some.csv" \
+        --expect-mbps 1000 --csv)" "NET_INTRUDER,INFO"
+    assert_contains "$(du_ --from-samples "$TEST_TMPDIR/lots.csv" \
+        --expect-mbps 1000 --csv)" "NET_INTRUDER,WARN"
+}
+
+t_without_an_expectation_the_link_check_says_why_it_skipped() {
+    during_samples "$TEST_TMPDIR/run.csv" 40 net_mbps=4200
+    out="$(du_ --from-samples "$TEST_TMPDIR/run.csv" --all)"
+    assert_contains "$out" "--expect-mbps"
+}
+
+
 # --- the other end ---------------------------------------------------------
 
 t_a_generator_at_its_ceiling_is_what_the_test_measured() {
@@ -554,4 +596,8 @@ run_test "runs that did not overlap"           t_two_runs_that_did_not_overlap_c
 run_test "a partial overlap warns"             t_a_partial_overlap_is_a_warning_not_a_refusal
 run_test "far-end loss is not the path's"      t_loss_at_the_far_end_is_not_the_paths_loss
 run_test "no peer says why it skipped"         t_without_a_peer_the_two_ended_rules_say_why_they_skipped
+run_test "traffic that was not yours"          t_traffic_that_was_not_yours_is_a_finding
+run_test "a link carrying yours is not"        t_a_link_carrying_what_you_sent_is_not_a_finding
+run_test "intruder severity scales"            t_the_intruder_severity_scales_with_how_much_was_not_yours
+run_test "no expectation says why it skipped"  t_without_an_expectation_the_link_check_says_why_it_skipped
 finish

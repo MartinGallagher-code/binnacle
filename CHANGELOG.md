@@ -12,6 +12,35 @@ Nothing yet.
 
 ### Added
 
+- **`netmesh` says when its own number is the card's timer.** Receive
+  interrupt coalescing is the one setting that can make this tool's answer
+  wrong with nothing looking wrong: a card told to wait 200 µs before
+  raising an interrupt cannot report a round trip faster than that, so a
+  p50 near the timer is a measurement of the timer rather than of the path.
+  The agent reads `rx-usecs` once at start — it is a setting, not a
+  measurement — and records it on its own `host` row; `summarize` raises a
+  MEASUREMENT note when it is at least half the fastest measured p50. That
+  is the *say what was done to the data* convention turned on the
+  instrument itself, next to `agree` disclosing its normalizations and
+  ping-only rows being marked as such. There is no sysfs for the setting,
+  so `ethtool` is needed; where it is absent the value is blank and the
+  note is absent, rather than being read as "coalescing is off".
+
+  The report gains one appended column, `rx_usecs`. The header is pinned by
+  the suite as an interface, and that assertion is what caught the change.
+
+- **`during --expect-mbps`: traffic on the link that was not yours.** The
+  CPU equivalent has always been checked — `INTRUDER`, something else
+  running inside the window makes the result a measurement of both. The
+  link never was, and it is the easier one to miss: a backup or a
+  replication stream through the same interface leaves no trace in the
+  benchmark's own output and looks exactly like your own traffic in every
+  whole-interface number. Tell it what the test should have been pushing
+  and the interface total is checked against it. Like `--rtt-ms`, the fact
+  arrives from outside because `during` cannot know it, and without the
+  flag the rule skips and names it rather than guessing. A quarter over is
+  INFO, double is WARN, and being a trust rule it leads the verdict.
+
 - **`netmesh` measures latency under load — the number neither half of the
   toolchain had.** `netmesh` measured an *idle* network; `iperf_orchestrator`
   and `matrix_orchestrator` measure throughput and packets per second *under*

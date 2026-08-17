@@ -546,17 +546,21 @@ EOF
 # cannot be made to bufferbloat on demand.
 #
 # Usage: netmesh_reports DIR SPLIT IDLE_P50 IDLE_P99 LOAD_P50 LOAD_P99 \
-#                        [IDLE_LOSS LOAD_LOSS]
+#                        [IDLE_LOSS LOAD_LOSS] [RX_USECS]
+#
+# RX_USECS, when given, is written on the agent's own "host" row, which is
+# where a real agent records the card's coalescing timer.
 netmesh_reports() {
     "$PY" - "$@" <<'EOF'
 import csv, io, os, sys
 d, split = sys.argv[1], int(sys.argv[2])
 ip50, ip99, lp50, lp99 = (float(x) for x in sys.argv[3:7])
 iloss, lloss = (float(x) for x in (sys.argv[7:9] or ["0", "0"]))
+rx_usecs = sys.argv[9] if len(sys.argv) > 9 else ""
 FIELDS = ["ts", "host", "dir", "peer", "probe", "size", "target_pps",
           "sent", "recv", "loss_pct", "rtt_min_us", "rtt_avg_us",
           "rtt_p50_us", "rtt_p99_us", "rtt_max_us", "jitter_us",
-          "path_mtu", "mtu_state", "agent_cpu_pct", "note"]
+          "path_mtu", "mtu_state", "agent_cpu_pct", "note", "rx_usecs"]
 os.makedirs(d, exist_ok=True)
 with io.open(os.path.join(d, "web03.csv"), "w", newline="",
              encoding="utf-8") as fh:
@@ -576,6 +580,10 @@ with io.open(os.path.join(d, "web03.csv"), "w", newline="",
                     "rtt_max_us": p99, "jitter_us": 10})
         w.writerow({"ts": ts, "host": "db01", "dir": "rx", "peer": "web03",
                     "probe": "udp", "sent": 0, "recv": recv})
+        if rx_usecs:
+            w.writerow({"ts": ts, "host": "web03", "dir": "host",
+                        "peer": "*", "probe": "udp", "agent_cpu_pct": "1.0",
+                        "rx_usecs": rx_usecs})
 EOF
 }
 

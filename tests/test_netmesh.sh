@@ -90,7 +90,7 @@ t_agent_writes_documented_columns() {
     wait $p1 $p2
     assert_file_exists da/report.csv
     header="$(head -1 da/report.csv)"
-    assert_eq "$header" "ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note"
+    assert_eq "$header" "ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs"
     body="$(cat da/report.csv)"
     assert_contains "$body" ",tx,b,"
     assert_contains "$body" ",rx,b,"
@@ -225,6 +225,35 @@ t_clean_run_says_the_network_is_fine() {
     assert_contains "$out" "iperf_orchestrator"
 }
 
+t_a_p50_that_is_really_the_cards_timer_says_so() {
+    # The one setting that can make netmesh's own answer wrong with
+    # nothing looking wrong: a card told to wait 200us cannot report a
+    # round trip faster than that.
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 210 400 210 400 0 0 200
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent)"
+    assert_contains "$out" "MEASUREMENT"
+    assert_contains "$out" "coalescing timer"
+    assert_contains "$out" "ethtool -C"
+}
+
+t_coalescing_well_under_the_measurement_is_not_mentioned() {
+    # 10us against a 210us p50 is not what you are measuring, and saying
+    # so anyway would be noise on every healthy run.
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 210 400 210 400 0 0 10
+    assert_not_contains "$(nm summarize --reports "$TEST_TMPDIR/reports" \
+        --no-collect --mesh /nonexistent)" "coalescing timer"
+}
+
+t_without_the_setting_the_note_is_absent_not_zero() {
+    # Blank means not measured: a report from an agent that could not run
+    # ethtool must not read as "coalescing is off".
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 210 400 210 400
+    assert_not_contains "$(nm summarize --reports "$TEST_TMPDIR/reports" \
+        --no-collect --mesh /nonexistent)" "MEASUREMENT"
+}
+
+
 # --- latency under load ----------------------------------------------------
 #
 # The measurement neither half of the toolchain had: iperf_orchestrator says
@@ -308,4 +337,7 @@ run_test "the bloat threshold moves"           t_the_bloat_threshold_moves
 run_test "load-only loss is its own finding"   t_loss_that_only_appears_under_load_is_its_own_finding
 run_test "a one-sided split is not compared"   t_a_split_with_nothing_on_one_side_is_not_a_comparison
 run_test "without a split nothing changes"     t_without_a_split_the_report_is_unchanged
+run_test "a p50 that is really the timer"      t_a_p50_that_is_really_the_cards_timer_says_so
+run_test "small coalescing is not mentioned"   t_coalescing_well_under_the_measurement_is_not_mentioned
+run_test "no setting means absent, not zero"   t_without_the_setting_the_note_is_absent_not_zero
 finish
