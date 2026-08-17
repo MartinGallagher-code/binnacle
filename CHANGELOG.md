@@ -8,6 +8,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`during --peer-samples`: one verdict from both ends of a test.** A
+  network test has two machines in it and every tool here watches one. The
+  composing guide has described the consequence since before anything
+  computed it — *"a generator that reports cpu or one core while the target
+  reports not bound means the benchmark measured the generator, which is
+  the most common way a load test lies, and neither machine's own numbers
+  say so on their own."* That stayed a thing you had to notice by reading
+  two reports side by side.
+
+  Both ends now go through the same `analyse()`, so the peer's facts are
+  derived exactly as this run's are, and four rules read across them.
+  `PEER_WAS_THE_LIMIT` fires when this box was at no ceiling and the far
+  end was at one, and the verdict names that machine outright.
+  `NEITHER_END_BOUND` is the finding that most needs two: both ends with
+  capacity to spare means the limit is between them or inside the
+  application — the path, a lock, or a single flow that cannot fill the
+  link. `PEER_DROPPED` reports loss at the far end's card, which from this
+  end is indistinguishable from a lossy path and is not the path's fault.
+
+  `PEER_NOT_CONCURRENT` is a trust rule and leads the verdict, because two
+  windows that never coincided are two experiments and every conclusion
+  drawn from comparing them is meaningless. It is also where two of these
+  tools meet: two machines that disagree about the time report windows that
+  did not overlap when they did, and `skew` is what says that is what
+  happened.
+
 - **`during` now watches the receive path, which is where a network test
   actually fails.** Everything it sampled before was whole-box, and a
   whole-box average is structurally unable to show the failure that matters

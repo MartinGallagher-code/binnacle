@@ -334,6 +334,84 @@ run_test "trust outranks attribution"          t_trust_outranks_attribution_in_t
 run_test "warmup separated from steady"        t_warmup_is_separated_from_the_steady_window
 run_test "a steady run reports no warmup"      t_a_steady_run_reports_no_warmup
 run_test "an interloper is named"              t_an_interloper_is_named
+# --- the other end ---------------------------------------------------------
+
+t_a_generator_at_its_ceiling_is_what_the_test_measured() {
+    # The composing guide has described this case since before anything
+    # computed it: a generator at a ceiling while the target idles means
+    # the benchmark measured the generator.
+    during_samples "$TEST_TMPDIR/gen.csv" 30 host=loadgen cpu_busy_pct=97 \
+        cpu_max_core_pct=99
+    during_samples "$TEST_TMPDIR/tgt.csv" 30 host=target
+    out="$(du_ --from-samples "$TEST_TMPDIR/tgt.csv" \
+             --peer-samples "$TEST_TMPDIR/gen.csv")"
+    # Short fragments only: the report wraps at 76 columns, so anything
+    # longer straddles a line break and never matches.
+    assert_contains "$out" "loadgen was, at its"
+    assert_contains "$out" "The result describes that machine"
+}
+
+t_a_bound_box_does_not_blame_the_peer() {
+    # This end at a ceiling is this end's finding, whatever the peer did.
+    during_samples "$TEST_TMPDIR/peer.csv" 30 host=peerbox cpu_busy_pct=97 \
+        cpu_max_core_pct=99
+    during_samples "$TEST_TMPDIR/me.csv" 30 host=mine cpu_busy_pct=96 \
+        cpu_max_core_pct=98
+    out="$(du_ --from-samples "$TEST_TMPDIR/me.csv" \
+             --peer-samples "$TEST_TMPDIR/peer.csv" --csv)"
+    assert_not_contains "$out" "PEER_WAS_THE_LIMIT"
+}
+
+t_neither_end_bound_is_a_finding_neither_could_reach() {
+    during_samples "$TEST_TMPDIR/peer.csv" 30 host=peerbox
+    during_samples "$TEST_TMPDIR/me.csv" 30 host=mine
+    out="$(du_ --from-samples "$TEST_TMPDIR/me.csv" \
+             --peer-samples "$TEST_TMPDIR/peer.csv")"
+    assert_contains "$out" "Neither this box nor peerbox"
+    assert_contains "$out" "between them or inside the application"
+}
+
+t_two_runs_that_did_not_overlap_cannot_be_compared() {
+    # Trust outranks attribution again: comparing two windows that never
+    # coincided says nothing about which end was the limit.
+    during_samples "$TEST_TMPDIR/peer.csv" 30 host=peerbox \
+        cpu_busy_pct=97 cpu_max_core_pct=99 "ts=1000000..1000030"
+    during_samples "$TEST_TMPDIR/me.csv" 30 host=mine "ts=2000000..2000030"
+    out="$(du_ --from-samples "$TEST_TMPDIR/me.csv" \
+             --peer-samples "$TEST_TMPDIR/peer.csv")"
+    assert_contains "$out" "not watched over the same window"
+    assert_contains "$(du_ --from-samples "$TEST_TMPDIR/me.csv" \
+        --peer-samples "$TEST_TMPDIR/peer.csv" --csv)" \
+        "PEER_NOT_CONCURRENT,CRITICAL"
+}
+
+t_a_partial_overlap_is_a_warning_not_a_refusal() {
+    during_samples "$TEST_TMPDIR/peer.csv" 30 host=peerbox \
+        "ts=1000000..1000030"
+    during_samples "$TEST_TMPDIR/me.csv" 30 host=mine "ts=1000020..1000050"
+    assert_contains "$(du_ --from-samples "$TEST_TMPDIR/me.csv" \
+        --peer-samples "$TEST_TMPDIR/peer.csv" --csv)" \
+        "PEER_NOT_CONCURRENT,WARN"
+}
+
+t_loss_at_the_far_end_is_not_the_paths_loss() {
+    during_samples "$TEST_TMPDIR/peer.csv" 30 host=peerbox \
+        net_rx_missed_per_s=2500
+    during_samples "$TEST_TMPDIR/me.csv" 30 host=mine
+    out="$(du_ --from-samples "$TEST_TMPDIR/me.csv" \
+             --peer-samples "$TEST_TMPDIR/peer.csv")"
+    assert_contains "$out" "peerbox missed"
+    assert_contains "$out" "not in the network"
+}
+
+t_without_a_peer_the_two_ended_rules_say_why_they_skipped() {
+    during_samples "$TEST_TMPDIR/me.csv" 30
+    out="$(du_ --from-samples "$TEST_TMPDIR/me.csv" --all)"
+    assert_contains "$out" "--peer-samples"
+    assert_contains "$out" "the other end of the test"
+}
+
+
 # --- the receive path ------------------------------------------------------
 
 t_a_box_pinned_in_softirq_is_not_an_idle_box() {
@@ -469,4 +547,11 @@ run_test "a window-limited run measured rmem"  t_a_window_limited_run_measured_t
 run_test "a big enough window is not a finding" t_a_window_big_enough_is_not_a_finding
 run_test "no rtt says why it skipped"          t_without_an_rtt_the_window_check_says_why_it_skipped
 run_test "receive columns survive a round trip" t_the_receive_path_columns_survive_a_round_trip
+run_test "a generator at its ceiling"          t_a_generator_at_its_ceiling_is_what_the_test_measured
+run_test "a bound box does not blame the peer" t_a_bound_box_does_not_blame_the_peer
+run_test "neither end bound is a finding"      t_neither_end_bound_is_a_finding_neither_could_reach
+run_test "runs that did not overlap"           t_two_runs_that_did_not_overlap_cannot_be_compared
+run_test "a partial overlap warns"             t_a_partial_overlap_is_a_warning_not_a_refusal
+run_test "far-end loss is not the path's"      t_loss_at_the_far_end_is_not_the_paths_loss
+run_test "no peer says why it skipped"         t_without_a_peer_the_two_ended_rules_say_why_they_skipped
 finish

@@ -268,6 +268,57 @@ bandwidth-delay product; the common 6 MB `tcp_rmem` ceiling caps one flow
 near 1.2 Gbit/s, and a test that reports 1.2 Gbit/s as "what the path can
 carry" is wrong by a factor of eight.
 
+## The other end
+
+A network test has **two** machines in it, and every tool in this package
+watches one. The composing guide has told you to run `during` on the load
+generator as well as the target since before anything computed it:
+
+> A generator that reports `cpu` or `one core` while the target reports
+> `not bound` means the benchmark measured the generator, which is the most
+> common way a load test lies — and neither machine's own numbers say so on
+> their own.
+
+`--peer-samples` makes that a finding instead of something you notice by
+reading two reports side by side:
+
+```bash
+# on each end, over the same window
+during --seconds 60 --samples target.csv
+during --seconds 60 --samples loadgen.csv
+
+# then, from either one
+during --from-samples target.csv --peer-samples loadgen.csv
+```
+
+```text
+  VERDICT   This box was not the bottleneck -- loadgen was, at its cpu
+            ceiling. The result describes that machine, and neither end's
+            own report could have said so.
+```
+
+Both ends go through the same `analyse()`, so the peer's facts are derived
+exactly as this run's were. Four rules need both machines:
+
+| Rule | Fires when |
+|---|---|
+| `PEER_NOT_CONCURRENT` | the two windows did not overlap |
+| `PEER_WAS_THE_LIMIT` | this box at no ceiling, the far end at one |
+| `NEITHER_END_BOUND` | both idle — the limit is the path or the application |
+| `PEER_DROPPED` | the far end's card dropped packets |
+
+`PEER_NOT_CONCURRENT` is a **trust** rule and leads the verdict, because two
+windows that never coincided are two experiments and every conclusion below
+is drawn from comparing them. It is also the one place two of these tools
+meet: two machines that disagree about the time will report windows that did
+not overlap when they did, and [`skew`](skew.md) is what tells you that is
+what happened.
+
+`NEITHER_END_BOUND` is the finding that most needs two machines. Both ends
+with capacity to spare and the number still short means the limit is between
+them or inside the application — the path, a lock, or a single flow that
+cannot fill the link. No single box's report can reach it.
+
 ## See also
 
 - [`why-slow`](why-slow.md) — the same reasoning applied to a single instant

@@ -25,6 +25,9 @@ Options:
   --no-timeline      omit the per-sample timeline block
   --csv [PATH]       findings as CSV, same shape as why-slow's
   --json [PATH]      meta + summary + findings + skipped
+  --peer-samples F   the other end's series, so which machine was the
+                     limit becomes a finding rather than something you
+                     read off two reports side by side
   --rtt-ms MS        round trip to the peer, from netmesh or anything
                      else that measured it -- without it the
                      window-limited check skips        (DURING_RTT_MS)
@@ -1155,6 +1158,12 @@ MISSING_REASONS = {
                   "`netmesh check` against the peer and use its p50",
     "net.rmem_max_kb": "net.ipv4.tcp_rmem was unreadable",
     "net.numa": "one NUMA node, or the card does not say which it is on",
+    "peer.overlap_pct": "no --peer-samples given, or neither run carried "
+                        "timestamps",
+    "peer.bound_by": "no --peer-samples given -- run during on the other "
+                     "end of the test and pass its series here",
+    "peer.rx_missed_per_s": "the peer's series carries no ring-overflow "
+                            "column, or no --peer-samples was given",
 }
 
 RULES = []
@@ -1689,6 +1698,113 @@ def _nic_numa():
     return level, say, fix
 
 
+# --- the other end ---------------------------------------------------------
+#
+# A network test has two machines in it, and every tool in this package
+# watches one. These four rules are the ones that need both, and none of
+# them can be reached from either machine's own report.
+
+
+@rule("PEER_NOT_CONCURRENT", "the two runs did not overlap",
+      ("peer.overlap_pct",),
+      "Two windows that did not happen at the same time are two "
+      "experiments. Deciding which end was the limit by comparing them is "
+      "meaningless, however carefully each was measured.")
+def _peer_not_concurrent():
+    def level(f):
+        o = f["peer.overlap_pct"]
+        if o <= 0:
+            return CRITICAL
+        return WARN if o < 50 else None
+
+    def say(f):
+        o = f["peer.overlap_pct"]
+        if o <= 0:
+            return "the two windows do not overlap at all"
+        return "the two windows overlap for only %.0f%% of the shorter" % o
+
+    def fix(f):
+        return ("Run both ends over the same window before comparing them.  "
+                "If the clocks are the question rather than the timing, "
+                "`skew` on both boxes answers it -- two machines that "
+                "disagree about the time will report windows that did not "
+                "overlap when they did.")
+    return level, say, fix
+
+
+@rule("PEER_WAS_THE_LIMIT", "the other end was the limit",
+      ("peer.bound_by", "bound.by"),
+      "This box at no ceiling while the far end sits at one is the single "
+      "most common way a load test lies: the number describes the machine "
+      "nobody was watching. Neither end's own report can say it.")
+def _peer_was_the_limit():
+    def level(f):
+        if f["bound.by"] != FREE or f["peer.bound_by"] == FREE:
+            return None
+        return WARN
+
+    def say(f):
+        return ("this box was at no ceiling while %s was %s for %.0f%% of "
+                "its samples"
+                % (_g(f, "peer.host", "the peer"), f["peer.bound_by"],
+                   _g(f, "peer.bound_share", 0.0)))
+
+    def fix(f):
+        return ("The result is the other machine's ceiling, not this one's "
+                "and not the path's.  %s is where to look -- and if it is "
+                "the load generator, the benchmark measured the generator, "
+                "which is the most common way a load test lies."
+                % _g(f, "peer.host", "The peer"))
+    return level, say, fix
+
+
+@rule("NEITHER_END_BOUND", "neither machine was the limit",
+      ("peer.bound_by", "bound.by"),
+      "Both ends idle and the number still short means the limit is "
+      "between them or inside the application: the path, a lock, or a "
+      "single-threaded flow. It is the finding that most needs two "
+      "machines to reach, and neither box's own report can state it.")
+def _neither_end_bound():
+    def level(f):
+        return INFO if f["bound.by"] == FREE and f["peer.bound_by"] == FREE \
+            else None
+
+    def say(f):
+        return ("neither this box nor %s was near a ceiling"
+                % _g(f, "peer.host", "the peer"))
+
+    def fix(f):
+        return ("Both machines had capacity to spare, so the limit is "
+                "between them or inside the application.  `netmesh check` "
+                "between the two measures the path; a single flow that "
+                "cannot fill it, or a lock in the application, accounts for "
+                "most of the rest.")
+    return level, say, fix
+
+
+@rule("PEER_DROPPED", "the other end dropped packets",
+      ("peer.rx_missed_per_s",),
+      "Loss at the far end's card is loss the network never caused, and it "
+      "is loss this end cannot see: from here it is indistinguishable from "
+      "a lossy path.")
+def _peer_dropped():
+    def level(f):
+        return WARN if f["peer.rx_missed_per_s"] > 0 else None
+
+    def say(f):
+        return ("%s missed %.0f packets/s at its worst"
+                % (_g(f, "peer.host", "the peer"),
+                   f["peer.rx_missed_per_s"]))
+
+    def fix(f):
+        return ("Those packets were dropped on %s, not in the network, so "
+                "any loss figure measured from this end is counting them "
+                "against the path.  The receive-path findings in that "
+                "machine's own report say why it could not keep up."
+                % _g(f, "peer.host", "the peer"))
+    return level, say, fix
+
+
 # ---------------------------------------------------------------------------
 # Running the rules
 # ---------------------------------------------------------------------------
@@ -1702,11 +1818,12 @@ VERDICT_PRECEDENCE = [
     # Trust outranks attribution, and a window-limited run is untrustworthy
     # in the same way a warmup-contaminated one is: its number is about the
     # configuration rather than about the path.
-    "WINDOW_LIMITED",
+    "WINDOW_LIMITED", "PEER_NOT_CONCURRENT",
     # Then the receive-path causes, ahead of the states they produce: a box
     # pinned in softirq on one core is why the run looks network bound, and
     # naming the symptom sends someone to the switch.
     "SOFTIRQ_BOUND", "RING_OVERFLOW", "BACKLOG_DROPS", "TIME_SQUEEZE",
+    "PEER_WAS_THE_LIMIT", "PEER_DROPPED", "NEITHER_END_BOUND",
     "NOT_BOUND", "SHIFTED", "BOUND_BY", "NIC_NUMA",
 ]
 
@@ -1750,7 +1867,11 @@ def verdict_line(findings, summary):
                               # untrustworthy in the same way: its number
                               # describes the buffer rather than the path,
                               # and no amount of attribution fixes that.
-                              "WINDOW_LIMITED")]
+                              "WINDOW_LIMITED",
+                              # Two windows that did not overlap are two
+                              # experiments; every two-ended conclusion
+                              # below is derived from comparing them.
+                              "PEER_NOT_CONCURRENT")]
     bound_by = summary.get("bound.by")
     share = summary.get("bound.share")
     if trust:
@@ -1772,6 +1893,10 @@ def verdict_line(findings, summary):
                               "single flow: the receive window is smaller "
                               "than the bandwidth-delay product, so the "
                               "number is about the buffer, not the path.",
+            "PEER_NOT_CONCURRENT": "The two ends were not watched over the "
+                                   "same window, so which of them was the "
+                                   "limit cannot be read from these two "
+                                   "runs.",
         }[top.rule.id]
         return lead + "  Fix that before reading the bottleneck below."
 
@@ -1779,6 +1904,19 @@ def verdict_line(findings, summary):
     # run that looks network bound because one core could not keep up is a
     # host limit, and reporting "network" sends someone to the switch --
     # the same mistake why-slow refuses to make with swapping and CPU.
+    both = [f for f in findings
+            if f.rule.id in ("PEER_WAS_THE_LIMIT", "NEITHER_END_BOUND")]
+    if both:
+        peer = summary.get("peer.host") or "the other end"
+        if both[0].rule.id == "PEER_WAS_THE_LIMIT":
+            return ("This box was not the bottleneck -- %s was, at its %s "
+                    "ceiling.  The result describes that machine, and "
+                    "neither end's own report could have said so."
+                    % (peer, summary.get("peer.bound_by")))
+        return ("Neither this box nor %s was near a ceiling, so the limit "
+                "is between them or inside the application: the path, a "
+                "lock, or a single flow that cannot fill it." % peer)
+
     cause = [f for f in findings
              if f.rule.id in ("SOFTIRQ_BOUND", "RING_OVERFLOW",
                               "BACKLOG_DROPS")]
@@ -2103,6 +2241,7 @@ def build_parser():
     p.add_argument("--samples", nargs="?", const="", metavar="PATH")
     p.add_argument("--from-samples", metavar="FILE")
     p.add_argument("--baseline", metavar="FILE")
+    p.add_argument("--peer-samples", metavar="FILE")
     p.add_argument("--rtt-ms", type=float,
                    default=(float(_env("RTT_MS")) if _env("RTT_MS")
                             else None))
@@ -2163,6 +2302,45 @@ def add_baseline(summary, samples, path):
     then = _mean([_num(s, key) for s in base_samples])
     if now is not None and then:
         summary["baseline.key_delta_pct"] = (now - then) * 100.0 / abs(then)
+    return summary
+
+
+def add_peer(summary, samples, path):
+    """Fold the other end of the test into this run's facts.
+
+    A network test has two machines in it and every tool here watches one.
+    The composing guide already tells you to run `during` on the load
+    generator as well as the target, and says what to look for -- a
+    generator at a ceiling while the target sits idle means the benchmark
+    measured the generator. Nothing computed it, so it stayed a thing you
+    had to notice by reading two reports side by side.
+
+    Both ends are analysed by the same pure function, so the peer's facts
+    are derived exactly as this run's were.
+    """
+    peer_samples = read_samples(path)
+    peer = analyse(peer_samples)
+    summary["peer.host"] = peer.get("run.host")
+    summary["peer.bound_by"] = peer.get("bound.by")
+    summary["peer.bound_share"] = peer.get("bound.share")
+    summary["peer.free_share"] = peer.get("bound.free_share")
+    summary["peer.rx_missed_per_s"] = peer.get("net.rx_missed_per_s")
+    summary["peer.softirq_max_core_pct"] = peer.get("net.softirq_max_core_pct")
+
+    # Two runs that did not happen at the same time are two experiments,
+    # and comparing which end was busier across them says nothing at all.
+    summary["peer.overlap_pct"] = None
+    ours = [_num(s, "ts") for s in samples]
+    theirs = [_num(s, "ts") for s in peer_samples]
+    ours = [t for t in ours if t is not None]
+    theirs = [t for t in theirs if t is not None]
+    if ours and theirs:
+        overlap = min(max(ours), max(theirs)) - max(min(ours), min(theirs))
+        shortest = min(max(ours) - min(ours), max(theirs) - min(theirs))
+        if shortest > 0:
+            summary["peer.overlap_pct"] = max(0.0, overlap) * 100.0 / shortest
+        elif overlap >= 0:
+            summary["peer.overlap_pct"] = 100.0
     return summary
 
 
@@ -2248,6 +2426,8 @@ def main(argv=None):
     summary = analyse(samples, meta)
     if args.baseline:
         summary = add_baseline(summary, samples, args.baseline)
+    if args.peer_samples:
+        summary = add_peer(summary, samples, args.peer_samples)
     findings, skipped, passed = evaluate(summary)
 
     if args.samples is not None:
