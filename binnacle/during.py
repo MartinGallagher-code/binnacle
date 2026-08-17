@@ -28,6 +28,10 @@ Options:
   --peer-samples F   the other end's series, so which machine was the
                      limit becomes a finding rather than something you
                      read off two reports side by side
+  --expect-mbps N    what this test should have been pushing; the
+                     interface total is checked against it, so traffic
+                     that was not yours becomes a finding
+                                                        (DURING_EXPECT_MBPS)
   --rtt-ms MS        round trip to the peer, from netmesh or anything
                      else that measured it -- without it the
                      window-limited check skips        (DURING_RTT_MS)
@@ -1100,6 +1104,7 @@ def analyse(samples, meta=None):
     f["net.rx_missed_per_s"] = _worst("net_rx_missed_per_s")
     f["net.cpu_busy_pct"] = _mean([_num(s, "cpu_busy_pct") for s in samples])
     f["net.link_mbps"] = _last("net_link_mbps")
+    f["net.mbps_mean"] = _mean([_num(s, "net_mbps") for s in samples])
     f["net.if_name"] = _last("net_if")
     f["net.cc"] = _last("net_cc")
     f["net.numa"] = _last("net_numa")
@@ -1156,6 +1161,9 @@ MISSING_REASONS = {
     "net.time_squeeze_per_s": "no /proc/net/softnet_stat on this kernel",
     "net.bdp_kb": "no round trip known -- pass --rtt-ms, or run "
                   "`netmesh check` against the peer and use its p50",
+    "net.expect_mbps": "nothing said what this test should have been "
+                       "pushing -- pass --expect-mbps to have the "
+                       "interface total checked against it",
     "net.rmem_max_kb": "net.ipv4.tcp_rmem was unreadable",
     "net.numa": "one NUMA node, or the card does not say which it is on",
     "peer.overlap_pct": "no --peer-samples given, or neither run carried "
@@ -1698,6 +1706,40 @@ def _nic_numa():
     return level, say, fix
 
 
+@rule("NET_INTRUDER", "traffic that was not yours",
+      ("net.mbps_mean", "net.expect_mbps"),
+      "The CPU equivalent of this is already checked: something else "
+      "running inside the window makes the result a measurement of both. "
+      "The link is no different, and it is easier to miss, because a "
+      "backup stream through the same interface leaves no trace in the "
+      "benchmark's own output and looks exactly like your own traffic in "
+      "every whole-interface number.")
+def _net_intruder():
+    def level(f):
+        want, got = f["net.expect_mbps"], f["net.mbps_mean"]
+        if want <= 0:
+            return None
+        # A quarter over is past measurement error and framing overhead;
+        # double is a window that measured somebody else as much as you.
+        over = got / want
+        if over >= 2.0:
+            return WARN
+        return INFO if over >= 1.25 else None
+
+    def say(f):
+        return ("the interface carried %.0f Mbit/s while this test says it "
+                "sent %.0f" % (f["net.mbps_mean"], f["net.expect_mbps"]))
+
+    def fix(f):
+        return ("Something else was on this link during the window -- a "
+                "backup, a replication stream, another test -- so the "
+                "throughput you recorded and the load the link actually "
+                "carried are different numbers.  Find it before believing "
+                "either: the difference is %.0f Mbit/s."
+                % (f["net.mbps_mean"] - f["net.expect_mbps"]))
+    return level, say, fix
+
+
 # --- the other end ---------------------------------------------------------
 #
 # A network test has two machines in it, and every tool in this package
@@ -1818,7 +1860,7 @@ VERDICT_PRECEDENCE = [
     # Trust outranks attribution, and a window-limited run is untrustworthy
     # in the same way a warmup-contaminated one is: its number is about the
     # configuration rather than about the path.
-    "WINDOW_LIMITED", "PEER_NOT_CONCURRENT",
+    "WINDOW_LIMITED", "NET_INTRUDER", "PEER_NOT_CONCURRENT",
     # Then the receive-path causes, ahead of the states they produce: a box
     # pinned in softirq on one core is why the run looks network bound, and
     # naming the symptom sends someone to the switch.
@@ -1867,7 +1909,7 @@ def verdict_line(findings, summary):
                               # untrustworthy in the same way: its number
                               # describes the buffer rather than the path,
                               # and no amount of attribution fixes that.
-                              "WINDOW_LIMITED",
+                              "WINDOW_LIMITED", "NET_INTRUDER",
                               # Two windows that did not overlap are two
                               # experiments; every two-ended conclusion
                               # below is derived from comparing them.
@@ -1893,6 +1935,10 @@ def verdict_line(findings, summary):
                               "single flow: the receive window is smaller "
                               "than the bandwidth-delay product, so the "
                               "number is about the buffer, not the path.",
+            "NET_INTRUDER": "The interface carried substantially more than "
+                            "this test says it sent, so the window includes "
+                            "traffic that was not yours and the throughput "
+                            "number is a measurement of both.",
             "PEER_NOT_CONCURRENT": "The two ends were not watched over the "
                                    "same window, so which of them was the "
                                    "limit cannot be read from these two "
@@ -2242,6 +2288,9 @@ def build_parser():
     p.add_argument("--from-samples", metavar="FILE")
     p.add_argument("--baseline", metavar="FILE")
     p.add_argument("--peer-samples", metavar="FILE")
+    p.add_argument("--expect-mbps", type=float, metavar="MBPS",
+                   default=(float(_env("EXPECT_MBPS"))
+                            if _env("EXPECT_MBPS") else None))
     p.add_argument("--rtt-ms", type=float,
                    default=(float(_env("RTT_MS")) if _env("RTT_MS")
                             else None))
@@ -2415,6 +2464,8 @@ def main(argv=None):
     # arrives by flag from whatever did measure it -- netmesh, usually.
     if args.rtt_ms is not None:
         meta["net.rtt_ms"] = args.rtt_ms
+    if args.expect_mbps is not None:
+        meta["net.expect_mbps"] = args.expect_mbps
 
     if not samples:
         sys.stderr.write("%s: nothing was sampled -- the window closed "

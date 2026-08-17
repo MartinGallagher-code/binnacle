@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`during --expect-mbps`: traffic on the link that was not yours.** The
+  CPU equivalent has always been checked — `INTRUDER`, something else
+  running inside the window makes the result a measurement of both. The
+  link never was, and it is the easier one to miss: a backup or a
+  replication stream through the same interface leaves no trace in the
+  benchmark's own output and looks exactly like your own traffic in every
+  whole-interface number. Tell it what the test should have been pushing
+  and the interface total is checked against it. Like `--rtt-ms`, the fact
+  arrives from outside because `during` cannot know it, and without the
+  flag the rule skips and names it rather than guessing. A quarter over is
+  INFO, double is WARN, and being a trust rule it leads the verdict.
+
+
 - **`netmesh` measures latency under load — the number neither half of the
   toolchain had.** `netmesh` measured an *idle* network; `iperf_orchestrator`
   and `matrix_orchestrator` measure throughput and packets per second *under*
