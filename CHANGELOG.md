@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`summarize` no longer dies when two pairs are equally asymmetric.**
+  The ASYMMETRY list was sorted on `(delta, PairStat, PairStat)` tuples
+  directly. Where two pairs tied on delta the comparison fell through to
+  element 1, met two `PairStat` objects that define no ordering, and raised
+  `TypeError: '<' not supported between instances of 'PairStat' and
+  'PairStat'` -- killing a run whose measurements were already complete and
+  correct. A tie is not exotic: the p50s are rounded to whole microseconds
+  before they get here.
+
+  Now sorted by an explicit key, ties broken on the slow leg's names so the
+  order is stable between runs as well. An AST sweep over all eight modules
+  confirmed this was the only bare sort over a list of tuples carrying
+  objects.
+
 - **`pip install binnacle` works again on the Pythons it advertises.**
   `pyproject.toml` declared PEP 639's `license = "GPL-3.0-or-later"` SPDX
   string, which requires `setuptools>=77` to build -- and setuptools 77

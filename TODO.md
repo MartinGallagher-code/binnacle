@@ -163,6 +163,14 @@ Worth reading before touching the suite — each of these cost a red run.
   `Metadata-Version: 2.1` under setuptools 64 and `2.4` under 80. Worth
   knowing before blaming a metadata version for an install failure --
   2.4 installs fine on pip as old as 21.3.1, which was measured.
+- **Never sort on tuples that carry objects.** `sorted(asym, reverse=True)`
+  over `(delta, PairStat, PairStat)` worked until two pairs tied on delta,
+  at which point the comparison reached the `PairStat`s, which have no
+  ordering, and `summarize` died on a run it had already measured
+  correctly. Ranked lists want an explicit `key=` that returns only
+  scalars, with a tiebreak that makes the order stable between runs. An AST
+  sweep is the cheap way to find the rest: look for `sorted`/`max`/`min`
+  with no `key=` whose argument is a list built by `.append((...))`.
 - **`docs/conf.py` carries an explicit tool list.** A new tool added
   everywhere else will still be silently missing from the generated CLI
   reference, and the docs build will pass anyway.
