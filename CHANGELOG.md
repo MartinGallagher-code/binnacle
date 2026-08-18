@@ -6,7 +6,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`netmesh` can take more than one path through the fabric.** Every probe
+  used a single source port, so it presented one 5-tuple and took one path
+  through any LAG or ECMP bundle: a sick member was hit or missed by luck,
+  and which one was luck too. That is the classic fault that will not
+  reproduce -- some flows slow, most fine, every retest disagreeing with the
+  last, and the member counters looking healthy because the other members
+  are. Nothing in the package could see it.
+
+  `--flows N` sweeps the source port across N buckets and keeps their
+  results apart, adding a `PATH SPREAD` section and a finding when one
+  bucket sits at `--flow-factor` times the median bucket's p50 (default
+  3x -- two buckets of the same healthy loopback came out 1.9x apart on a
+  busy machine, because a bucket's p50 rests on a fraction of the samples
+  a pair's does, so 2x would have reported that noise), or drops on its
+  own. The reference is the median bucket rather than
+  the fastest, because with one sick member out of eight the median is a
+  healthy one.
+
+  The buckets take turns within the configured rate rather than each
+  running at it: a measurement tool that multiplied its own load eightfold
+  when asked to look harder would cause the congestion it then reported.
+  The cost lands on per-bucket sample count instead, which is why the
+  feature is opt-in and why a bucket under 30 replies is reported as thin
+  rather than ranked -- saying nothing would read as "the flows agree".
+
+  The buckets are one socket each on the agent, shared across every peer,
+  since the destination address already varies the rest of the tuple. The
+  ports are ephemeral and so differ between runs, which is the honest
+  behaviour: what is sick is a member of the bundle, not a port number.
+
+  It composes with `--baseline`. A member slow both idle and loaded is
+  faulty; one slow only under load is carrying more than its share of an
+  uneven hash. They are reported as different findings.
+
+  The report gains one appended column, `flow`, blank on every row except
+  the per-port breakdown. A row carrying one is part of the aggregate row
+  above it and never an addition to it, and `summarize` keys on the blank
+  to avoid counting both.
 
 ## [0.3.0] - 2026-08-17
 

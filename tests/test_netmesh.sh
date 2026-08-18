@@ -90,7 +90,7 @@ t_agent_writes_documented_columns() {
     wait $p1 $p2
     assert_file_exists da/report.csv
     header="$(head -1 da/report.csv)"
-    assert_eq "$header" "ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs"
+    assert_eq "$header" "ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow"
     body="$(cat da/report.csv)"
     assert_contains "$body" ",tx,b,"
     assert_contains "$body" ",rx,b,"
@@ -318,6 +318,119 @@ t_without_a_split_the_report_is_unchanged() {
     assert_not_contains "$out" "UNDER LOAD"
 }
 
+t_flow_buckets_break_the_rate_down_they_do_not_multiply_it() {
+    # The one property that matters for trusting these numbers: turning
+    # flow spreading on must not put more traffic on the fabric being
+    # measured.  The buckets are a breakdown of the same probes.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5430 b=127.0.0.1:5431 --mesh mf.csv --pps 40 \
+        --no-pmtu --flows 4 >/dev/null
+    assert_contains "$(cat mf.csv)" "flows=4"
+    mkdir -p fa fb
+    nm agent --mesh mf.csv --host a --dir fa --interval 2 --duration 4 \
+        --bind 127.0.0.1 &
+    p1=$!
+    nm agent --mesh mf.csv --host b --dir fb --interval 2 --duration 4 \
+        --bind 127.0.0.1 &
+    p2=$!
+    wait $p1 $p2
+    assert_file_exists fa/report.csv
+    # Four distinct source ports, and each interval's buckets add up to
+    # exactly the aggregate row above them -- never to more.
+    check="$("$PY" - <<'EOF'
+import collections, csv
+agg, flows = collections.Counter(), collections.defaultdict(dict)
+for r in csv.DictReader(open("fa/report.csv")):
+    if r["dir"] != "tx" or r["peer"] != "b":
+        continue
+    if r["flow"]:
+        flows[r["ts"]][r["flow"]] = int(r["sent"])
+    else:
+        agg[r["ts"]] = int(r["sent"])
+ports = set()
+for ts in flows:
+    ports |= set(flows[ts])
+sums_match = all(sum(flows[ts].values()) == agg[ts] for ts in flows)
+print("%d %s" % (len(ports), "match" if sums_match else "mismatch"))
+EOF
+)"
+    assert_eq "$check" "4 match"
+    # The peer's own rate is untouched: the split is across the buckets.
+    assert_contains "$(grep ',tx,b,' fa/report.csv | head -1)" ",udp,64,40,"
+}
+
+t_one_slow_flow_is_named_as_a_bundle_member() {
+    # A single sick member of a LAG: seven flows fine, one 30x worse.
+    # Nothing else in the package can see this, because every other
+    # measurement takes one path and hits it or misses it by luck.
+    netmesh_flow_reports "$TEST_TMPDIR/reports" 8 7 140 4200 50 3.0
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent)"
+    assert_contains "$out" "PATH SPREAD"
+    assert_contains "$out" ":40008"
+    # Short fragments: the finding is wrapped at 76 columns.
+    assert_contains "$out" "5-tuple"
+    assert_contains "$out" "bundle"
+}
+
+t_flows_that_agree_are_not_a_finding() {
+    # Every bucket the same: a single-link path spreads nowhere, and
+    # saying so is not the same as reporting a fault.
+    netmesh_flow_reports "$TEST_TMPDIR/reports" 8 -1 140 140 50
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent)"
+    assert_contains "$out" "PATH SPREAD"
+    assert_contains "$out" "agrees:"
+    assert_not_contains "$out" "5-tuple"
+}
+
+t_the_flow_threshold_moves() {
+    # 140us against 266us is 1.9x, which is what two buckets of the same
+    # healthy loopback measured on a busy machine: a bucket's p50 rests on
+    # a fraction of the samples a pair's does, so this much spread is
+    # noise and the default must not call it a finding.
+    netmesh_flow_reports "$TEST_TMPDIR/reports" 8 7 140 266 50
+    quiet="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+               --mesh /nonexistent)"
+    assert_not_contains "$quiet" "5-tuple"
+    loud="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+              --mesh /nonexistent --flow-factor 1.5)"
+    assert_contains "$loud" "5-tuple"
+}
+
+t_flows_too_thin_to_compare_are_not_ranked() {
+    # Blank means not measured, and so does thin: the rate is split across
+    # the buckets, so a short run leaves each one with too few replies to
+    # rank.  Saying nothing would read as "the flows agree".
+    netmesh_flow_reports "$TEST_TMPDIR/reports" 8 7 140 4200 4
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent)"
+    assert_contains "$out" "PATH SPREAD"
+    assert_contains "$out" "compared."
+    assert_not_contains "$out" "5-tuple"
+}
+
+t_a_sick_member_only_under_load_is_a_different_finding() {
+    # Composes with --baseline: a member that only misbehaves when the
+    # link is busy is congested, not broken, and the two want different
+    # things done about them.
+    netmesh_flow_reports "$TEST_TMPDIR/reports" 8 7 140 4200 50 0 2000000
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent --load-split 2000000)"
+    assert_contains "$out" "PATH SPREAD"
+    # Sick in both windows, so it is the member itself, not congestion.
+    assert_contains "$out" "faulty"
+}
+
+t_without_flows_there_is_no_spread_section() {
+    # The feature is opt-in, and a report with no flow rows must look
+    # exactly as it did before it existed.
+    netmesh_reports "$TEST_TMPDIR/reports" 2000000 139 210 8400 42100
+    out="$(nm summarize --reports "$TEST_TMPDIR/reports" --no-collect \
+             --mesh /nonexistent)"
+    assert_not_contains "$out" "PATH SPREAD"
+}
+
 
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
@@ -340,4 +453,11 @@ run_test "without a split nothing changes"     t_without_a_split_the_report_is_u
 run_test "a p50 that is really the timer"      t_a_p50_that_is_really_the_cards_timer_says_so
 run_test "small coalescing is not mentioned"   t_coalescing_well_under_the_measurement_is_not_mentioned
 run_test "no setting means absent, not zero"   t_without_the_setting_the_note_is_absent_not_zero
+run_test "flow buckets split, not multiply"    t_flow_buckets_break_the_rate_down_they_do_not_multiply_it
+run_test "one slow flow names the member"      t_one_slow_flow_is_named_as_a_bundle_member
+run_test "flows that agree are not a finding"  t_flows_that_agree_are_not_a_finding
+run_test "the flow threshold moves"            t_the_flow_threshold_moves
+run_test "thin flows are not ranked"           t_flows_too_thin_to_compare_are_not_ranked
+run_test "sick only under load differs"        t_a_sick_member_only_under_load_is_a_different_finding
+run_test "without flows, no spread section"    t_without_flows_there_is_no_spread_section
 finish

@@ -138,6 +138,19 @@ DEFAULT_PMTU_EVERY = 300.0
 MIN_MTU_PAYLOAD = 508               # 576-byte IPv4 minimum, less headers
 IP_HDR_UDP = 28                     # IPv4 20 + UDP 8
 
+# Flow spreading.  One source port means one 5-tuple, which means one path
+# through any LAG or ECMP fabric: a sick bundle member is hit or missed by
+# luck, and that is the classic fault that will not reproduce.  Sweeping
+# the source port takes several paths instead and keeps them apart.
+DEFAULT_FLOWS = 1                   # one flow: what a single socket does
+SUGGESTED_FLOWS = 8                 # what to reach for when hunting
+MAX_FLOWS = 64
+# A bucket's p50 is only worth comparing once it rests on this many
+# replies.  Below it the bucket is reported as thin rather than ranked:
+# the rate is split across the buckets, so a short run at a low rate can
+# leave each one with too few samples to mean anything.
+FLOW_MIN_SAMPLES = 30
+
 REPORT_NAME = "report.csv"
 LOG_NAME = "agent.log"
 PID_NAME = "agent.pid"
@@ -151,10 +164,11 @@ REPORT_FIELDS = [
     "sent", "recv", "loss_pct",
     "rtt_min_us", "rtt_avg_us", "rtt_p50_us", "rtt_p99_us", "rtt_max_us",
     "jitter_us", "path_mtu", "mtu_state", "agent_cpu_pct", "note",
-    "rx_usecs",
+    "rx_usecs", "flow",
 ]
 
-CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every")
+CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every",
+               "flows")
 
 
 # ---------------------------------------------------------------------------
@@ -624,32 +638,19 @@ def is_local(addr):
 # The agent
 # ---------------------------------------------------------------------------
 
-class PeerState(object):
-    """Everything one direction of one pair needs, in O(1) memory."""
+class Stream(object):
+    """The counters one measured stream needs, in O(1) memory.
 
-    def __init__(self, name, idx, addr, port, rate, ping_only=False):
-        self.name = name
-        self.idx = idx
-        self.addr = addr
-        self.port = port
-        self.rate = rate
-        self.ping_only = ping_only
+    Shared by a peer and by each of that peer's flow buckets: a bucket is
+    measured exactly the way the peer is, so it must not grow a second,
+    slightly different accounting of the same thing.
+    """
+
+    def __init__(self):
         self.reset()
-        self.seq = 0
-        self.next_send = 0.0
-        # Path MTU search state.
-        self.mtu_lo = MIN_MTU_PAYLOAD
-        self.mtu_hi = None
-        self.mtu_best = None
-        self.mtu_state = ""
-        self.mtu_next = 0.0
-        self.mtu_inflight = None
-        self.mtu_deadline = 0.0
-        self.mtu_tries = 0
-        self.mtu_saw_small = False
 
     def reset(self):
-        """Clear the per-interval counters; the search state survives."""
+        """Clear the per-interval counters; any search state survives."""
         self.sent = 0
         self.recv = 0
         self.hist = [0] * RTT_NBUCKETS
@@ -674,6 +675,51 @@ class PeerState(object):
             d = abs(rtt_us - self.last_rtt)
             self.jitter += (d - self.jitter) / 16.0
         self.last_rtt = rtt_us
+
+
+class FlowState(Stream):
+    """One source port's worth of one direction of one pair.
+
+    `port` is the real source port the socket was given, recorded rather
+    than an index because it is what the fabric actually hashed on and so
+    the only value worth correlating with a switch's counters.
+    """
+
+    def __init__(self, port):
+        self.port = port
+        Stream.__init__(self)
+
+
+class PeerState(Stream):
+    """Everything one direction of one pair needs, in O(1) memory."""
+
+    def __init__(self, name, idx, addr, port, rate, ping_only=False):
+        self.name = name
+        self.idx = idx
+        self.addr = addr
+        self.port = port
+        self.rate = rate
+        self.ping_only = ping_only
+        self.flows = []
+        self.next_flow = 0
+        Stream.__init__(self)
+        self.seq = 0
+        self.next_send = 0.0
+        # Path MTU search state.
+        self.mtu_lo = MIN_MTU_PAYLOAD
+        self.mtu_hi = None
+        self.mtu_best = None
+        self.mtu_state = ""
+        self.mtu_next = 0.0
+        self.mtu_inflight = None
+        self.mtu_deadline = 0.0
+        self.mtu_tries = 0
+        self.mtu_saw_small = False
+
+    def reset(self):
+        Stream.reset(self)
+        for f in self.flows:
+            f.reset()
 
 
 class RxState(object):
@@ -718,6 +764,8 @@ class Agent(object):
         self.do_pmtu = str(mesh.cfg.get("pmtu", "1")) not in ("0", "no", "false")
         self.mtu_ceiling = int(mesh.cfg.get("mtu_ceiling", DEFAULT_MTU_CEILING))
         self.pmtu_every = float(mesh.cfg.get("pmtu_every", DEFAULT_PMTU_EVERY))
+        self.flows = max(1, min(int(mesh.cfg.get("flows", DEFAULT_FLOWS)),
+                                MAX_FLOWS))
         self.my_idx = mesh.index(me)
 
         self.peers = {}
@@ -737,6 +785,12 @@ class Agent(object):
 
         self.sock = None
         self.mtu_sock = None
+        # One socket per flow bucket, shared across every peer: the 5-tuple
+        # already differs per peer in the destination address, so the
+        # source port is the only part this has to vary.  That makes the
+        # cost eight sockets per agent rather than eight per pair.
+        self.flow_socks = []
+        self.flow_by_fd = {}
         self.pmtu_supported = True
         self.ping_procs = {}
         self.cpu_prev = read_self_cpu()
@@ -757,6 +811,9 @@ class Agent(object):
                                              self.port, exc))
         self.sock.setblocking(False)
 
+        if self.flows > 1 and self.peers:
+            self._open_flow_socks()
+
         if self.do_pmtu and self.peers:
             self.mtu_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -769,6 +826,40 @@ class Agent(object):
                 self.mtu_sock = None
                 for st in self.peers.values():
                     st.mtu_state = "unsupported"
+
+    def _open_flow_socks(self):
+        """Bind one ephemeral source port per bucket.
+
+        Ephemeral rather than a fixed range: a fixed range collides with
+        whatever else is on the host and, worse, with another agent's own
+        ports, and a bind that fails would silently cost a bucket.  The
+        port a bucket got is stable for the run and recorded on every row,
+        so a finding can still be pointed at a switch counter; it differs
+        between runs, which is right, because what is sick is a member of
+        the bundle rather than a port number.
+        """
+        for _ in range(self.flows):
+            sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sk.bind((self.bind, 0))
+            except OSError:
+                sk.close()
+                break
+            sk.setblocking(False)
+            self.flow_socks.append(sk)
+            self.flow_by_fd[sk.fileno()] = len(self.flow_socks) - 1
+        if len(self.flow_socks) < 2:
+            # One bucket is not a spread.  Fall back to the single-socket
+            # path rather than write a flow dimension that cannot compare.
+            for sk in self.flow_socks:
+                sk.close()
+            self.flow_socks = []
+            self.flow_by_fd = {}
+            self.flows = 1
+            return
+        self.flows = len(self.flow_socks)
+        for st in self.peers.values():
+            st.flows = [FlowState(sk.getsockname()[1]) for sk in self.flow_socks]
 
     # -- packet plumbing --------------------------------------------------
     def _packet(self, kind, peer_idx, seq, t_send, size, flags=0, rlen=None):
@@ -783,15 +874,26 @@ class Agent(object):
     def send_probe(self, st, now):
         pkt = self._packet(KIND_REQ, self.my_idx, st.seq, self._now_us(),
                            self.size)
+        # Round robin over the buckets rather than a bucket's own pacer:
+        # the configured rate stays the rate, so turning flow spreading on
+        # does not multiply the load the tool puts on the fabric it is
+        # measuring.  Each bucket gets its share of the same probes.
+        sock, fs = self.sock, None
+        if st.flows:
+            i = st.next_flow
+            st.next_flow = (i + 1) % len(st.flows)
+            sock, fs = self.flow_socks[i], st.flows[i]
         try:
-            self.sock.sendto(pkt, (st.addr, st.port))
+            sock.sendto(pkt, (st.addr, st.port))
             st.sent += 1
+            if fs is not None:
+                fs.sent += 1
         except OSError as exc:
             if exc.errno not in (errno.EAGAIN, errno.ENOBUFS, errno.EWOULDBLOCK):
                 st.note = "send: %s" % exc.strerror
         st.seq += 1
 
-    def handle_packet(self, data, src, on_mtu_sock=False):
+    def handle_packet(self, data, src, on_mtu_sock=False, flow=None):
         if len(data) < HDR_SIZE:
             return
         magic, kind, flags, idx, plen, rlen, seq, t_send = HDR.unpack(
@@ -831,9 +933,13 @@ class Agent(object):
             self._pmtu_reply(src, seq, plen)
             return
         # Attribute by source address, which is authoritative for a reply.
+        # The bucket is the socket it arrived on, so nothing about the
+        # bucket has to be carried on the wire.
         for st in self.peers.values():
             if st.addr == src[0] and st.port == src[1]:
                 st.record(rtt)
+                if flow is not None and flow < len(st.flows):
+                    st.flows[flow].record(rtt)
                 return
 
     # -- path MTU ---------------------------------------------------------
@@ -968,28 +1074,42 @@ class Agent(object):
         self.cpu_prev, self.cpu_wall = now_cpu, now_wall
         return out
 
-    def _tx_row(self, ts, st, probe):
-        avg = (st.rtt_sum / st.recv) if st.recv else None
+    def _tx_row(self, ts, st, probe, fs=None):
+        """One tx row: the peer's own totals, or one bucket's share of them.
+
+        A bucket row is a breakdown of the row above it and not an
+        addition to it, so the two must never be summed together --
+        `build_pairs` keys on the blank flow column to keep them apart.
+        """
+        src = st if fs is None else fs
+        avg = (src.rtt_sum / src.recv) if src.recv else None
         row = {
             "ts": ts, "host": self.me, "dir": "tx", "peer": st.name,
             "probe": probe, "size": self.size if probe == "udp" else "",
-            "target_pps": "%g" % st.rate,
-            "sent": st.sent, "recv": st.recv,
-            "loss_pct": ("%.3f" % pct(st.sent - st.recv, st.sent)) if st.sent else "",
-            "rtt_min_us": "" if st.rtt_min is None else "%.0f" % st.rtt_min,
+            "target_pps": "%g" % (st.rate if fs is None
+                                  else st.rate / len(st.flows)),
+            "sent": src.sent, "recv": src.recv,
+            "loss_pct": ("%.3f" % pct(src.sent - src.recv, src.sent)) if src.sent else "",
+            "rtt_min_us": "" if src.rtt_min is None else "%.0f" % src.rtt_min,
             "rtt_avg_us": "" if avg is None else "%.0f" % avg,
-            "rtt_max_us": "" if st.rtt_max is None else "%.0f" % st.rtt_max,
-            "jitter_us": "%.0f" % st.jitter if st.recv else "",
-            "note": st.note,
+            "rtt_max_us": "" if src.rtt_max is None else "%.0f" % src.rtt_max,
+            "jitter_us": "%.0f" % src.jitter if src.recv else "",
+            "note": src.note,
         }
         if probe == "udp":
-            row["rtt_p50_us"] = _fmt_opt(rtt_percentile(st.hist, 0.50))
-            row["rtt_p99_us"] = _fmt_opt(rtt_percentile(st.hist, 0.99))
+            row["rtt_p50_us"] = _fmt_opt(rtt_percentile(src.hist, 0.50))
+            row["rtt_p99_us"] = _fmt_opt(rtt_percentile(src.hist, 0.99))
         else:
             # ping gives min/avg/max/mdev only; claiming percentiles from
             # that would be inventing data.
             row["rtt_p50_us"] = ""
             row["rtt_p99_us"] = ""
+        if fs is not None:
+            # The path MTU is a property of the pair, not of one bucket;
+            # repeating it on every bucket row would read as eight
+            # separate discoveries of the same number.
+            row["flow"] = fs.port
+            return row
         if getattr(st, "mtu_value", None) and st.mtu_state:
             row["path_mtu"] = st.mtu_value
             row["mtu_state"] = st.mtu_state
@@ -1001,6 +1121,8 @@ class Agent(object):
         cpu = self._cpu_pct()
         for st in sorted(self.peers.values(), key=lambda s: s.name):
             writer.writerow(self._tx_row(ts, st, "udp"))
+            for fs in st.flows:
+                writer.writerow(self._tx_row(ts, st, "udp", fs))
         for st in sorted(self.ping_peers.values(), key=lambda s: s.name):
             writer.writerow(self._tx_row(ts, st, "ping"))
         for name in sorted(self.rx):
@@ -1059,7 +1181,8 @@ class Agent(object):
                 self._ping_start(st, self.interval)
 
             next_report = now + self.interval
-            socks = [self.sock] + ([self.mtu_sock] if self.mtu_sock else [])
+            socks = ([self.sock] + list(self.flow_socks)
+                     + ([self.mtu_sock] if self.mtu_sock else []))
 
             while not self.stopping:
                 now = time.monotonic()
@@ -1083,12 +1206,13 @@ class Agent(object):
                     ready = []
                 for s in ready:
                     on_mtu = (s is self.mtu_sock)
+                    flow = self.flow_by_fd.get(s.fileno())
                     while True:
                         try:
                             data, src = s.recvfrom(MAX_SIZE)
                         except (BlockingIOError, socket.error):
                             break
-                        self.handle_packet(data, src, on_mtu)
+                        self.handle_packet(data, src, on_mtu, flow)
 
                 now = time.monotonic()
                 for st in self.peers.values():
@@ -1140,12 +1264,13 @@ class Agent(object):
                 except (OSError, select.error):
                     break
                 for s in ready:
+                    flow = self.flow_by_fd.get(s.fileno())
                     while True:
                         try:
                             data, src = s.recvfrom(MAX_SIZE)
                         except (BlockingIOError, socket.error):
                             break
-                        self.handle_packet(data, src, s is self.mtu_sock)
+                        self.handle_packet(data, src, s is self.mtu_sock, flow)
 
             # Final partial interval: report it rather than lose it.
             for st in self.ping_peers.values():
@@ -1349,7 +1474,8 @@ def cmd_gen(args):
     cfg = {"size": args.size, "port": args.port, "pps": "%g" % args.pps,
            "pmtu": "0" if args.no_pmtu else "1",
            "mtu_ceiling": args.mtu_ceiling,
-           "pmtu_every": "%g" % args.pmtu_every}
+           "pmtu_every": "%g" % args.pmtu_every,
+           "flows": args.flows}
     hosts, addrs, ports, pingonly, rate = build_mesh(tokens, args.pps, cfg)
     with _WriteGuard(args.mesh):
         write_mesh(args.mesh, hosts, addrs, ports, pingonly, rate, cfg)
@@ -1640,6 +1766,11 @@ def build_pairs(rows):
             continue
         hosts.add(peer)
         if d == "tx":
+            # A flow row breaks the row above it down by source port.
+            # Summing both would double every count on the page, so the
+            # aggregate is the one with no flow on it.
+            if r.get("flow"):
+                continue
             ps = pairs.setdefault((host, peer), PairStat(host, peer))
             ps.probe = r.get("probe") or ps.probe
             ps.sent += _int(r.get("sent"))
@@ -1668,6 +1799,132 @@ def _int(v):
         return int(float(v))
     except (TypeError, ValueError):
         return 0
+
+
+def spread_under_load(rows, split_ts, src, dst, factor):
+    """Is that member always sick, or only sick when the link is busy?
+
+    The two are different faults with different fixes, and the rows to
+    tell them apart are already on disk: the same split `--baseline`
+    takes, applied to the flow rows instead of the pair rows.
+    """
+    idle, load = [], []
+    for r in rows:
+        ts = _int(r.get("ts"))
+        if not ts:
+            continue
+        (idle if ts < split_ts else load).append(r)
+    if not idle or not load:
+        return None
+
+    def ratio_for(subset):
+        for rec in flow_spread(subset):
+            if rec["src"] == src and rec["dst"] == dst:
+                return rec["ratio"]
+        return None
+
+    a, b = ratio_for(idle), ratio_for(load)
+    if a is None or b is None:
+        return None
+    if a >= factor and b >= factor:
+        return ("That spread on %s -> %s is there idle as well (%.1fx idle, "
+                "%.1fx loaded), so the member is faulty rather than merely "
+                "busy -- look for a bad optic, a duplex mismatch or a "
+                "dirty fibre on it, not for congestion." % (src, dst, a, b))
+    if b >= factor:
+        return ("That spread on %s -> %s only appears under load (%.1fx "
+                "loaded against %.1fx idle), so the member is not broken: "
+                "it is carrying more than its share, which is what an "
+                "uneven hash does to an otherwise healthy bundle."
+                % (src, dst, b, a))
+    if a >= factor:
+        return ("That spread on %s -> %s is present idle (%.1fx) but not "
+                "under load (%.1fx), which is backwards for a congested "
+                "member and worth a second run before acting on it."
+                % (src, dst, a, b))
+    return None
+
+
+class FlowStat(object):
+    """One source port's worth of one pair, across every interval."""
+
+    def __init__(self, src, dst, port):
+        self.src, self.dst, self.port = src, dst, port
+        self.sent = 0
+        self.recv = 0
+        self.p50 = Agg()
+
+    @property
+    def loss_pct(self):
+        return pct(self.sent - self.recv, self.sent) if self.sent else None
+
+
+def build_flows(rows):
+    """Per-pair, per-source-port stats out of the flow rows.
+
+    The parallel accumulator to `build_pairs`: same rows, different key,
+    and deliberately not a wider key on the pairs themselves -- every
+    existing reader of a pair would then have to know to filter it.
+    """
+    flows = {}
+    for r in rows:
+        if r.get("dir") != "tx" or not r.get("flow"):
+            continue
+        host, peer = r.get("host"), r.get("peer")
+        if not host or not peer or peer == "*":
+            continue
+        key = (host, peer, r["flow"])
+        fs = flows.get(key)
+        if fs is None:
+            fs = flows[key] = FlowStat(host, peer, r["flow"])
+        fs.sent += _int(r.get("sent"))
+        fs.recv += _int(r.get("recv"))
+        fs.p50.add(r.get("rtt_p50_us"), keep=True)
+    return flows
+
+
+def flow_spread(rows, min_samples=FLOW_MIN_SAMPLES):
+    """Pairs whose buckets can be compared, worst spread first.
+
+    A pair earns a record only when at least two of its buckets carry
+    enough replies to have a p50 worth the name.  The reference is the
+    median bucket rather than the fastest: with one sick member out of
+    eight, the median is a healthy one, and a ratio against it says how
+    much worse that member is than the fabric's normal.
+    """
+    by_pair = {}
+    for fs in build_flows(rows).values():
+        by_pair.setdefault((fs.src, fs.dst), []).append(fs)
+
+    recs = []
+    for (src, dst), buckets in by_pair.items():
+        usable = [b for b in buckets if b.recv >= min_samples and b.p50.n]
+        thin = len(buckets) - len(usable)
+        if len(usable) < 2:
+            recs.append({"src": src, "dst": dst, "buckets": [],
+                         "thin": len(buckets), "ratio": None,
+                         "median_p50": None, "loss_gap": None})
+            continue
+        vals = sorted(b.p50.mean for b in usable)
+        m = len(vals) // 2
+        median = vals[m] if len(vals) % 2 else (vals[m - 1] + vals[m]) / 2.0
+        slowest = max(usable, key=lambda b: b.p50.mean)
+        ratio = (slowest.p50.mean / median) if median > 0 else None
+
+        losses = sorted(b.loss_pct or 0.0 for b in usable)
+        lm = len(losses) // 2
+        med_loss = (losses[lm] if len(losses) % 2
+                    else (losses[lm - 1] + losses[lm]) / 2.0)
+        lossiest = max(usable, key=lambda b: b.loss_pct or 0.0)
+        recs.append({
+            "src": src, "dst": dst,
+            "buckets": sorted(usable, key=lambda b: b.p50.mean),
+            "thin": thin, "ratio": ratio, "median_p50": median,
+            "slowest": slowest, "lossiest": lossiest,
+            "loss_gap": (lossiest.loss_pct or 0.0) - med_loss,
+        })
+    recs.sort(key=lambda r: -(r["ratio"] or 0))
+    return recs
 
 
 def _pair_p50(ps):
@@ -1893,6 +2150,85 @@ def render_under_load(recs, factor, split_ts):
     return lines, findings
 
 
+def render_path_spread(recs, factor, top=5, loss_gap=1.0):
+    """The per-flow section, and the finding it carries.
+
+    This is the fault nothing else in the package can see.  Every other
+    measurement here takes one path through the fabric, so a single sick
+    member of a bundle is hit or missed by luck: some flows slow, most
+    fine, every retest disagreeing with the last, and the switch counters
+    looking healthy because the other members are.
+    """
+    usable = [r for r in recs if r["buckets"]]
+    thin = [r for r in recs if not r["buckets"]]
+    lines = ["", "  PATH SPREAD  source-port buckets per pair, "
+                 "widest spread first", ""]
+    for r in usable[:top]:
+        slow, med = r["slowest"], r["median_p50"]
+        tail = ""
+        if r["ratio"]:
+            tail = "  slowest :%s %s (%.1fx)" % (slow.port,
+                                                 fmt_us(slow.p50.mean),
+                                                 r["ratio"])
+        lossy = r["lossiest"]
+        if (lossy.loss_pct or 0.0) >= 0.005:
+            tail += "  loss %.2f%%" % lossy.loss_pct
+        lines.append("    %-22s %d flows  median p50 %-8s%s"
+                     % ("%s -> %s" % (r["src"], r["dst"]),
+                        len(r["buckets"]), fmt_us(med), tail))
+    if thin:
+        lines.append("")
+        lines.append("    %d pair(s) had fewer than two flows with %d replies "
+                     "each: not compared." % (len(thin), FLOW_MIN_SAMPLES))
+
+    findings = []
+    worst = usable[0] if usable else None
+    if worst and worst["ratio"] and worst["ratio"] >= factor:
+        slow = worst["slowest"]
+        findings.append(
+            "One path through the fabric is %.1fx slower than the rest on "
+            "%s -> %s: source port %s sees p50 %s where the median flow "
+            "sees %s.  Same pair, same interval, same probe -- only the "
+            "5-tuple differs, so what differs is which member of a LAG or "
+            "ECMP bundle the traffic hashes onto.  That is why this fault "
+            "will not reproduce: a test that happens to hash onto a "
+            "healthy member finds nothing.  Check the member counters on "
+            "the bundle out of %s rather than the link as a whole."
+            % (worst["ratio"], worst["src"], worst["dst"], slow.port,
+               fmt_us(slow.p50.mean), fmt_us(worst["median_p50"]),
+               worst["src"]))
+
+    lossy = [r for r in usable
+             if r["loss_gap"] is not None and r["loss_gap"] >= loss_gap]
+    if lossy:
+        w = max(lossy, key=lambda r: r["loss_gap"])
+        findings.append(
+            "Loss is confined to one path on %s -> %s: source port %s "
+            "dropped %.2f%% while the median flow dropped %.2f%%.  Loss "
+            "that only one member of a bundle shows is that member, not "
+            "the path -- and an overall loss figure averages it away to "
+            "something small enough to ignore."
+            % (w["src"], w["dst"], w["lossiest"].port,
+               w["lossiest"].loss_pct or 0.0,
+               (w["lossiest"].loss_pct or 0.0) - w["loss_gap"]))
+
+    if not findings:
+        if usable:
+            findings.append(
+                "Every flow agrees: no pair had one source port more than "
+                "%.1fx the median, and no port dropped on its own.  Either "
+                "the paths are healthy or there is only one of them -- a "
+                "single-link path spreads nowhere, and that is not a fault."
+                % factor)
+        else:
+            findings.append(
+                "No pair had two flows with %d replies each, so nothing "
+                "was compared.  The rate is split across the buckets, so "
+                "raise --pps or --for, or ask for fewer flows."
+                % FLOW_MIN_SAMPLES)
+    return lines, findings
+
+
 def diagnose(pairs, bad, hosts):
     """Three cheap rules.  Nothing cleverer than this in v1 -- a wrong
     confident diagnosis is worse than none."""
@@ -2108,6 +2444,23 @@ def cmd_summarize(args, mesh=None, fleet=None):
                 log("    %s" % _wrap_text(f, 4))
             log("")
 
+    spread = flow_spread(rows)
+    if spread:
+        factor = getattr(args, "flow_factor", 3.0)
+        lines, findings = render_path_spread(spread, factor, args.top)
+        for line in lines:
+            log(line)
+        log("")
+        for f in findings:
+            log("    %s" % _wrap_text(f, 4))
+        worst = spread[0]
+        if split and worst["buckets"] and (worst["ratio"] or 0) >= factor:
+            extra = spread_under_load(rows, int(split), worst["src"],
+                                      worst["dst"], factor)
+            if extra:
+                log("    %s" % _wrap_text(extra, 4))
+        log("")
+
     if args.grid:
         _write_grids(args.grid, pairs, hosts)
         log("[%s] grids written to %s/" % (PROG, args.grid))
@@ -2240,7 +2593,8 @@ def cmd_check(args):
     cfg = {"size": args.size, "port": args.port, "pps": "%g" % args.pps,
            "pmtu": "0" if args.no_pmtu else "1",
            "mtu_ceiling": args.mtu_ceiling,
-           "pmtu_every": "%g" % args.pmtu_every}
+           "pmtu_every": "%g" % args.pmtu_every,
+           "flows": args.flows}
     hosts, addrs, ports, pingonly, rate = build_mesh(tokens, args.pps, cfg)
     with _WriteGuard(args.mesh):
         write_mesh(args.mesh, hosts, addrs, ports, pingonly, rate, cfg)
@@ -2592,6 +2946,13 @@ def _add_probe_flags(p):
                    default=int(_env_num("MTU_CEILING", DEFAULT_MTU_CEILING, int)))
     p.add_argument("--pmtu-every", type=float,
                    default=_env_num("PMTU_EVERY", DEFAULT_PMTU_EVERY))
+    p.add_argument("--flows", type=int,
+                   default=int(_env_num("FLOWS", DEFAULT_FLOWS, int)),
+                   metavar="N",
+                   help="spread each pair's probes over N source ports, so "
+                        "they take N paths through a LAG or ECMP fabric "
+                        "instead of one (try %d; the rate is split across "
+                        "them, not multiplied)" % SUGGESTED_FLOWS)
 
 
 def _add_summary_flags(p):
@@ -2613,6 +2974,9 @@ def _add_summary_flags(p):
     p.add_argument("--bloat-factor", type=float, default=4.0, metavar="F",
                    help="p99 this many times its idle value under load "
                         "is the finding")
+    p.add_argument("--flow-factor", type=float, default=3.0, metavar="F",
+                   help="one source port at this multiple of the median "
+                        "flow's p50 is the finding (needs --flows)")
 
 
 def build_parser():

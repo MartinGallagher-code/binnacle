@@ -31,13 +31,13 @@ usual cause of `invalid-publisher`.
 
 ## Cutting a release
 
-1. Update the version in **all nine** places — they must agree, and the
+1. Update the version in **all ten** places — they must agree, and the
    suite fails if they do not:
    - `pyproject.toml` → `version`
    - `binnacle/__init__.py` → `VERSION`
-   - each tool's own `VERSION`, in all seven modules
+   - each tool's own `VERSION`, in all eight modules
 
-   The seven are not redundant. A tool is routinely `scp`'d to a machine
+   The eight are not redundant. A tool is routinely `scp`'d to a machine
    that has never heard of this package, where its own `VERSION` is the
    only version there is — and `agree` groups a fleet by what `--version`
    reports, so a module left behind at the old number reads as version
