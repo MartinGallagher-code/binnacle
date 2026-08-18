@@ -587,6 +587,80 @@ with io.open(os.path.join(d, "web03.csv"), "w", newline="",
 EOF
 }
 
+# netmesh_flow_reports DIR NFLOWS SICK_IDX GOOD_P50 SICK_P50 \
+#                       [PER_FLOW_RECV] [SICK_LOSS] [SPLIT]
+#
+# One pair, web03 -> db01, probed over NFLOWS source ports, where bucket
+# SICK_IDX (0-based, or -1 for none) is the sick member of the bundle.
+# Written by hand for the same reason as netmesh_reports: no loopback can
+# be made to hash one flow onto a bad optic on demand.
+#
+# The aggregate tx row carries no flow and the bucket rows do, which is
+# the distinction summarize relies on to avoid counting both.  PER_FLOW_RECV
+# defaults high enough to clear the minimum a bucket needs before its p50
+# is compared; pass a small value to exercise the thin case.  With SPLIT,
+# the first half of the rows land before it and the second half at or
+# after it, so --load-split has two windows to compare.
+netmesh_flow_reports() {
+    "$PY" - "$@" <<'EOF'
+import csv, io, os, sys
+d = sys.argv[1]
+nflows, sick_idx = int(sys.argv[2]), int(sys.argv[3])
+good_p50, sick_p50 = float(sys.argv[4]), float(sys.argv[5])
+per_flow = int(sys.argv[6]) if len(sys.argv) > 6 else 50
+sick_loss = float(sys.argv[7]) if len(sys.argv) > 7 else 0.0
+split = int(sys.argv[8]) if len(sys.argv) > 8 else 0
+FIELDS = ["ts", "host", "dir", "peer", "probe", "size", "target_pps",
+          "sent", "recv", "loss_pct", "rtt_min_us", "rtt_avg_us",
+          "rtt_p50_us", "rtt_p99_us", "rtt_max_us", "jitter_us",
+          "path_mtu", "mtu_state", "agent_cpu_pct", "note", "rx_usecs",
+          "flow"]
+os.makedirs(d, exist_ok=True)
+with io.open(os.path.join(d, "web03.csv"), "w", newline="",
+             encoding="utf-8") as fh:
+    w = csv.DictWriter(fh, fieldnames=FIELDS, restval="",
+                       lineterminator="\n")
+    w.writeheader()
+    for i in range(6):
+        # Without a split every row is simply one interval apart; with one,
+        # rows 0-2 are idle and rows 3-5 are loaded.
+        ts = (split + (i - 3) * 10 if i >= 3 else split - (3 - i) * 10) \
+            if split else 1700000000 + i * 5
+        agg_sent = per_flow * nflows
+        agg_recv = agg_sent
+        rows = []
+        for f in range(nflows):
+            sick = (f == sick_idx)
+            recv = int(round(per_flow * (100.0 - (sick_loss if sick else 0.0))
+                             / 100.0))
+            agg_recv -= (per_flow - recv)
+            rows.append({
+                "ts": ts, "host": "web03", "dir": "tx", "peer": "db01",
+                "probe": "udp", "size": 64, "target_pps": 10,
+                "sent": per_flow, "recv": recv,
+                "loss_pct": "%.3f" % (sick_loss if sick else 0.0),
+                "rtt_avg_us": sick_p50 if sick else good_p50,
+                "rtt_p50_us": sick_p50 if sick else good_p50,
+                "rtt_p99_us": (sick_p50 if sick else good_p50) * 2,
+                "rtt_max_us": (sick_p50 if sick else good_p50) * 3,
+                "jitter_us": 10, "flow": 40001 + f})
+        w.writerow({"ts": ts, "host": "web03", "dir": "tx", "peer": "db01",
+                    "probe": "udp", "size": 64, "target_pps": 10 * nflows,
+                    "sent": agg_sent, "recv": agg_recv,
+                    "loss_pct": "%.3f" % (100.0 * (agg_sent - agg_recv)
+                                          / agg_sent),
+                    "rtt_avg_us": good_p50, "rtt_p50_us": good_p50,
+                    "rtt_p99_us": good_p50 * 2, "rtt_max_us": good_p50 * 3,
+                    "jitter_us": 10})
+        for r in rows:
+            w.writerow(r)
+        w.writerow({"ts": ts, "host": "db01", "dir": "rx", "peer": "web03",
+                    "probe": "udp", "sent": 0, "recv": agg_recv})
+        w.writerow({"ts": ts, "host": "web03", "dir": "host", "peer": "*",
+                    "probe": "udp", "agent_cpu_pct": "1.0"})
+EOF
+}
+
 # free_port -- a UDP port nothing is listening on, for the responder.
 free_port() {
     "$PY" - <<'EOF'

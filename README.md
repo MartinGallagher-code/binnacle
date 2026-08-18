@@ -117,7 +117,10 @@ UDP echoes between temporary agents, so no root is required and only the
 sender's clock is ever read — RTT is exact with no clock sync. The responder
 counts what arrived, so **loss splits into forward and return legs**.
 Unprivileged path-MTU discovery catches the black hole where small packets
-echo and large ones vanish.
+echo and large ones vanish. `--flows N` sweeps the source port so the probes
+take several paths through a LAG or ECMP bundle rather than one, which is
+what finds **the sick member that a single-path test hits or misses by
+luck** — the fault that never reproduces.
 
 ### during
 
@@ -183,7 +186,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # nine suites, 227 checks
+bash tests/run_tests.sh          # nine suites, 234 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

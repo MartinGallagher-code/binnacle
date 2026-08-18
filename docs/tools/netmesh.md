@@ -155,11 +155,13 @@ interval:
 ```text
 ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,
 rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,
-path_mtu,mtu_state,agent_cpu_pct,note
+path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow
 ```
 
 `dir` is `tx` (this host probed peer), `rx` (this host answered peer) or
-`host` (totals). Percentiles come from a constant-memory quarter-octave
+`host` (totals). `flow` is blank on every row except the per-source-port
+breakdown described under [Which path did it take?](#which-path-did-it-take);
+a row carrying one is part of the row above it, never an addition to it. Percentiles come from a constant-memory quarter-octave
 histogram — about 20% wide, which is ample to tell 200 µs from 8 ms.
 
 **A blank cell means "not measured", never zero.** A pair whose replies
@@ -271,6 +273,83 @@ There is no sysfs for it, so `ethtool` is required; where `ethtool` is
 absent the value is **blank and the note is simply absent**, rather than
 being taken as "coalescing is off". The note only appears when the timer is
 at least half the fastest measured p50, so it stays quiet on healthy runs.
+
+## Which path did it take?
+
+Every probe so far uses one source port, so it presents one 5-tuple to the
+fabric and takes **one path** through any LAG or ECMP bundle. If a bundle
+has four members and one of them is sick, a test either hashes onto it or
+does not, and which one is luck.
+
+That is the classic fault that will not reproduce. Some flows slow, most
+fine, every retest disagreeing with the last — and the switch counters look
+healthy, because three of the four members are.
+
+`--flows N` sweeps the source port across `N` buckets and keeps each one's
+results apart:
+
+```bash
+netmesh check web03 db01 --flows 8 --pps 80
+```
+
+```text
+  PATH SPREAD  source-port buckets per pair, widest spread first
+
+    web03 -> db01          8 flows  median p50 142us  slowest :40008 4.1ms (28.9x)  loss 3.20%
+    web01 -> db01          8 flows  median p50 138us  slowest :40003 145us (1.1x)
+
+    One path through the fabric is 28.9x slower than the rest on web03 ->
+    db01: source port 40008 sees p50 4.1ms where the median flow sees
+    142us. Same pair, same interval, same probe -- only the 5-tuple
+    differs, so what differs is which member of a LAG or ECMP bundle the
+    traffic hashes onto.
+```
+
+The reference is the **median** bucket rather than the fastest: with one
+sick member out of eight the median is a healthy one, so the ratio says how
+much worse that member is than the fabric's normal. `--flow-factor` moves
+the line (default 3×).
+
+Three is not timid. Two buckets of the *same* healthy loopback, 30 replies
+each on a busy machine, came out 1.9× apart in testing — per-bucket p50s
+are noisier than whole-pair p50s because each one rests on a fraction of
+the samples. A finding at 2× would be that noise. Lower the factor only
+alongside a longer run or a higher rate, so the buckets it compares are
+built from enough replies to mean it.
+
+### The rate is split, not multiplied
+
+The buckets take turns within the rate you asked for. Eight flows at
+`--pps 80` is eight buckets of 10/s, not 640 packets a second — a
+measurement tool that multiplied its own load by eight when you asked it to
+look harder would be causing the congestion it then reported.
+
+The cost is per-bucket sample count, and it is why this is opt-in rather
+than the default. A bucket needs 30 replies before its p50 is compared at
+all; below that it is reported as thin rather than ranked, because saying
+nothing would read as "the flows agree". Raise `--pps` or `--for` when the
+report says so.
+
+### One socket per bucket, not per pair
+
+The 5-tuple already differs per peer in the destination address, so the
+source port is the only part that has to vary. Eight buckets cost eight
+sockets on the agent whatever the size of the mesh.
+
+The ports are ephemeral, so they differ between runs. That is the honest
+behaviour: what is sick is a member of the bundle, not a port number. The
+port a bucket got is stable for the length of the run and recorded on every
+row, so a finding can still be lined up against a switch's per-member
+counters while the run is fresh.
+
+### It composes with the baseline
+
+With `--baseline`, a sick member gets split the same way everything else
+does. A member that is slow idle *and* loaded is faulty — a bad optic, a
+duplex mismatch, a dirty fibre. One that is only slow under load is not
+broken at all: it is carrying more than its share, which is what an uneven
+hash does to an otherwise healthy bundle. The two want different things
+done about them, so they are reported as different findings.
 
 ## Latency under load
 
