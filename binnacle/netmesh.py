@@ -2367,7 +2367,14 @@ def cmd_summarize(args, mesh=None, fleet=None):
     if asym:
         log("")
         log("  ASYMMETRY")
-        for delta, slow, fast in sorted(asym, reverse=True)[:args.top]:
+        # Keyed, not sorted on the tuples themselves.  Two pairs can tie
+        # on delta -- which is not exotic: the p50s are rounded to whole
+        # microseconds -- and the tuple comparison then falls through to
+        # element 1, where it meets two PairStat objects that have no
+        # ordering and raises TypeError.  Ties break on the slow leg's
+        # names so the order is also stable between runs.
+        for delta, slow, fast in sorted(
+                asym, key=lambda t: (-t[0], t[1].src, t[1].dst))[:args.top]:
             ratio = (_pair_p50(slow) / _pair_p50(fast)) if _pair_p50(fast) else 0
             log("    %s -> %s is %s slower than %s -> %s (%.1fx)"
                 % (slow.src, slow.dst, fmt_us(delta), fast.src, fast.dst, ratio))

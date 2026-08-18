@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Martin J. Gallagher
 
 [build-system]
-requires = ["setuptools>=77.0"]
+# 64, not 77.  The PEP 639 `license = "<SPDX>"` string form needs
+# setuptools>=77, and setuptools 77 needs Python>=3.9 -- which would make a
+# package that advertises requires-python >=3.6 impossible to build from its
+# own sdist on the Pythons it claims.  See the `license` field below.
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,8 +15,14 @@ version = "0.3.0"
 description = "Instruments for Linux boxes, fleets and the networks between: diagnose, don't dump"
 readme = "README.md"
 requires-python = ">=3.6"
-license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+# The classic table rather than PEP 639's SPDX string, deliberately.  The
+# string form raises the metadata to version 2.4 and the build floor to
+# setuptools>=77 (Python>=3.9), and an old pip that cannot read 2.4 metadata
+# falls back to the sdist, which then cannot be built on the very Pythons
+# this package supports.  The classic form keeps `pip install binnacle`
+# working down to the 3.6 floor.  LICENSE still ships: setuptools includes
+# LICEN[CS]E* by default.
+license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "Martin J. Gallagher" }]
 maintainers = [{ name = "Martin J. Gallagher" }]
 keywords = [
@@ -38,6 +48,7 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Intended Audience :: System Administrators",
     "Intended Audience :: Information Technology",
     "Operating System :: POSIX",

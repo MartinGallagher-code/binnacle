@@ -318,6 +318,34 @@ t_without_a_split_the_report_is_unchanged() {
     assert_not_contains "$out" "UNDER LOAD"
 }
 
+t_two_pairs_tied_on_asymmetry_do_not_crash() {
+    # Ranked lists must never sort on tuples that carry objects.  Two pairs
+    # with the same asymmetry delta made the sort fall through to comparing
+    # PairStat against PairStat, which has no ordering: summarize died with
+    # a TypeError on a report it had already finished measuring.  Rounding
+    # p50s to whole microseconds makes the tie ordinary, not exotic.
+    cd "$TEST_TMPDIR"
+    mkdir -p tied
+    hdr="ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note"
+    {
+        echo "$hdr"
+        # a <-> b and c <-> d, both asymmetric by exactly 200us.
+        echo "100,a,tx,b,udp,64,10,100,100,0.000,100,100,100,200,200,10,,,,"
+        echo "100,b,tx,a,udp,64,10,100,100,0.000,300,300,300,600,600,10,,,,"
+        echo "100,c,tx,d,udp,64,10,100,100,0.000,500,500,500,1000,1000,10,,,,"
+        echo "100,d,tx,c,udp,64,10,100,100,0.000,700,700,700,1400,1400,10,,,,"
+    } > tied/r.csv
+    rc=0
+    out="$(nm summarize --no-collect --reports tied --mesh /nonexistent 2>&1)" \
+        || rc=$?
+    assert_status $rc 0
+    assert_not_contains "$out" "TypeError"
+    assert_contains "$out" "ASYMMETRY"
+    # Both tied pairs survive the cut, and the order is stable by name.
+    assert_contains "$out" "b -> a is"
+    assert_contains "$out" "d -> c is"
+}
+
 t_flow_buckets_break_the_rate_down_they_do_not_multiply_it() {
     # The one property that matters for trusting these numbers: turning
     # flow spreading on must not put more traffic on the fabric being
@@ -453,6 +481,7 @@ run_test "without a split nothing changes"     t_without_a_split_the_report_is_u
 run_test "a p50 that is really the timer"      t_a_p50_that_is_really_the_cards_timer_says_so
 run_test "small coalescing is not mentioned"   t_coalescing_well_under_the_measurement_is_not_mentioned
 run_test "no setting means absent, not zero"   t_without_the_setting_the_note_is_absent_not_zero
+run_test "tied asymmetry does not crash"     t_two_pairs_tied_on_asymmetry_do_not_crash
 run_test "flow buckets split, not multiply"    t_flow_buckets_break_the_rate_down_they_do_not_multiply_it
 run_test "one slow flow names the member"      t_one_slow_flow_is_named_as_a_bundle_member
 run_test "flows that agree are not a finding"  t_flows_that_agree_are_not_a_finding
