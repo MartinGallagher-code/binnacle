@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pip install binnacle` works again on the Pythons it advertises.**
+  `pyproject.toml` declared PEP 639's `license = "GPL-3.0-or-later"` SPDX
+  string, which requires `setuptools>=77` to build -- and setuptools 77
+  requires Python >=3.9. A package claiming `requires-python = ">=3.6"` was
+  therefore impossible to build from its own sdist on most of the range it
+  claimed: pip builds an sdist in an *isolated* environment and installs the
+  build requirements there from the index, so whatever setuptools is already
+  on the machine is irrelevant, and where no version at or above 77 can be
+  installed pip stops with `Cannot install setuptools>=77.0`.
+
+  The `license` table and the license classifier are back, and the build
+  floor is `setuptools>=64`. Verified by reproducing the failure against the
+  published 0.3.0 sdist under a `setuptools<77` constraint and watching the
+  same install succeed with this change.
+
+  Only the source path was affected. The wheel was always fine: its
+  `Metadata-Version: 2.4` installs on pip as old as 21.3.1, which was
+  checked rather than assumed. The metadata version follows the setuptools
+  doing the building, not the licence form, so no cap was added.
+
 ### Added
 
 - **`netmesh` can take more than one path through the fabric.** Every probe
