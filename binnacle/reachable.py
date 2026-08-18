@@ -686,7 +686,13 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("path", metavar="FILE", help="server list, one per line")
     p.add_argument("--version", action="version",
-                   version="%s %s" % (PROG, VERSION))
+                   version=(
+                       "%s %s\n"
+                       "Copyright (C) 2026 Martin J. Gallagher\n"
+                       "License: GPL-3.0-or-later <https://www.gnu.org/licenses/gpl-3.0.html>\n"
+                       "This is free software: you are free to change and redistribute it.\n"
+                       "There is no warranty, to the extent permitted by law."
+                   ) % (PROG, VERSION))
     p.add_argument("-o", "--output", metavar="FILE")
     p.add_argument("-i", "--in-place", action="store_true")
     p.add_argument("--no-backup", action="store_true")
