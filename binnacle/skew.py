@@ -1367,7 +1367,13 @@ def build_parser():
         prog=PROG, description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version",
-                   version="%s %s" % (PROG, VERSION))
+                   version=(
+                       "%s %s\n"
+                       "Copyright (C) 2026 Martin J. Gallagher\n"
+                       "License: GPL-3.0-or-later <https://www.gnu.org/licenses/gpl-3.0.html>\n"
+                       "This is free software: you are free to change and redistribute it.\n"
+                       "There is no warranty, to the extent permitted by law."
+                   ) % (PROG, VERSION))
     p.add_argument("--server", action="append", dest="servers",
                    metavar="ADDR[:PORT]",
                    default=(_env("SERVERS").split(",") if _env("SERVERS")

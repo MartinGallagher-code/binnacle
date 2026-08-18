@@ -1057,7 +1057,13 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("paths", nargs="*", metavar="FILE")
     p.add_argument("--version", action="version",
-                   version="%s %s" % (PROG, VERSION))
+                   version=(
+                       "%s %s\n"
+                       "Copyright (C) 2026 Martin J. Gallagher\n"
+                       "License: GPL-3.0-or-later <https://www.gnu.org/licenses/gpl-3.0.html>\n"
+                       "This is free software: you are free to change and redistribute it.\n"
+                       "There is no warranty, to the extent permitted by law."
+                   ) % (PROG, VERSION))
     p.add_argument("--top", type=int, default=int(_env("TOP", 10)))
     p.add_argument("--min-count", type=int, default=1)
     p.add_argument("--min-severity", default="info",
