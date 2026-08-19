@@ -83,6 +83,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   above it and never an addition to it, and `summarize` keys on the blank
   to avoid counting both.
 
+- **`agree script` takes a tool name, not just a path.** The documented
+  fleet-triage command began `agree script ./why_slow.py`, which assumes
+  the caller knows where why_slow.py is -- and after `pip install
+  binnacle` nobody does: the sources live in whichever `site-packages`
+  directory pip chose. A bare name (no directory part) is now also looked
+  up among the tools installed alongside `agree` itself, hyphen or
+  underscore, `.py` optional, so `agree script why-slow --hosts prod.txt
+  --fleet-csv -- --csv` works from any install. An explicit path still
+  wins, and a name matching neither a file nor a bundled tool fails
+  naming the tools that would have matched.
+
+- **`why-slow --ssh HOST` diagnoses a remote box.** The file is fed to
+  `python3 -` over ssh, so nothing is installed on the host, nothing is
+  copied to it and nothing is left behind -- it works on a machine that
+  has never heard of binnacle. The remote exit code is passed through,
+  keeping `--exit-code`'s 0/10/20 contract across the hop, and ssh's own
+  255 is called out as "the box was never diagnosed" rather than left to
+  read like a clean report. `--ssh-cmd` swaps the transport
+  (`WHY_SLOW_SSH`). Two contradictions are refused rather than resolved
+  silently: `--no-exec` (the hop is a subprocess), and `--csv PATH` /
+  `--json PATH` (the file would be written on the remote box; use the
+  bare form and redirect). One host only, deliberately -- fanning out and
+  grouping the answers is `agree`'s job.
+
 ## [0.3.0] - 2026-08-17
 
 ### Added

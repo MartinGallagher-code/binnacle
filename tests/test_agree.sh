@@ -201,6 +201,41 @@ t_script_pushes_runs_and_cleans_up() {
     assert_no_file "$FAKE_ROOT/a/agreetmp/s.sh"
 }
 
+t_script_resolves_a_bundled_tool_name() {
+    # `agree script why-slow` has to work from a pip install, where the
+    # caller has no idea which site-packages directory holds why_slow.py.
+    # The name is looked up next to agree.py itself, hyphens normalized.
+    install_fake_ssh
+    fake_host a
+    out="$(ag_verb script why-slow -H a --quiet --remote-dir agreetmp \
+        -- --explain SWAP_THRASH)"
+    assert_contains "$out" "SWAP_THRASH"
+    log="$(cat "$FAKE_SSH_LOG")"
+    assert_contains "$log" "scp a agreetmp"
+    assert_contains "$log" "why_slow.py"
+    assert_no_file "$FAKE_ROOT/a/agreetmp/why_slow.py"
+}
+
+t_script_unknown_name_lists_the_bundled_tools() {
+    # The failure has to teach: name what could have been meant.
+    install_fake_ssh
+    fake_host a
+    set +e
+    out="$(ag_verb script no-such-tool -H a --quiet -- 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "no such script or bundled tool"
+    assert_contains "$out" "why-slow"
+    # An explicit path never falls back to the bundle lookup.
+    set +e
+    out="$(ag_verb script ./no/such/dir/why-slow -H a --quiet -- 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "no such script:"
+}
+
 t_a_flooding_host_is_killed_not_grouped() {
     # One box caught in a log storm must not sink the whole fan-out: with
     # everything buffered, a single runaway host grew this process by the
@@ -431,6 +466,8 @@ run_test "--dry-run contacts nobody"           t_dry_run_contacts_nobody
 run_test "--first limits the blast radius"     t_first_limits_the_blast_radius
 run_test "sudo is always -n"                   t_sudo_is_always_non_interactive
 run_test "script pushes, runs, cleans up"      t_script_pushes_runs_and_cleans_up
+run_test "script resolves a bundled tool name" t_script_resolves_a_bundled_tool_name
+run_test "unknown tool name lists the bundle"  t_script_unknown_name_lists_the_bundled_tools
 run_test "--merge-csv stacks with ssh_host"    t_merge_csv_stacks_and_prefixes_ssh_host
 run_test "a flooding host is killed, not grouped" t_a_flooding_host_is_killed_not_grouped
 run_test "mixed versions merge by column name" t_mixed_tool_versions_merge_by_column_name

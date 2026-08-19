@@ -11,6 +11,7 @@ to run next.
 ```bash
 why-slow                      # diagnose this box (2s sample)
 why-slow --interval 10        # longer sample, steadier numbers
+why-slow --ssh node07         # diagnose a remote box over ssh
 why-slow --csv                # one row per finding, for fleet use
 why-slow --rules              # every rule and its thresholds
 why-slow --explain SWAP_THRASH
@@ -151,6 +152,39 @@ says so, because a clean report you cannot trust is worse than no report.
 `--all` lists every skipped rule; the kernel-log skip is shown even without
 it, because it is the biggest thing you lose.
 
+## One remote box
+
+```bash
+why-slow --ssh node07
+why-slow --ssh root@node07 --interval 10
+```
+
+`--ssh HOST` runs the diagnosis on HOST instead of here, by feeding this
+very file to `python3 -` over ssh. Nothing is installed on the box,
+nothing is copied to it and nothing is left behind: the source travels on
+stdin and the report comes back on stdout, so it works on a machine that
+has never heard of binnacle. The remote exit code is passed through, which
+keeps `--exit-code` meaningful across the hop, and ssh's own `255` is
+called out as *"the box was never diagnosed"* rather than being left to
+read like a clean bill of health.
+
+Use `root@HOST` to get the kernel-log rules (OOM kills, I/O errors);
+without root they are reported as skipped, exactly as they would be
+locally. `--ssh-cmd` swaps the transport if plain `ssh` is not it.
+
+Two refusals worth knowing about: `--no-exec` contradicts `--ssh` (one
+forbids subprocesses, the other *is* one), and `--csv PATH`/`--json PATH`
+are refused with `--ssh` because the file would be written on the remote
+box — use the bare form and redirect locally:
+`why-slow --ssh node07 --csv > node07.csv`.
+
+One host only, deliberately. Fanning out and grouping the answers is
+[`agree`](agree.md)'s job:
+
+```bash
+agree script why-slow --hosts prod.txt --fleet-csv -- --csv
+```
+
 ## For fleets
 
 `--csv` emits one row per finding, deterministically ordered:
@@ -164,7 +198,7 @@ Determinism is what makes it composable: two hosts with the same problem
 produce byte-identical rows, so [`agree`](agree.md) groups them together:
 
 ```bash
-agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 That reports *"44 hosts healthy, 4 agree they are swapping, 2 unreachable"*.

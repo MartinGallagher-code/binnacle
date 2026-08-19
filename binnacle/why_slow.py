@@ -5,6 +5,7 @@
 
 Usage: why-slow.py                       sample for 2s, diagnose, advise
        why-slow.py --interval 10         longer sample, steadier numbers
+       why-slow.py --ssh node07          diagnose a remote box over ssh
        why-slow.py --csv                 one row per finding, for fleet use
        why-slow.py --json                everything, machine-readable
        why-slow.py --facts               just the measurements, no diagnosis
@@ -12,6 +13,11 @@ Usage: why-slow.py                       sample for 2s, diagnose, advise
        why-slow.py --explain RULE_ID     why one rule exists and what it means
 
 Options:
+  --ssh HOST         run on HOST instead: this file is fed to `python3 -`
+                     over ssh, so nothing is copied to or left on the box.
+                     One host only -- a fleet is agree's job:
+                     `agree script why-slow --hosts prod.txt --fleet-csv -- --csv`
+  --ssh-cmd CMD      the ssh to use for --ssh                (WHY_SLOW_SSH)
   --interval S       seconds between the two counter snapshots (default 2.0;
                      0 takes a single snapshot and skips every rate rule)
   --top N            how many processes to name in the evidence block (5)
@@ -77,6 +83,7 @@ import io
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -2188,6 +2195,8 @@ def build_parser():
                        "This is free software: you are free to change and redistribute it.\n"
                        "There is no warranty, to the extent permitted by law."
                    ) % (PROG, VERSION))
+    p.add_argument("--ssh", metavar="HOST")
+    p.add_argument("--ssh-cmd", default=_env("SSH", "ssh"), metavar="CMD")
     p.add_argument("--interval", type=float,
                    default=float(_env("INTERVAL", 2.0)))
     p.add_argument("--top", type=int, default=int(_env("TOP", 3)))
@@ -2232,15 +2241,74 @@ def cmd_explain(rid):
     die("no such rule: %s  (try --rules)" % rid)
 
 
+def _strip_flag(argv, flag):
+    """ARGV without FLAG and its value, in both `--x v` and `--x=v` forms."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a == flag:
+            skip = True
+        elif not a.startswith(flag + "="):
+            out.append(a)
+    return out
+
+
+def run_remote(host, argv, ssh_cmd):
+    """Run this same file on HOST by feeding it to `python3 -` over ssh.
+
+    Nothing is copied to the box and nothing is left on it: the source
+    travels on stdin and the report comes back on stdout, so this works on
+    a machine that has never heard of binnacle.  The remote exit code is
+    passed through, so --exit-code keeps its meaning.  One host only,
+    deliberately -- fanning out and grouping the answers is agree's job.
+    """
+    fwd = _strip_flag(_strip_flag(argv, "--ssh"), "--ssh-cmd")
+    try:
+        with io.open(__file__, encoding="utf-8", errors="replace") as fh:
+            source = fh.read()
+    except OSError as exc:
+        die("cannot read my own source to send it to %s: %s" % (host, exc))
+    # ssh joins its trailing words with spaces and hands them to the remote
+    # shell, so each forwarded argument is quoted for that shell.
+    cmd = shlex.split(ssh_cmd) + [host, "python3", "-"] \
+        + [shlex.quote(a) for a in fwd]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    except OSError as exc:
+        die("cannot run %s: %s" % (cmd[0], exc))
+    proc.communicate(source.encode("utf-8"))
+    if proc.returncode == 255:
+        # 255 is ssh's own failure, never this tool's: the report above (if
+        # any) is ssh's stderr, not a diagnosis.
+        sys.stderr.write("%s: ssh to %s failed (exit 255) -- the box was "
+                         "never diagnosed\n" % (PROG, host))
+    return proc.returncode
+
+
 def main(argv=None):
     _stdio_safe()
     global PROC, SYS, NO_EXEC
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
 
     if args.rules:
         return cmd_rules()
     if args.explain:
         return cmd_explain(args.explain)
+
+    if args.ssh:
+        if args.no_exec:
+            die("--ssh has to run ssh, which --no-exec forbids -- drop one")
+        if args.csv or args.json:
+            # A PATH would be opened by the remote side, and a report file
+            # quietly landing on the other box is exactly the kind of
+            # surprise the rest of this tool exists to avoid.
+            flag, ext = ("--csv", "csv") if args.csv else ("--json", "json")
+            die("%s with a PATH would write the file on %s, not here -- "
+                "drop the path and redirect instead:  %s --ssh %s %s > "
+                "out.%s" % (flag, args.ssh, PROG, args.ssh, flag, ext))
+        return run_remote(args.ssh, raw_argv, args.ssh_cmd)
 
     PROC, SYS = args.proc_root, args.sys_root
     NO_EXEC = args.no_exec
