@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`netmesh` no longer reports 100% loss when the mesh holds hostnames.**
+  A bare host token is its own address, and nothing ever resolved it: the
+  probes went out (`sendto` resolves per packet) and the echoes came back,
+  but replies are attributed by comparing the mesh's address string
+  against the reply's source address -- and `recvfrom` only ever reports
+  numbers, so a name matched no reply and every pair read as 100% loss
+  while the network carried every packet. Any run generated from names
+  rather than IPs (`netmesh check web01 db01`, or a `--servers` file of
+  names) was affected; the `name=10.0.0.11` form from the docs was not,
+  which is how it hid.
+
+  The agent now resolves each peer's address once at start and uses the
+  numeric form for both sending and attribution -- which also takes a DNS
+  lookup per probe out of the send path. A name that does not resolve on
+  the agent's box becomes a visible per-row note (`cannot resolve ...`)
+  with nothing sent, rather than silence or invented loss. Reproduced
+  with two loopback agents on a `localhost` mesh (100% loss before, clean
+  after) and covered by two new suite cases.
+
 - **`summarize` no longer dies when two pairs are equally asymmetric.**
   The ASYMMETRY list was sorted on `(delta, PairStat, PairStat)` tuples
   directly. Where two pairs tied on delta the comparison fell through to
