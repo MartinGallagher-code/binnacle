@@ -239,6 +239,12 @@ db01=10.0.0.21,10,,10
 `netmesh check` writes one into a temp directory, uses it and deletes it.
 `--keep-mesh PATH` graduates a one-shot into a repeatable run.
 
+Addresses may be names: each agent resolves its peers **once at start**,
+on its own box, and uses the numeric form from then on — replies are
+attributed by source address, so the resolution has to happen where the
+packets are. A name that does not resolve on the agent's box is a visible
+per-row note (`cannot resolve ...`) with nothing sent, never silence.
+
 ## Leaves nothing behind
 
 No package, no daemon, no dotdir, no sysctl. The agent is the tool's own

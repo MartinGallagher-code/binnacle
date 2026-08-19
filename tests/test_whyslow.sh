@@ -323,6 +323,82 @@ run_test "reads a synthetic /proc tree"       t_reads_a_synthetic_proc_tree
 run_test "single snapshot skips rate rules"   t_single_snapshot_skips_rate_rules
 run_test "a full table outranks its drops"    t_a_full_table_outranks_the_drops_it_causes
 run_test "a limit already hit outranks now"   t_a_limit_already_hit_outranks_a_drained_table
+# -- remote execution ---------------------------------------------------
+
+t_ssh_runs_this_file_remotely_over_stdin() {
+    # --ssh feeds this very file to `python3 -` on the host, so nothing is
+    # copied there and nothing is left behind.  The fake shim cds into the
+    # host's sandbox, so a relative --from-facts exercises the remote-side
+    # reading end to end.
+    install_fake_ssh
+    fake_host node01
+    facts_json "$FAKE_ROOT/node01/facts.json"
+    out="$(ws --ssh node01 --ssh-cmd "$FAKE_BIN/ssh" \
+        --from-facts facts.json)"
+    assert_contains "$out" "This box is not slow"
+    log="$(cat "$FAKE_SSH_LOG")"
+    assert_contains "$log" "python3 -"
+    # The transport flags must not travel: the remote side has no host to
+    # forward to, and a loop here would be an ssh storm.
+    assert_not_contains "$log" " --ssh"
+    # Nothing was pushed, so there is nothing to clean up.
+    assert_not_contains "$log" "scp"
+}
+
+t_ssh_passes_the_remote_exit_code_through() {
+    # --exit-code has to keep its meaning through the hop: 20 says
+    # critical, and 20 is what the wrapper on this side must see.
+    install_fake_ssh
+    fake_host node01
+    facts_json "$FAKE_ROOT/node01/facts.json" \
+        'kern.oom=["Out of memory: Killed process 991 (postgres)"]'
+    set +e
+    out="$(ws --ssh node01 --ssh-cmd "$FAKE_BIN/ssh" \
+        --from-facts facts.json --exit-code)"
+    rc=$?
+    set -e
+    assert_status $rc 20
+    assert_contains "$out" "OOM"
+}
+
+t_ssh_names_an_unreachable_host() {
+    # ssh's 255 is not a diagnosis, and must never read like one.
+    install_fake_ssh
+    fake_host_unreachable node09
+    set +e
+    out="$(ws --ssh node09 --ssh-cmd "$FAKE_BIN/ssh" 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 255
+    assert_contains "$out" "never diagnosed"
+}
+
+t_ssh_refuses_no_exec() {
+    set +e
+    out="$(ws --ssh node01 --no-exec 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--no-exec"
+}
+
+t_ssh_refuses_a_report_path() {
+    # `--ssh HOST --csv out.csv` would write out.csv on HOST, which is a
+    # surprise; the refusal has to say what to do instead.
+    set +e
+    out="$(ws --ssh node01 --csv out.csv 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "redirect"
+    assert_no_file "$TEST_TMPDIR/out.csv"
+}
+
+run_test "--ssh runs remotely over stdin"     t_ssh_runs_this_file_remotely_over_stdin
+run_test "--ssh passes the exit code through" t_ssh_passes_the_remote_exit_code_through
+run_test "--ssh names an unreachable host"    t_ssh_names_an_unreachable_host
+run_test "--ssh refuses --no-exec"            t_ssh_refuses_no_exec
+run_test "--ssh refuses a report PATH"        t_ssh_refuses_a_report_path
 run_test "cgroup task limit beats the host"   t_cgroup_task_limit_beats_host_health
 run_test "ceiling thresholds are boundaries"  t_exhaustion_thresholds_are_boundaries
 run_test "ceilings read from a /proc tree"    t_ceilings_are_read_from_a_synthetic_proc_tree

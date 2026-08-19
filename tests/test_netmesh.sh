@@ -106,6 +106,57 @@ EOF
     assert_between "$rtt" 1 200000
 }
 
+t_hostname_addresses_measure_not_100pc_loss() {
+    # A mesh may carry names rather than IPs -- a bare token is its own
+    # address.  Replies are attributed by source address, and recvfrom
+    # only ever reports numbers, so a name left unresolved matched no
+    # reply: every probe went out, every echo came back, and every pair
+    # read 100% loss while the network carried every packet.  The agent
+    # now resolves each peer once at start.
+    cd "$TEST_TMPDIR"
+    nm gen a=localhost:5440 b=localhost:5441 --mesh m.csv --pps 40 \
+        --no-pmtu >/dev/null
+    mkdir -p da db
+    nm agent --mesh m.csv --host a --dir da --interval 2 --duration 4 \
+        --bind 127.0.0.1 &
+    p1=$!
+    nm agent --mesh m.csv --host b --dir db --interval 2 --duration 4 \
+        --bind 127.0.0.1 &
+    p2=$!
+    wait $p1 $p2
+    got="$("$PY" - <<'EOF'
+import csv
+rows = [r for r in csv.DictReader(open("da/report.csv")) if r["dir"] == "tx"]
+sent = sum(int(r["sent"] or 0) for r in rows)
+recv = sum(int(r["recv"] or 0) for r in rows)
+print("ok" if sent > 0 and recv > sent * 0.9 else
+      "bad: sent=%d recv=%d" % (sent, recv))
+EOF
+)"
+    assert_eq "$got" "ok"
+}
+
+t_an_unresolvable_peer_is_a_note_not_silence() {
+    # A name that does not resolve on the agent's box must say so on the
+    # row, with nothing sent -- a quiet row of blanks reads as "measured
+    # and clean", and 100% loss reads as the network's fault.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5450 b=no-such-host.invalid:5451 --mesh m.csv \
+        --pps 40 --no-pmtu >/dev/null
+    mkdir -p da
+    nm agent --mesh m.csv --host a --dir da --interval 1 --duration 2 \
+        --bind 127.0.0.1 >/dev/null 2>&1
+    body="$(cat da/report.csv)"
+    assert_contains "$body" "cannot resolve no-such-host.invalid"
+    got="$("$PY" - <<'EOF'
+import csv
+rows = [r for r in csv.DictReader(open("da/report.csv")) if r["dir"] == "tx"]
+print("ok" if rows and all(int(r["sent"] or 0) == 0 for r in rows) else "bad")
+EOF
+)"
+    assert_eq "$got" "ok"
+}
+
 t_loss_columns_go_blank_not_zero_when_peer_dies() {
     # A pair whose replies dried up must write no RTT at all: averaging a
     # blank in as zero would flatter the baseline.
@@ -468,6 +519,8 @@ run_test "ping-only cannot originate"          t_ping_only_cannot_originate
 run_test "ipv6 refused, not misparsed"         t_ipv6_is_refused_clearly_not_misparsed
 run_test "selftest passes on loopback"         t_selftest_passes_on_loopback
 run_test "agent writes documented columns"     t_agent_writes_documented_columns
+run_test "hostname mesh measures, not 100% loss" t_hostname_addresses_measure_not_100pc_loss
+run_test "unresolvable peer is a note"         t_an_unresolvable_peer_is_a_note_not_silence
 run_test "dead peer leaves rtt blank not 0"    t_loss_columns_go_blank_not_zero_when_peer_dies
 run_test "fleet lifecycle through fake ssh"    t_fleet_lifecycle_through_fake_ssh
 run_test "summarize runs from fixtures"        t_summarize_reads_fixtures_without_a_network

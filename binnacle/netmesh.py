@@ -700,6 +700,7 @@ class PeerState(Stream):
         self.port = port
         self.rate = rate
         self.ping_only = ping_only
+        self.unresolved = None      # why this peer's address is unusable
         self.flows = []
         self.next_flow = 0
         Stream.__init__(self)
@@ -730,6 +731,22 @@ class RxState(object):
     def reset(self):
         self.recv = 0
         self.sent = 0
+
+
+def resolve_addr(addr):
+    """ADDR as the wire will carry it: a name resolved once, an IP as-is.
+
+    The agent needs the numeric form for more than sendto.  Replies are
+    attributed by their source address, and recvfrom only ever reports
+    numbers -- a name left in the mesh would match no reply, and every
+    pair would read as 100% loss while the network carried every packet.
+    Resolving here also keeps DNS out of the send path, which would
+    otherwise pay a lookup per probe.
+    """
+    try:
+        return socket.gethostbyname(addr), None
+    except OSError as exc:
+        return None, getattr(exc, "strerror", None) or str(exc)
 
 
 def _set_df(sock):
@@ -775,8 +792,14 @@ class Agent(object):
             st = PeerState(dst, mesh.index(dst), addr, port, rate,
                            dst in mesh.pingonly)
             if st.ping_only:
+                # ping resolves (and reports) names itself.
                 self.ping_peers[dst] = st
             else:
+                ip, err = resolve_addr(addr)
+                if ip is not None:
+                    st.addr = ip
+                else:
+                    st.unresolved = "cannot resolve %s: %s" % (addr, err)
                 self.peers[dst] = st
         self.rx = {}
         self.by_idx = {}
@@ -872,6 +895,12 @@ class Agent(object):
         return int(time.monotonic() * 1e6)
 
     def send_probe(self, st, now):
+        if st.unresolved:
+            # Re-noted every interval, because reset() clears notes: a
+            # peer that is sending nothing must keep saying why, rather
+            # than reporting a quiet row of blanks.
+            st.note = st.unresolved
+            return
         pkt = self._packet(KIND_REQ, self.my_idx, st.seq, self._now_us(),
                            self.size)
         # Round robin over the buckets rather than a bucket's own pacer:
@@ -1230,7 +1259,8 @@ class Agent(object):
                     if st.next_send <= now:
                         st.next_send = now + step
 
-                    if self.do_pmtu and self.pmtu_supported:
+                    if self.do_pmtu and self.pmtu_supported \
+                            and not st.unresolved:
                         if st.mtu_inflight is not None and now >= st.mtu_deadline:
                             self._pmtu_timeout(st, now)
                         elif st.mtu_inflight is None and st.mtu_next and \

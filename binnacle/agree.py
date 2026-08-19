@@ -4,7 +4,7 @@
 """agree.py -- run a command across a fleet and show who disagrees.
 
 Usage: agree.py [run] [OPTIONS] -- COMMAND...
-       agree.py script PATH [OPTIONS] -- ARGS...   push a script, run it, collect
+       agree.py script PATH|TOOL [OPTIONS] -- ARGS...  push a script, run it, collect
        agree.py hosts  [OPTIONS]                   expand and print the host list
        agree.py doctor [OPTIONS]                   can this fleet be reached?
        agree.py help                               every flag of every verb
@@ -13,7 +13,7 @@ Examples:
   agree.py -H web01,web02,db01 -- rpm -q openssl
   agree.py --hosts prod.txt -- 'sysctl net.core.somaxconn'
   agree.py --hosts 'node[01-24]' --loose -- uname -r
-  agree.py script ./why_slow.py --hosts prod.txt --fleet-csv -- --csv
+  agree.py script why-slow --hosts prod.txt --fleet-csv -- --csv
 
 Options:
   --hosts FILE|SPEC   host list: a file, a range like node[01-24], or - for
@@ -73,9 +73,11 @@ Why this exists
   never answered" is usually the finding, and a tool that prints those to
   stderr and moves on lets you believe you checked them.
 
-  It composes: `agree.py script ./why-slow.py -- --csv` fans a diagnosis
+  It composes: `agree.py script why-slow -- --csv` fans a diagnosis
   across the fleet and groups the hosts by what is wrong with them, which
-  is fleet-wide triage in one command.
+  is fleet-wide triage in one command.  A bare name like that finds the
+  tool installed alongside this file, so it works from a pip install
+  where nobody knows the path; an explicit path still wins.
 
 Robustness properties
   * output is replayed in host-list order, never completion order, so two
@@ -1095,10 +1097,45 @@ def cmd_doctor(args):
     return run_fleet(args, DOCTOR_SCRIPT, label="doctor")
 
 
+def bundled_tools():
+    """The tools installed alongside this file, as their command names."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    names = []
+    try:
+        for fn in sorted(os.listdir(here)):
+            if fn.endswith(".py") and not fn.startswith("_"):
+                names.append(fn[:-3].replace("_", "-"))
+    except OSError:
+        pass
+    return names
+
+
+def resolve_script(spec):
+    """The file to push for SPEC.
+
+    A path that names a file is taken literally.  Failing that, a bare
+    name -- no directory part -- is looked up among the tools installed
+    alongside this file, hyphen or underscore, `.py` optional.  That is
+    what makes `agree script why-slow` work after `pip install binnacle`,
+    where the caller has no idea which site-packages directory holds
+    why_slow.py -- but this file is in it.
+    """
+    if os.path.isfile(spec):
+        return spec
+    if os.path.dirname(spec):
+        die("no such script: %s" % spec)
+    base = spec[:-3] if spec.endswith(".py") else spec
+    cand = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        base.replace("-", "_") + ".py")
+    if os.path.isfile(cand):
+        return cand
+    tools = bundled_tools()
+    die("no such script or bundled tool: %s%s"
+        % (spec, "  (bundled: %s)" % ", ".join(tools) if tools else ""))
+
+
 def cmd_script(args):
-    path = args.script_path
-    if not os.path.isfile(path):
-        die("no such script: %s" % path)
+    path = resolve_script(args.script_path)
     remote = "%s/%s" % (args.remote_dir, os.path.basename(path))
     extra = " ".join(shlex.quote(a) for a in args.command_argv)
     command = "%s %s" % (shlex.quote(remote), extra) if extra else \
@@ -1249,8 +1286,10 @@ def build_parser():
     _add_common(r)
     r.set_defaults(func=cmd_run)
 
-    s = sub.add_parser("script", help="push a script, run it, collect output")
-    s.add_argument("script_path", metavar="PATH")
+    s = sub.add_parser("script", help="push a script (a path, or the name "
+                       "of a bundled tool like why-slow), run it, collect "
+                       "output")
+    s.add_argument("script_path", metavar="PATH|TOOL")
     _add_common(s)
     s.set_defaults(func=cmd_script)
 

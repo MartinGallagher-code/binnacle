@@ -8,7 +8,7 @@ agree, 3 do not, here is the diff.
 ```bash
 agree -H 'node[01-24]' -- rpm -q openssl
 agree --hosts prod.txt --loose -- uname -r
-agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 agree hosts -H 'rack[a-c]-node[01-04]'      # expand without running anything
 agree doctor --hosts prod.txt               # can each host be reached and used?
 ```
@@ -188,10 +188,20 @@ collects files after, and `agree script PATH` is the sugar for the whole
 cycle: push, `chmod +x`, run, collect, clean up.
 
 ```bash
-agree script ./why_slow.py --hosts prod.txt --fleet-csv -- --csv --interval 2
+agree script why-slow --hosts prod.txt --fleet-csv -- --csv --interval 2
 ```
 
 This is the reason `agree` exists in the same distribution as the others.
+
+`why-slow` there is a **name, not a path**. A bare name — no directory
+part — is looked up among the tools installed alongside `agree` itself,
+hyphen or underscore, `.py` optional, so `why-slow`, `why_slow` and
+`why_slow.py` all find the same file. That matters after
+`pip install binnacle`, where the sources live in whichever
+`site-packages` directory pip chose and nobody should have to go looking
+for it. An explicit path always wins, and a name that matches neither a
+file nor a bundled tool fails with the list of tools that would have
+matched.
 
 ### --merge-csv: fleet-wide triage
 
