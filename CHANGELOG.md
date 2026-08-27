@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-08-27
+
 ### Fixed
 
 - **`netmesh` no longer reports 100% loss when the mesh holds hostnames.**
@@ -821,7 +825,8 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
-[Unreleased]: https://github.com/MartinGallagher-code/binnacle/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/MartinGallagher-code/binnacle/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/MartinGallagher-code/binnacle/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.1.0...v0.2.0
