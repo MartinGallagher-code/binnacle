@@ -88,6 +88,10 @@ Issues = "https://github.com/MartinGallagher-code/binnacle/issues"
 # hyphenated because that is how it reads in a sentence; the module under
 # it has to be why_slow because Python says so.
 [project.scripts]
+# The index first: `binnacle` is the housing rather than a ninth
+# instrument -- it lists what is installed and prints every tool's help,
+# so a new user has one name to remember instead of eight.
+binnacle = "binnacle.binnacle:main"
 why-slow = "binnacle.why_slow:main"
 agree = "binnacle.agree:main"
 logtriage = "binnacle.logtriage:main"

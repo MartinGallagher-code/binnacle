@@ -28,6 +28,17 @@ pip install binnacle
 
 No dependencies. Python 3.6+. No agents, no daemons, no dotdirs, no root.
 
+One more command comes with them, and it is the one to run first:
+
+```bash
+binnacle          # what is installed here, and what version each tool says it is
+binnacle help     # every tool's --help, on one page
+```
+
+`binnacle` is the housing rather than a ninth instrument -- one name to
+remember instead of eight, and the only thing that will tell you a module
+was left behind at an older version.
+
 ## Diagnose, don't dump
 
 `top` and `sar` show you numbers, `pssh` shows you outputs, `grep` shows you

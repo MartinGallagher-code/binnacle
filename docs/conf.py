@@ -23,6 +23,9 @@ sys.path.insert(0, REPO_ROOT)
 import binnacle  # noqa: E402
 from binnacle import (agree, during, logtriage, netmesh,  # noqa: E402
                       reachable, resolve, skew, why_slow)
+# Aliased: a bare `binnacle` here would rebind the package name above,
+# and `binnacle.VERSION` two lines down would then be the module's.
+from binnacle import binnacle as binnacle_cli  # noqa: E402
 
 project = "binnacle"
 author = "Martin J. Gallagher"
@@ -49,9 +52,11 @@ suppress_warnings = ["myst.xref_missing"]
 
 
 # Each tool, and how to reach its parser. Two shapes exist: a single parser
-# (why-slow, logtriage, reachable) and a verb parser with subcommands
-# (agree, netmesh).
+# (binnacle, why-slow, logtriage, reachable) and a verb parser with
+# subcommands (agree, netmesh).  `binnacle` leads because it is the index:
+# it is the one command that names the others.
 TOOLS = [
+    ("binnacle", binnacle_cli, False),
     ("why-slow", why_slow, False),
     ("agree", agree, True),
     ("logtriage", logtriage, False),

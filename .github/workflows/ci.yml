@@ -138,16 +138,18 @@ jobs:
           python -m build
           python -m twine check dist/*
 
-      # A pip install must put five working commands on PATH -- that is the
-      # documented install path, and metadata alone does not prove it.
+      # A pip install must put all nine working commands on PATH -- that is
+      # the documented install path, and metadata alone does not prove it.
+      # Three of them (resolve, during, skew) used to ship unexercised.
       - name: Install the wheel and smoke-test every entry point
         run: |
           python -m pip install dist/*.whl
-          why-slow --version
-          agree --version
-          logtriage --version
-          netmesh --version
-          reachable --version
+          for cmd in binnacle why-slow agree logtriage netmesh reachable resolve during skew; do
+            "$cmd" --version
+          done
+          # binnacle is the one that checks the other eight agree on a
+          # version, and exits 1 if they do not.
+          binnacle
           # Drive each one far enough to prove it actually runs.
           why-slow --interval 0 --quiet
           logtriage --mask 'Jan  7 12:34:56 h sshd[1]: fail from 10.0.0.1'

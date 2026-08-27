@@ -36,11 +36,12 @@ jobs:
       - name: Smoke-test the built wheel
         run: |
           python -m pip install dist/*.whl
-          why-slow --version
-          agree --version
-          logtriage --version
-          netmesh --version
-          reachable --version
+          for cmd in binnacle why-slow agree logtriage netmesh reachable resolve during skew; do
+            "$cmd" --version
+          done
+          # Every console script answers, and they all answer the same
+          # version -- binnacle exits 1 if one was left behind.
+          binnacle
           netmesh selftest --for 3
 
       - name: Upload the distributions

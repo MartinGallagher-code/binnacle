@@ -6,7 +6,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`binnacle` — one command that says what is installed and prints every
+  tool's help.** Until now the package put eight commands on your PATH and
+  nothing that named them. `pip install binnacle` gave you `binnacle` as a
+  distribution name that was not a command, so the obvious first thing to
+  type did nothing, and finding out what you had meant reading the README
+  or listing a `site-packages` directory. Recovering the eight names was a
+  precondition for using any of them.
+
+  `binnacle` is the housing rather than a ninth instrument: it lists what
+  is beside it, and `binnacle help` concatenates every tool's `--help`,
+  verbs included, so one page (~1,400 lines) is the whole manual for the
+  package *as installed* rather than as documented somewhere else.
+  `binnacle help TOOL` narrows it to one, accepting `why-slow`, `why_slow`
+  or `why_slow.py` since a reader who has only seen the file should not
+  have to guess the command.
+
+  The version column is per-tool on purpose, and that is the part worth
+  reading twice. Each file carries its own `VERSION` because each is
+  routinely copied to a machine that has never heard of this package, and
+  `agree` groups a fleet by what `--version` reports — so one module left
+  behind at an older number reads as version skew across the whole fleet
+  rather than as a bad install on one box, and the hunt starts in the
+  wrong place. Every instrument is therefore asked separately, a
+  disagreement prints as `SKEW` naming the odd file, an unimportable file
+  prints as `BROKEN` without costing the other seven their row, and either
+  makes the exit status 1. `binnacle >/dev/null` is a usable post-install
+  check, and `PUBLISHING.md` now uses it as the fastest proof that a
+  version bump reached all eleven places.
+
+  It runs nothing to answer: formatting a tool's help builds its argparse
+  parser, which does not execute the tool, touch the network or read
+  `/proc`. `--paths` names the file each instrument was loaded from, for
+  when two installs shadow each other. This is the one module allowed to
+  read its siblings — it is not an instrument, its whole subject is which
+  instruments are present, and copying it somewhere on its own would be
+  meaningless — and it still does not `import binnacle`: it loads each
+  file from the directory it lives in, so it reports the tools actually
+  beside it rather than whichever ones a `sys.path` search found first.
+
+### Fixed
+
+- **CI shipped three console scripts it never ran.** The wheel smoke-test
+  in both `ci.yml` and `publish.yml` drove five of the eight entry points,
+  so `resolve`, `during` and `skew` could have been broken on PATH by a
+  packaging change and gone out anyway — `PUBLISHING.md`'s own checklist
+  says every one of them. Both workflows now loop over all nine and then
+  run `binnacle`, which additionally fails the build if the versions
+  disagree.
 
 ## [0.4.0] - 2026-08-27
 

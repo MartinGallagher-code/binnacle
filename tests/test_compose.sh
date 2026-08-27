@@ -234,7 +234,7 @@ def walk(parser, flags, seen):
 
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
-             "during", "skew"):
+             "during", "skew", "binnacle"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -446,7 +446,8 @@ VERBATIM = [
     ("read_pressure", "why_slow.py", "during.py"),
     ("_read", "why_slow.py", "resolve.py"),
     ("_read", "why_slow.py", "skew.py"),
-    # Duplicated into all eight, so all eight are held to it.
+    # Duplicated into all eight instruments and into the index, so all
+    # nine files are held to it.
     ("_stdio_safe", "why_slow.py", "agree.py"),
     ("_stdio_safe", "why_slow.py", "logtriage.py"),
     ("_stdio_safe", "why_slow.py", "netmesh.py"),
@@ -454,6 +455,7 @@ VERBATIM = [
     ("_stdio_safe", "why_slow.py", "resolve.py"),
     ("_stdio_safe", "why_slow.py", "during.py"),
     ("_stdio_safe", "why_slow.py", "skew.py"),
+    ("_stdio_safe", "why_slow.py", "binnacle.py"),
     ("_WriteGuard", "why_slow.py", "agree.py"),
     ("_WriteGuard", "why_slow.py", "logtriage.py"),
     ("_WriteGuard", "why_slow.py", "netmesh.py"),

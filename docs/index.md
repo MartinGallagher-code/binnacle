@@ -16,6 +16,7 @@ composing
 :maxdepth: 2
 :caption: The tools
 
+tools/binnacle
 tools/why-slow
 tools/agree
 tools/logtriage
@@ -37,6 +38,10 @@ publishing
 ```
 
 ## The eight
+
+Start with [`binnacle`](tools/binnacle.md), which is the housing rather than
+a ninth instrument: it lists what is installed here and prints every tool's
+help on one page, so there is one name to remember instead of eight.
 
 | Tool | The question it answers |
 |---|---|
