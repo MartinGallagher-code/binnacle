@@ -27,6 +27,8 @@ authors = [{ name = "Martin J. Gallagher" }]
 maintainers = [{ name = "Martin J. Gallagher" }]
 keywords = [
     "sysadmin",
+    "work-queue",
+    "lease",
     "diagnostics",
     "troubleshooting",
     "performance",
@@ -100,6 +102,7 @@ reachable = "binnacle.reachable:main"
 resolve = "binnacle.resolve:main"
 during = "binnacle.during:main"
 skew = "binnacle.skew:main"
+muster = "binnacle.muster:main"
 
 [tool.setuptools]
 packages = ["binnacle"]

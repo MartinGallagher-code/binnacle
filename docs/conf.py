@@ -21,8 +21,8 @@ REPO_ROOT = os.path.dirname(DOCS_DIR)
 sys.path.insert(0, REPO_ROOT)
 
 import binnacle  # noqa: E402
-from binnacle import (agree, during, logtriage, netmesh,  # noqa: E402
-                      reachable, resolve, skew, why_slow)
+from binnacle import (agree, during, logtriage, muster,  # noqa: E402
+                      netmesh, reachable, resolve, skew, why_slow)
 # Aliased: a bare `binnacle` here would rebind the package name above,
 # and `binnacle.VERSION` two lines down would then be the module's.
 from binnacle import binnacle as binnacle_cli  # noqa: E402
@@ -53,7 +53,7 @@ suppress_warnings = ["myst.xref_missing"]
 
 # Each tool, and how to reach its parser. Two shapes exist: a single parser
 # (binnacle, why-slow, logtriage, reachable) and a verb parser with
-# subcommands (agree, netmesh).  `binnacle` leads because it is the index:
+# subcommands (agree, netmesh, muster).  `binnacle` leads because it is the index:
 # it is the one command that names the others.
 TOOLS = [
     ("binnacle", binnacle_cli, False),
@@ -65,6 +65,7 @@ TOOLS = [
     ("resolve", resolve, False),
     ("during", during, False),
     ("skew", skew, False),
+    ("muster", muster, True),
 ]
 
 
@@ -145,6 +146,8 @@ def _generate_cli_reference():
         "`REACHABLE_USER`, `REACHABLE_SSH`, `REACHABLE_PING` |",
         "| `during` | `DURING_SECONDS`, `DURING_INTERVAL`, `DURING_SETTLE`, "
         "`DURING_MIN_SEVERITY`, `DURING_PROC`, `DURING_SYS`, `NO_COLOR` |",
+        "| `muster` | `MUSTER_POOL`, `MUSTER_LEASE`, `MUSTER_AS`, "
+        "`MUSTER_LOCK_TIMEOUT`, `MUSTER_STALE_LOCK` |",
         "| `resolve` | `RESOLVE_SERVERS`, `RESOLVE_TYPES`, "
         "`RESOLVE_TIMEOUT`, `RESOLVE_ATTEMPTS`, `RESOLVE_MIN_SEVERITY`, "
         "`RESOLVE_CONF`, `RESOLVE_HOSTS`, `NO_COLOR` |",

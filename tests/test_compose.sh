@@ -234,7 +234,7 @@ def walk(parser, flags, seen):
 
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
-             "during", "skew", "binnacle"):
+             "during", "skew", "binnacle", "muster"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -456,6 +456,7 @@ VERBATIM = [
     ("_stdio_safe", "why_slow.py", "during.py"),
     ("_stdio_safe", "why_slow.py", "skew.py"),
     ("_stdio_safe", "why_slow.py", "binnacle.py"),
+    ("_stdio_safe", "why_slow.py", "muster.py"),
     ("_WriteGuard", "why_slow.py", "agree.py"),
     ("_WriteGuard", "why_slow.py", "logtriage.py"),
     ("_WriteGuard", "why_slow.py", "netmesh.py"),
@@ -463,7 +464,9 @@ VERBATIM = [
     ("_WriteGuard", "why_slow.py", "resolve.py"),
     ("_WriteGuard", "why_slow.py", "during.py"),
     ("_WriteGuard", "why_slow.py", "skew.py"),
+    ("_WriteGuard", "why_slow.py", "muster.py"),
     ("expand_range", "agree.py", "reachable.py"),
+    ("expand_range", "agree.py", "muster.py"),
     ("split_host_port", "agree.py", "reachable.py"),
     ("is_ipv6", "agree.py", "reachable.py"),
 ]

@@ -8,6 +8,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`muster` — hand out work from a pool, once each, and know what is
+  left.** Some jobs are a list and a promise: forty hosts to patch, nine
+  hundred files to re-encode, every switch in a rack to walk up to. The
+  work goes to whoever is free, it must happen once each, and the thing
+  that actually goes wrong is never the work — it is the bookkeeping. Two
+  people take the same host. A laptop shuts and eleven items are held by
+  nobody, forever. At the end nobody can say which twelve of the forty are
+  left, so the whole list gets re-walked to be sure.
+
+  `muster` is that bookkeeping and nothing else. It does not do the work,
+  does not know what the work is, and never touches the items — they are
+  strings to it. `add` fills a pool (a file, stdin, or a `web[01-40]`
+  range, expanded the way `agree` and `reachable` already expand one),
+  `take` leases items and writes a ticket, `done` closes them, `status`
+  says what is left.
+
+  **The lease is the whole idea, and nothing runs to enforce it.** `take`
+  marks items held until a deadline; if you never finish, the lease simply
+  runs out and the items are available again. An expired lease is not a
+  lease, worked out from the timestamps as the pool is opened — so there is
+  no daemon, no reaper and no cleanup step, and the only thing left behind
+  is the pool file you named. That is what keeps a stateful tool inside
+  this package's stateless rule.
+
+  **Finishing late is accepted and reported, not swallowed or refused.**
+  If your lease lapsed and someone else now holds the item, `done` still
+  marks it complete — the work happened, and refusing it would send the
+  pool out to have it done twice more — but prints a `CONFLICT` naming both
+  holders, because two people on one host is precisely what the lease
+  existed to prevent. A lapse with nobody else holding it is a quieter
+  `LATE`. Either makes the exit status 1.
+
+  **`attempts` is what makes a bad item visible.** An item taken four times
+  and finished none of them is not a scheduling problem, it is a host
+  nobody can work on, and it would absorb the pool forever; `status` lists
+  it under `STUCK` and exits 1, which makes the command a cron check.
+
+  The completed share leads the report and is rounded honestly: 399 of 400
+  prints as `>99%` rather than `100%`, and 1 of 400 as `<1%` rather than
+  `0%`, because either would report the job finished, or never started,
+  when neither is true — and that number is the one that gets pasted into a
+  status mail. `status --csv` gives the same figures as one row for
+  something that will do arithmetic on them.
+
+  **A pool is meant to be shared between machines.** Locking is an
+  `O_EXCL` sentinel beside the pool rather than `flock`, since flock over
+  NFS is not dependable while `O_EXCL` create is the one primitive NFS has
+  always had to get right; every write is a tempfile renamed into place, so
+  a reader never sees half a pool; and a lock whose holder died is broken
+  after `--stale-lock` rather than blocking the fleet. Twelve concurrent
+  takes over one pool were verified to hand out 120 items with no overlap.
+  Leases are wall-clock deadlines, so workers have to roughly agree about
+  the time — which is what `skew` is for, and the docs say so.
+
+  Thirty-four suite cases cover it, including the concurrency, the expiry,
+  both late-completion paths, stale-lock breaking, and the rounding.
+
+
 - **`binnacle` — one command that says what is installed and prints every
   tool's help.** Until now the package put eight commands on your PATH and
   nothing that named them. `pip install binnacle` gave you `binnacle` as a
