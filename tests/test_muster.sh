@@ -15,6 +15,120 @@ mu() { "$PY" "$MU" "$@"; }
 # linter's own name either: that is read as a directive.)
 items() { grep -v '^#' "$1"; }
 
+t_a_malformed_duration_is_refused_not_a_traceback() {
+    # "." and "1.2.3" are runs of digits and dots that are not numbers;
+    # both reached float() and raised a bare ValueError at the user.
+    cd "$TEST_TMPDIR"
+    mu add 'a[1-2]' >/dev/null 2>&1
+    for bad in . 1.2.3s; do
+        set +e
+        out="$(mu take 1 --lease "$bad" 2>&1)"; rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "bad duration"
+        assert_not_contains "$out" "Traceback"
+        assert_not_contains "$out" "ValueError"
+    done
+}
+
+t_the_shared_flags_work_before_the_verb_too() {
+    # `muster --pool p.csv status` is what people type. It used to fail
+    # with argparse blaming the verb for an invalid choice.
+    cd "$TEST_TMPDIR"
+    mu add 'a[1-3]' --pool mine.csv >/dev/null 2>&1
+    out="$(mu --pool mine.csv status)"
+    assert_contains "$out" "3 item(s)"
+    # And one given after the verb still wins over one given before.
+    mu add 'b[1-5]' --pool other.csv >/dev/null 2>&1
+    out="$(mu --pool mine.csv status --pool other.csv)"
+    assert_contains "$out" "5 item(s)"
+}
+
+t_a_ticket_that_cannot_be_written_puts_the_items_back() {
+    # The pool is written before the ticket, so a failed ticket left the
+    # items leased to somebody with no record of which ones -- stuck for
+    # the whole lease. A typo'd -o is enough to hit it.
+    cd "$TEST_TMPDIR"
+    mu add 'a[1-3]' >/dev/null 2>&1
+    set +e
+    out="$(mu take 2 -o /nonexistent-dir/t.txt 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "put back"
+    assert_eq "$(mu list --state held | tail -n +2 | wc -l | tr -d ' ')" "0"
+    assert_eq "$(mu list --state available | tail -n +2 | wc -l | tr -d ' ')" "3"
+}
+
+t_a_hash_inside_a_name_is_part_of_the_name() {
+    # Splitting on a bare "#" turned file#1 and file#2 into two copies of
+    # "file": one item where there were two, and the other never worked
+    # on. A comment opens the line or follows whitespace.
+    cd "$TEST_TMPDIR"
+    printf 'file#1\nfile#2\nreal   # a comment\n# whole line\n' > in.txt
+    mu add in.txt >/dev/null 2>&1
+    body="$(mu list --state any)"
+    assert_contains "$body" "file#1"
+    assert_contains "$body" "file#2"
+    assert_contains "$body" "real"
+    assert_not_contains "$body" "a comment"
+    assert_not_contains "$body" "whole line"
+    assert_eq "$(mu list --state any | tail -n +2 | wc -l | tr -d ' ')" "3"
+}
+
+t_a_directory_is_not_a_list_of_items() {
+    cd "$TEST_TMPDIR"
+    mkdir -p somedir
+    set +e
+    out="$(mu add somedir 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "is a directory"
+    assert_no_file "muster.csv"
+}
+
+t_a_held_row_with_no_deadline_is_not_a_lease() {
+    # Nothing could ever free it, so the item was held forever -- and the
+    # report counted down from the epoch: "next expires in -20692d23h".
+    cd "$TEST_TMPDIR"
+    printf 'item,state,holder,lease_id,taken_ts,expires_ts,done_ts,attempts,note\n' > p.csv
+    printf 'x1,held,someone,abc,,,,1,\n' >> p.csv
+    out="$(mu status --pool p.csv)"
+    assert_not_contains "$out" "-20692d"
+    assert_contains "$out" "RECLAIMED"
+    assert_eq "$(mu list --pool p.csv --state available | tail -n +2 | wc -l | tr -d ' ')" "1"
+}
+
+t_two_rows_for_one_item_are_refused() {
+    # add() cannot make these and writes are locked, so a duplicate means
+    # a hand edit or a merge. The rows disagree about state, every count
+    # is wrong, and only one would ever be updated again.
+    cd "$TEST_TMPDIR"
+    printf 'item,state,holder,lease_id,taken_ts,expires_ts,done_ts,attempts,note\n' > p.csv
+    printf 'y1,available,,,,,,0,\ny1,done,me,,,,111,1,\n' >> p.csv
+    set +e
+    out="$(mu status --pool p.csv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "twice"
+    assert_contains "$out" "y1"
+}
+
+t_a_pool_error_does_not_strand_the_lock() {
+    # The caller's finally is not in force until _open has returned, so a
+    # pool that would not parse left its lock behind -- and every later
+    # run then waited out --stale-lock. On a shared pool that is the
+    # whole fleet stopped by one bad row.
+    #
+    # Triggered with a file that is not a pool at all, rather than with
+    # the duplicate rows above: that refusal is itself a fix from this
+    # same round, so using it here would have made this case pass
+    # against the very code it is meant to catch.
+    cd "$TEST_TMPDIR"
+    printf 'web01\nweb02\n' > notapool.txt
+    mu status --pool notapool.txt >/dev/null 2>&1 || true
+    assert_no_file "notapool.txt.lock"
+}
+
 t_add_expands_ranges_and_ignores_duplicates() {
     cd "$TEST_TMPDIR"
     mu add 'web[01-05]' >/dev/null 2>&1
@@ -384,6 +498,14 @@ t_help_prints_every_verbs_flags() {
 }
 
 echo "muster"
+run_test "a malformed duration is refused"    t_a_malformed_duration_is_refused_not_a_traceback
+run_test "shared flags work before the verb" t_the_shared_flags_work_before_the_verb_too
+run_test "an unwritable ticket puts back"    t_a_ticket_that_cannot_be_written_puts_the_items_back
+run_test "a hash in a name is part of it"    t_a_hash_inside_a_name_is_part_of_the_name
+run_test "a directory is not a list"         t_a_directory_is_not_a_list_of_items
+run_test "a held row with no deadline"       t_a_held_row_with_no_deadline_is_not_a_lease
+run_test "two rows for one item are refused" t_two_rows_for_one_item_are_refused
+run_test "a pool error strands no lock"      t_a_pool_error_does_not_strand_the_lock
 run_test "add expands ranges, skips dupes"    t_add_expands_ranges_and_ignores_duplicates
 run_test "add reads a file and stdin"         t_add_reads_a_file_and_stdin
 run_test "a mistyped path is not an item"     t_a_mistyped_path_is_not_silently_an_item
