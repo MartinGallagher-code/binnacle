@@ -944,7 +944,11 @@ class Agent(object):
                 if st is None:
                     st = self.rx[peer] = RxState(peer)
                 st.recv += 1
-            reply = self._packet(KIND_REP, idx, seq, t_send, rlen, flags)
+            # Stamp our own index, not the requester's. The reply has
+            # to say who it is *from*: echoing idx back only said who
+            # it was for, which the receiver already knew.
+            reply = self._packet(KIND_REP, self.my_idx, seq, t_send,
+                                 rlen, flags)
             try:
                 self.sock.sendto(reply, src)
                 if counted:
@@ -954,22 +958,46 @@ class Agent(object):
             return
 
         # A reply to us.
-        peer = self.by_idx.get(idx if idx != self.my_idx else self.my_idx)
         rtt = self._now_us() - t_send
         if rtt < 0:
             return
-        if flags & FLAG_PMTU:
-            self._pmtu_reply(src, seq, plen)
+        st = self._reply_peer(idx, src)
+        if st is None:
             return
-        # Attribute by source address, which is authoritative for a reply.
+        if flags & FLAG_PMTU:
+            self._pmtu_reply(st, seq)
+            return
         # The bucket is the socket it arrived on, so nothing about the
         # bucket has to be carried on the wire.
+        st.record(rtt)
+        if flow is not None and flow < len(st.flows):
+            st.flows[flow].record(rtt)
+        return
+
+    def _reply_peer(self, idx, src):
+        """Whose reply this is, by the index the responder stamped in it.
+
+        Not by its source address.  A peer answers from whichever of its
+        addresses the route back to us selects, and that is not always the
+        address we probed: a multi-homed box, or a name that resolves to a
+        different interface than the return route picks, answers from an
+        address the mesh never mentions.  Matching on it discarded every
+        reply and reported 100% loss on a link that was carrying every
+        packet in both directions -- while the peer's own rx count, which
+        is attributed by index, showed them all arriving.  Forward loss
+        near zero against total loss of 100% is that bug, not a network.
+
+        The address match stays as the fallback, for a reply from an agent
+        of an older build: it echoes our own index rather than its own,
+        which never names one of our peers, so nothing is misattributed.
+        """
+        st = self.peers.get(self.by_idx.get(idx))
+        if st is not None:
+            return st
         for st in self.peers.values():
             if st.addr == src[0] and st.port == src[1]:
-                st.record(rtt)
-                if flow is not None and flow < len(st.flows):
-                    st.flows[flow].record(rtt)
-                return
+                return st
+        return None
 
     # -- path MTU ---------------------------------------------------------
     def _pmtu_start(self, st, now):
@@ -1006,16 +1034,19 @@ class Agent(object):
                 st.mtu_inflight = None
         return
 
-    def _pmtu_reply(self, src, seq, plen):
-        for st in self.peers.values():
-            if st.addr == src[0] and st.mtu_inflight == seq:
-                st.mtu_best = seq
-                if seq <= 1500 - IP_HDR_UDP:
-                    st.mtu_saw_small = True
-                st.mtu_lo = seq + 1
-                st.mtu_inflight = None
-                self._pmtu_step(st, time.monotonic())
-                return
+    def _pmtu_reply(self, st, seq):
+        # The peer is already resolved by index; only the size in flight
+        # is still in question.  Matching this one on the source address
+        # too meant a multi-homed peer's path MTU never converged either,
+        # and every size read as a black hole.
+        if st.mtu_inflight != seq:
+            return
+        st.mtu_best = seq
+        if seq <= 1500 - IP_HDR_UDP:
+            st.mtu_saw_small = True
+        st.mtu_lo = seq + 1
+        st.mtu_inflight = None
+        self._pmtu_step(st, time.monotonic())
 
     def _pmtu_timeout(self, st, now):
         st.mtu_tries += 1

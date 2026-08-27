@@ -31,17 +31,26 @@ usual cause of `invalid-publisher`.
 
 ## Cutting a release
 
-1. Update the version in **all ten** places — they must agree, and the
-   suite fails if they do not:
+1. Update the version in **all eleven** places — they must agree, and
+   the suite fails if they do not:
    - `pyproject.toml` → `version`
    - `binnacle/__init__.py` → `VERSION`
    - each tool's own `VERSION`, in all eight modules
+   - `binnacle/binnacle.py` → `VERSION`
 
    The eight are not redundant. A tool is routinely `scp`'d to a machine
    that has never heard of this package, where its own `VERSION` is the
    only version there is — and `agree` groups a fleet by what `--version`
    reports, so a module left behind at the old number reads as version
    skew across the fleet rather than as a release that was cut carelessly.
+
+   `binnacle` is the eleventh because it is the command that reports
+   the other ten: it compares each instrument's `VERSION` against its
+   own and calls a disagreement `SKEW`, so a `binnacle` left behind
+   would accuse the eight tools that were bumped correctly. The
+   `binnacle/*.py` glob below already covers it — and running
+   `binnacle` after the bump is the fastest check that all eleven
+   moved, since it exits 1 if they did not.
 
    ```bash
    sed -i 's/^VERSION = "0\.2\.0"$/VERSION = "0.2.1"/' \
@@ -72,8 +81,7 @@ python -m twine check dist/*
 
 # The published artifact must be a working tool, not just valid metadata.
 python -m pip install dist/*.whl
-why-slow --version && agree --version && logtriage --version
-netmesh --version && reachable --version
+binnacle          # all eleven versions agree, and it exits 0
 netmesh selftest
 ```
 

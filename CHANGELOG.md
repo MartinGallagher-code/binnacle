@@ -6,7 +6,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`binnacle` — one command that says what is installed and prints every
+  tool's help.** Until now the package put eight commands on your PATH and
+  nothing that named them. `pip install binnacle` gave you `binnacle` as a
+  distribution name that was not a command, so the obvious first thing to
+  type did nothing, and finding out what you had meant reading the README
+  or listing a `site-packages` directory. Recovering the eight names was a
+  precondition for using any of them.
+
+  `binnacle` is the housing rather than a ninth instrument: it lists what
+  is beside it, and `binnacle help` concatenates every tool's `--help`,
+  verbs included, so one page (~1,400 lines) is the whole manual for the
+  package *as installed* rather than as documented somewhere else.
+  `binnacle help TOOL` narrows it to one, accepting `why-slow`, `why_slow`
+  or `why_slow.py` since a reader who has only seen the file should not
+  have to guess the command.
+
+  The version column is per-tool on purpose, and that is the part worth
+  reading twice. Each file carries its own `VERSION` because each is
+  routinely copied to a machine that has never heard of this package, and
+  `agree` groups a fleet by what `--version` reports — so one module left
+  behind at an older number reads as version skew across the whole fleet
+  rather than as a bad install on one box, and the hunt starts in the
+  wrong place. Every instrument is therefore asked separately, a
+  disagreement prints as `SKEW` naming the odd file, an unimportable file
+  prints as `BROKEN` without costing the other seven their row, and either
+  makes the exit status 1. `binnacle >/dev/null` is a usable post-install
+  check, and `PUBLISHING.md` now uses it as the fastest proof that a
+  version bump reached all eleven places.
+
+  It runs nothing to answer: formatting a tool's help builds its argparse
+  parser, which does not execute the tool, touch the network or read
+  `/proc`. `--paths` names the file each instrument was loaded from, for
+  when two installs shadow each other. This is the one module allowed to
+  read its siblings — it is not an instrument, its whole subject is which
+  instruments are present, and copying it somewhere on its own would be
+  meaningless — and it still does not `import binnacle`: it loads each
+  file from the directory it lives in, so it reports the tools actually
+  beside it rather than whichever ones a `sys.path` search found first.
+
+### Fixed
+
+- **`netmesh` reported 100% loss against a peer that answers from a
+  different address than the mesh names.** The symptom is unmistakable
+  once you know it: forward loss near zero and total loss at 100% on the
+  same pair, on a link that is carrying every packet in both directions.
+  `summarize` printed it as `loss 100.00% (fwd 1.2%)`, and the LOSS line
+  split it as almost all "on the way back".
+
+  Replies were attributed by matching the reply's source address against
+  the address the mesh gave for that peer. A peer does not get to choose
+  that address: it answers from whichever of its own the return route
+  selects, and on a multi-homed box — or one whose name resolves to a
+  different interface than the route back picks — that is not the address
+  we probed. Every reply then matched no peer and was dropped, so `recv`
+  stayed at zero while `sent` climbed.
+
+  What made it read as a network fault rather than a bug is that the
+  *other* direction was accounted correctly: the receiver's own `rx`
+  count is attributed by mesh index, not by address, so it showed every
+  probe arriving. Forward loss is computed from that count, so the pair
+  reported "your packets arrive, their answers do not" — which is a real
+  network failure mode, and sends you looking at return-path routing on a
+  fabric that is fine.
+
+  The reply now carries the responder's own mesh index instead of echoing
+  the requester's back, which only ever said who the reply was *for* —
+  something the receiver already knew — and left the source address as
+  the sole clue to who it was *from*. Attribution keys on that index; the
+  address match remains as a fallback so a reply from an older agent is
+  still counted, and since that reply echoes our own index it can never
+  name one of our peers, nothing is misattributed.
+
+  The path-MTU echo matched on the source address the same way, so the
+  same peer never converged: every size read as a black hole and the pair
+  reported no path MTU at all. It is now resolved by index too. Both are
+  covered by suite cases that fail against the previous code.
+
+- **CI shipped three console scripts it never ran.** The wheel smoke-test
+  in both `ci.yml` and `publish.yml` drove five of the eight entry points,
+  so `resolve`, `during` and `skew` could have been broken on PATH by a
+  packaging change and gone out anyway — `PUBLISHING.md`'s own checklist
+  says every one of them. Both workflows now loop over all nine and then
+  run `binnacle`, which additionally fails the build if the versions
+  disagree.
 
 ## [0.4.0] - 2026-08-27
 

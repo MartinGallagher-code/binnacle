@@ -14,6 +14,12 @@ one holds eight:
     during      what limited this run, and can you trust the number?
     skew        does this box know what time it is?
 
+A ninth console script, `binnacle`, comes with them and is not one of
+them: it is the housing rather than an instrument.  It lists what is
+installed here with each tool's own version and prints every tool's
+--help on one page.  TOOLS below stays the eight, because it is the map
+of the instruments.
+
 Each is a complete standalone program with no imports from its siblings and
 no dependencies beyond the standard library, because they are routinely
 copied onto machines that have never heard of this package.  Importing this
@@ -26,7 +32,10 @@ __version__ = VERSION
 
 __all__ = ["VERSION", "TOOLS"]
 
-#: The console scripts this distribution installs, and what each answers.
+#: The eight instruments, and what each answers.  The `binnacle` command
+#: reads this for the order and the wording of its table, so a tool added
+#: to the package and not to this map still lists -- without a
+#: description, which is the visible tell that it was missed here.
 TOOLS = {
     "why-slow": "why is this box slow?",
     "agree": "which hosts in this fleet disagree with the rest?",
