@@ -49,6 +49,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`netmesh` reported 100% loss against a peer that answers from a
+  different address than the mesh names.** The symptom is unmistakable
+  once you know it: forward loss near zero and total loss at 100% on the
+  same pair, on a link that is carrying every packet in both directions.
+  `summarize` printed it as `loss 100.00% (fwd 1.2%)`, and the LOSS line
+  split it as almost all "on the way back".
+
+  Replies were attributed by matching the reply's source address against
+  the address the mesh gave for that peer. A peer does not get to choose
+  that address: it answers from whichever of its own the return route
+  selects, and on a multi-homed box — or one whose name resolves to a
+  different interface than the route back picks — that is not the address
+  we probed. Every reply then matched no peer and was dropped, so `recv`
+  stayed at zero while `sent` climbed.
+
+  What made it read as a network fault rather than a bug is that the
+  *other* direction was accounted correctly: the receiver's own `rx`
+  count is attributed by mesh index, not by address, so it showed every
+  probe arriving. Forward loss is computed from that count, so the pair
+  reported "your packets arrive, their answers do not" — which is a real
+  network failure mode, and sends you looking at return-path routing on a
+  fabric that is fine.
+
+  The reply now carries the responder's own mesh index instead of echoing
+  the requester's back, which only ever said who the reply was *for* —
+  something the receiver already knew — and left the source address as
+  the sole clue to who it was *from*. Attribution keys on that index; the
+  address match remains as a fallback so a reply from an older agent is
+  still counted, and since that reply echoes our own index it can never
+  name one of our peers, nothing is misattributed.
+
+  The path-MTU echo matched on the source address the same way, so the
+  same peer never converged: every size read as a black hole and the pair
+  reported no path MTU at all. It is now resolved by index too. Both are
+  covered by suite cases that fail against the previous code.
+
 - **CI shipped three console scripts it never ran.** The wheel smoke-test
   in both `ci.yml` and `publish.yml` drove five of the eight entry points,
   so `resolve`, `during` and `skew` could have been broken on PATH by a

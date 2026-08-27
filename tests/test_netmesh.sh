@@ -136,6 +136,64 @@ EOF
     assert_eq "$got" "ok"
 }
 
+t_a_peer_answering_from_another_address_is_measured() {
+    # The same 100%-loss shape as the hostname bug, from the other end.
+    # A peer answers from whichever of its addresses the route back
+    # selects, which need not be the one the mesh names: a multi-homed
+    # box, or a name resolving to a different interface than the return
+    # route picks. Replies were attributed by source address, so every
+    # one was discarded -- 100% loss on a link carrying every packet,
+    # while the peer's own rx count (attributed by index) showed them all
+    # arriving. Forward loss near zero against 100% total is that bug.
+    #
+    # Reproduced here by naming b at 127.0.0.2 and letting it answer
+    # unbound, so the kernel sources its replies from 127.0.0.1.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5460 b=127.0.0.2:5461 --mesh m.csv --pps 40 \
+        --no-pmtu >/dev/null
+    mkdir -p da db
+    nm agent --mesh m.csv --host a --dir da --interval 2 --duration 4 &
+    p1=$!
+    nm agent --mesh m.csv --host b --dir db --interval 2 --duration 4 &
+    p2=$!
+    wait $p1 $p2
+    got="$("$PY" - <<'EOF'
+import csv
+rows = [r for r in csv.DictReader(open("da/report.csv"))
+        if r["dir"] == "tx" and not r["flow"]]
+sent = sum(int(r["sent"] or 0) for r in rows)
+recv = sum(int(r["recv"] or 0) for r in rows)
+print("ok" if sent > 0 and recv > sent * 0.9 else
+      "bad: sent=%d recv=%d" % (sent, recv))
+EOF
+)"
+    assert_eq "$got" "ok"
+}
+
+t_path_mtu_converges_to_a_peer_on_another_address() {
+    # The path-MTU echo matched on the source address too, so the same
+    # peer never converged: every size read as a black hole and the pair
+    # reported no path MTU at all.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5462 b=127.0.0.2:5463 --mesh m.csv --pps 40 \
+        >/dev/null
+    mkdir -p da db
+    nm agent --mesh m.csv --host a --dir da --interval 3 --duration 6 &
+    p1=$!
+    nm agent --mesh m.csv --host b --dir db --interval 3 --duration 6 &
+    p2=$!
+    wait $p1 $p2
+    got="$("$PY" - <<'EOF'
+import csv
+rows = [r for r in csv.DictReader(open("da/report.csv"))
+        if r["dir"] == "tx" and not r["flow"]]
+states = set(r["mtu_state"] for r in rows if r["mtu_state"])
+print("ok" if "confirmed" in states else "bad: %s" % (sorted(states) or "none"))
+EOF
+)"
+    assert_eq "$got" "ok"
+}
+
 t_an_unresolvable_peer_is_a_note_not_silence() {
     # A name that does not resolve on the agent's box must say so on the
     # row, with nothing sent -- a quiet row of blanks reads as "measured
@@ -542,4 +600,6 @@ run_test "the flow threshold moves"            t_the_flow_threshold_moves
 run_test "thin flows are not ranked"           t_flows_too_thin_to_compare_are_not_ranked
 run_test "sick only under load differs"        t_a_sick_member_only_under_load_is_a_different_finding
 run_test "without flows, no spread section"    t_without_flows_there_is_no_spread_section
+run_test "a peer on another address measures"  t_a_peer_answering_from_another_address_is_measured
+run_test "path mtu converges on that peer"     t_path_mtu_converges_to_a_peer_on_another_address
 finish
