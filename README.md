@@ -8,7 +8,7 @@
 [![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds eight, for Linux boxes, the fleets they belong to, and the networks
+one holds nine, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -21,6 +21,7 @@ between them.
 | `resolve` | Is it DNS, and which resolver is wrong? |
 | `during` | What limited this run, and can I trust the number? |
 | `skew` | Does this box know what time it is? |
+| `muster` | Who has which of these, and what is still outstanding? |
 
 ```bash
 pip install binnacle

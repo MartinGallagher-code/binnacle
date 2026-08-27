@@ -1,7 +1,7 @@
 # binnacle
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds eight, for Linux boxes, the fleets they belong to, and the networks
+one holds nine, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 ```{toctree}
@@ -25,6 +25,7 @@ tools/reachable
 tools/resolve
 tools/during
 tools/skew
+tools/muster
 ```
 
 ```{toctree}
@@ -37,7 +38,7 @@ changelog
 publishing
 ```
 
-## The eight
+## The nine
 
 Start with [`binnacle`](tools/binnacle.md), which is the housing rather than
 a ninth instrument: it lists what is installed here and prints every tool's
@@ -53,6 +54,7 @@ help on one page, so there is one name to remember instead of eight.
 | [`resolve`](tools/resolve.md) | Is it DNS, and which resolver is wrong? |
 | [`during`](tools/during.md) | What limited this run, and can I trust the number? |
 | [`skew`](tools/skew.md) | Does this box know what time it is? |
+| [`muster`](tools/muster.md) | Who has which of these, and what is still outstanding? |
 
 ## Diagnose, don't dump
 
