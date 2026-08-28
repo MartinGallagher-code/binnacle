@@ -97,6 +97,7 @@ import argparse
 import csv
 import errno
 import io
+import math
 import os
 import random
 import re
@@ -692,7 +693,13 @@ def cmd_take(args):
     holder = args.holder or whoami()
     now = time.time()
     lease_id = new_lease_id()
-    expires = int(now + lease_secs)
+    # Rounded up, not truncated. int() threw away the fraction, so every
+    # lease came out up to a second shorter than it was asked for -- a
+    # 1s lease measured 0.93s here. Short is the dangerous direction: a
+    # lease that ends early hands the item to somebody else while the
+    # first worker is still on it, which is the duplicate work this tool
+    # exists to prevent. Up to a second long costs nothing.
+    expires = int(math.ceil(now + lease_secs))
 
     lock, items, freed = _open(args)
     try:

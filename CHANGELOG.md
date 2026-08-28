@@ -101,6 +101,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **`add somedir` added the directory as an item.** A directory is not a
     list of items and is now refused, like a mistyped file path already
     was.
+  - **Every lease was up to a second shorter than it was asked for.** The
+    deadline was `int(now + lease)`, which threw the fraction away — a 1s
+    lease measured 0.93s, and a take could come back already expired.
+    Short is the dangerous direction: a lease that ends early hands the
+    item to somebody else while the first worker is still on it, which is
+    the duplicate work this exists to prevent. Rounded up now, so a lease
+    is never shorter than asked and at most a second longer. Found by the
+    3.6 container, where the margin a fast machine hid was gone.
 
 
 - **`binnacle` — one command that says what is installed and prints every

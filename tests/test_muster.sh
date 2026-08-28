@@ -250,14 +250,50 @@ t_status_csv_is_one_row_of_numbers() {
     assert_contains "$row" "muster.csv,12,5,0,7,41.67,0"
 }
 
+t_a_lease_is_never_shorter_than_it_was_asked_for() {
+    # The deadline used to be int(now + lease), which threw the fraction
+    # away and made every lease up to a second short -- a 1s lease
+    # measured 0.93s, so a take could come back already expired. Short is
+    # the dangerous direction: the item goes to somebody else while the
+    # first worker is still on it.
+    #
+    # Measured against the wall clock, not against taken_ts: that is
+    # truncated too, so expires-taken hides the error exactly. The clock
+    # is read before the take, so the deadline must be at least that
+    # plus the lease however long the take itself took.
+    cd "$TEST_TMPDIR"
+    mu add 'w[1-2]' >/dev/null 2>&1
+    before="$("$PY" -c 'import time; print(repr(time.time()))')"
+    mu take 1 --lease 60s -o t.txt >/dev/null 2>&1
+    got="$("$PY" - "$before" <<'EOF'
+import csv, sys
+before = float(sys.argv[1])
+for r in csv.DictReader(open("muster.csv")):
+    if r["state"] == "held":
+        short = (before + 60.0) - int(r["expires_ts"])
+        print("ok" if short <= 0 else "bad: %.3fs short of the 60s asked"
+              % short)
+        break
+else:
+    print("bad: nothing held")
+EOF
+)"
+    assert_eq "$got" "ok"
+}
+
 t_a_lease_that_runs_out_puts_the_item_back() {
     # Nothing runs to make this happen: an expired lease is simply not a
     # lease, worked out from the deadline as the pool is opened.
+    #
+    # The lease and the sleep have a whole second of margin between them:
+    # rounding the deadline up means a "1s" lease really runs 1-2s, and
+    # every check here is a separate process launch, which under the 3.6
+    # container is not free.
     cd "$TEST_TMPDIR"
     mu add 'web[01-04]' >/dev/null 2>&1
     mu take 2 --lease 1s --as gone -o gone.txt >/dev/null 2>&1
     assert_eq "$(mu list --state held | tail -n +2 | wc -l | tr -d ' ')" "2"
-    sleep 2
+    sleep 3
     assert_eq "$(mu list --state available | tail -n +2 | wc -l | tr -d ' ')" "4"
 }
 
@@ -265,7 +301,7 @@ t_a_reclaimed_item_can_be_taken_by_someone_else() {
     cd "$TEST_TMPDIR"
     mu add 'web[01-02]' >/dev/null 2>&1
     mu take 2 --lease 1s --as alice -o alice.txt >/dev/null 2>&1
-    sleep 2
+    sleep 3
     out="$(mu take 2 --as bob -o bob.txt 2>&1 >/dev/null)"
     assert_contains "$out" "expired lease"
     assert_eq "$(items bob.txt | wc -l | tr -d ' ')" "2"
@@ -278,7 +314,7 @@ t_finishing_after_the_lease_lapsed_is_a_conflict() {
     cd "$TEST_TMPDIR"
     mu add 'web[01-02]' >/dev/null 2>&1
     mu take 2 --lease 1s --as alice -o alice.txt >/dev/null 2>&1
-    sleep 2
+    sleep 3
     mu take 2 --as bob -o bob.txt >/dev/null 2>&1
 
     set +e
@@ -297,7 +333,7 @@ t_finishing_late_with_nobody_else_holding_is_quieter() {
     cd "$TEST_TMPDIR"
     mu add 'web[01-02]' >/dev/null 2>&1
     mu take 2 --lease 1s --as alice -o alice.txt >/dev/null 2>&1
-    sleep 2
+    sleep 3
     set +e
     out="$(mu "done" alice.txt --as alice 2>&1)"; rc=$?
     set -e
@@ -332,7 +368,7 @@ t_release_does_not_take_an_item_from_its_holder() {
     cd "$TEST_TMPDIR"
     mu add 'web[01-02]' >/dev/null 2>&1
     mu take 2 --lease 1s --as alice -o alice.txt >/dev/null 2>&1
-    sleep 2
+    sleep 3
     mu take 2 --as bob -o bob.txt >/dev/null 2>&1
     set +e
     out="$(mu release alice.txt --as alice 2>&1)"; rc=$?
@@ -385,7 +421,7 @@ t_repeatedly_taken_and_never_finished_is_stuck() {
     mu add 'web[01-02]' >/dev/null 2>&1
     for i in 1 2 3; do
         mu take --item web01 --lease 1s --as "w$i" -o /dev/null >/dev/null 2>&1
-        sleep 1.1
+        sleep 2.5
     done
     set +e
     out="$(mu status)"; rc=$?
@@ -518,6 +554,7 @@ run_test "a percentage never rounds to a lie" t_a_percentage_never_rounds_into_a
 run_test "one of many is not zero percent"    t_one_of_many_is_not_zero_percent
 run_test "all done really is 100 percent"     t_all_done_really_is_100_percent
 run_test "status --csv is one row of numbers" t_status_csv_is_one_row_of_numbers
+run_test "a lease is never short-changed"     t_a_lease_is_never_shorter_than_it_was_asked_for
 run_test "an expired lease puts it back"      t_a_lease_that_runs_out_puts_the_item_back
 run_test "someone else can take it after"     t_a_reclaimed_item_can_be_taken_by_someone_else
 run_test "finishing after the lease lapsed"   t_finishing_after_the_lease_lapsed_is_a_conflict
