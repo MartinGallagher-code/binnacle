@@ -110,7 +110,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 PROG = os.path.basename(sys.argv[0]) or "agree.py"
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",

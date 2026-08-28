@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "binnacle"
-version = "0.5.0"
+version = "0.6.0"
 description = "Instruments for Linux boxes, fleets and the networks between: diagnose, don't dump"
 readme = "README.md"
 requires-python = ">=3.6"
