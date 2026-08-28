@@ -4,6 +4,7 @@
 """muster.py -- hand out work from a pool, once each, and know what is left.
 
 Usage: muster add hosts.txt                 put items in the pool
+       muster add 'web01 web02,web03'       or a delimited list, quoted
        muster add 'web[01-40]'              ranges expand, as everywhere else
        muster take 10 -o mine.txt           lease 10 items, write the ticket
        muster take --item web07             lease one by name
@@ -20,7 +21,8 @@ Options:
       --as WHO        holder name to record        (MUSTER_AS,
                       default user@host:pid)
   -o, --output FILE   write the ticket here        (default stdout)
-      --item NAME     name one item; repeatable    (take/done/release/reset)
+      --item NAME     name items; repeatable, and
+                      itself a delimited list       (take/done/release/reset)
       --state STATE   filter: available, held, done, any     (list)
       --csv           one summary row instead of the page:      (status)
                       pool,total,done,held,available,done_pct,stuck
@@ -75,6 +77,21 @@ Sharing a pool between machines
   Leases are wall-clock deadlines, so they assume the workers roughly
   agree about the time.  If they do not, leases expire early on the fast
   box and late on the slow one -- `skew` is the tool for that question.
+
+Item names, and how a list of them is written
+  A newline, a space and a comma all separate one item from the next, so
+  a file with one per line, `muster add 'web01 web02'` and `muster add
+  web01,web02` are the same command.  That works because **an item name
+  never contains whitespace or a comma** -- those are the delimiters,
+  which is also what makes a ticket unambiguously one item per line.
+
+  Commas are split outside brackets only, so `node[1,3,5]` is still one
+  range.  A space inside a range is refused rather than half-expanded:
+  `web[01-04, 06]` would otherwise leave a literal item called
+  `web[01-04,` for somebody to find weeks later.
+
+  Everything else is fine -- a name may hold dots, colons, slashes or
+  non-ASCII, so hostnames, paths and ticket numbers all work.
 
 Conventions
   The pool is a CSV you can read, diff, and put in git:
@@ -194,6 +211,28 @@ def _env(name, default=None):
 def note(msg, quiet=False):
     if not quiet:
         sys.stderr.write("[%s] %s\n" % (PROG, msg))
+
+
+# canonical copy: binnacle/agree.py.
+def split_commas(spec):
+    """Split on commas that are outside [brackets].
+
+    'a,b' is two hosts, but 'node[1,3]' is one spec whose comma belongs to
+    the range -- splitting it first would produce 'node[1' and '3]'.
+    """
+    out, depth, cur = [], 0, []
+    for ch in spec:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return [s for s in (x.strip() for x in out) if s]
 
 
 # canonical copy: binnacle/agree.py.
@@ -572,9 +611,7 @@ def read_ticket(path):
                     if m:
                         lease = m.group(1)
                     continue
-                name = line.strip()
-                if name:
-                    items.append(name)
+                items.extend(names_in(line))
     except OSError as exc:
         die("cannot read %s: %s" % (path, exc))
     return items, lease
@@ -585,15 +622,47 @@ def wanted_items(args, verb):
     if args.item:
         if args.ticket:
             die("give either a ticket file or --item, not both")
-        return list(args.item), ""
+        # --item takes a delimited list too, so `--item a,b` and
+        # `--item a --item b` are the same.
+        return names_in(" ".join(args.item)), ""
     if not args.ticket:
         die("%s needs a ticket file or --item NAME" % verb)
+    not_the_pool(args.ticket, args, "that ticket")
     return read_ticket(args.ticket)
 
 
 # ---------------------------------------------------------------------------
 # Verbs
 # ---------------------------------------------------------------------------
+
+def not_the_pool(path, args, what):
+    """Refuse a path argument that is the pool, or its lock.
+
+    Every verb takes a filename next to --pool, so naming the pool by
+    mistake is one keystroke away -- and each way of doing it went wrong
+    differently and quietly:
+
+      take -o POOL      overwrote the pool with the ticket, reporting
+                        success, taking every item and completion with it
+      take -o POOL.lock left the lock holding ticket text, so it was
+                        never released and the pool was jammed
+      add POOL          read the pool's own schema back in as work:
+                        `item`, `state`, `holder` became items
+      done POOL         completed the whole pool at once, because every
+                        row begins with its item name and commas split
+
+    None of those is a thing anyone means. Checked before any of them
+    can happen, so a refusal costs nothing.
+    """
+    if not path or path == "-":
+        return
+    here = os.path.realpath(path)
+    pool = os.path.realpath(args.pool)
+    if here == pool:
+        die("%s is the pool itself: %s" % (what, path))
+    if here == pool + ".lock":
+        die("%s is the pool's lock file: %s" % (what, path))
+
 
 def _open(args):
     """Lock the pool, read it, and expire what has run out.
@@ -619,12 +688,13 @@ def _open(args):
 def cmd_add(args):
     names = []
     for source in args.source:
+        not_the_pool(source, args, "that source")
         if source == "-":
-            names.extend(_names_from_lines(sys.stdin.read().splitlines()))
+            names.extend(names_in(sys.stdin.read()))
         elif os.path.isfile(source):
             try:
                 with io.open(source, encoding="utf-8", errors="replace") as fh:
-                    names.extend(_names_from_lines(fh.read().splitlines()))
+                    names.extend(names_in(fh.read()))
             except OSError as exc:
                 die("cannot read %s: %s" % (source, exc))
         elif os.path.isdir(source):
@@ -635,7 +705,7 @@ def cmd_add(args):
             # "./hosts.tzt", which is the kind of thing found weeks later.
             if os.sep in source or source.endswith((".txt", ".csv", ".lst")):
                 die("no such file: %s" % source)
-            names.extend(expand_range(source))
+            names.extend(names_in(source))
 
     for name in names:
         if BAD_ITEM_RE.search(name):
@@ -671,15 +741,32 @@ def cmd_add(args):
 COMMENT_RE = re.compile(r"(?:^|\s)#")
 
 
-def _names_from_lines(lines):
+def names_in(text):
+    """Every item named in TEXT, however it was delimited.
+
+    A newline, a space and a comma all separate one item from the next,
+    so a file with one per line, `muster add 'web01 web02'` and
+    `muster add web01,web02` all mean the same thing.  That works
+    because an item name can never contain whitespace or a comma: they
+    are the delimiters, which is also what makes a ticket unambiguously
+    one item per line.
+
+    Commas are split outside brackets only, so `node[1,3,5]` stays one
+    range -- but a space inside a range would be cut by the whitespace
+    split first, and the leftover would otherwise become a literal item
+    named `web[01-04,`.  That is refused rather than added.
+    """
     out = []
-    for line in lines:
+    for line in text.splitlines():
         m = COMMENT_RE.search(line)
         if m:
             line = line[:m.start()]
-        line = line.strip()
-        if line:
-            out.extend(expand_range(line))
+        for token in line.split():
+            for spec in split_commas(token):
+                if spec.count("[") != spec.count("]"):
+                    die("unbalanced [ ] in %r -- a range cannot contain "
+                        "spaces" % spec)
+                out.extend(expand_range(spec))
     return out
 
 
@@ -688,6 +775,14 @@ def cmd_take(args):
         die("give either a count or --item, not both")
     if args.count is not None and args.count < 1:
         die("take how many? %s is not a count" % args.count)
+
+    # -o and --pool sit next to each other and both take a filename, so
+    # `--pool p.csv -o p.csv` is one keystroke away -- and it used to
+    # report "took 5 item(s)" while the ticket overwrote the pool, taking
+    # every item and every completion with it. The same typo against the
+    # lock file jammed the pool until --stale-lock ran out. Checked
+    # before anything is leased, so a refusal costs nothing.
+    not_the_pool(args.output, args, "the ticket to write")
 
     lease_secs = parse_duration(args.lease)
     holder = args.holder or whoami()
@@ -706,7 +801,7 @@ def cmd_take(args):
         by_name = dict((it.item, it) for it in items)
         taken, refused = [], []
         if args.item:
-            for name in args.item:
+            for name in names_in(" ".join(args.item)):
                 it = by_name.get(name)
                 if it is None:
                     refused.append((name, "not in the pool"))

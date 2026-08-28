@@ -138,6 +138,31 @@ with the lease recorded in comments above it, which `done` reads to tell your
 completion from somebody else's. A hand-written list of names works too; only
 the conflict detection gets quieter.
 
+## Naming items, and writing a list of them
+
+A newline, a space and a comma all separate one item from the next, so these
+are the same command:
+
+```bash
+muster add hosts.txt              # one per line
+muster add 'web01 web02 web03'    # quoted, space separated
+muster add web01,web02,web03      # comma separated
+muster add 'web[01-40]'           # a range
+```
+
+That works because **an item name never contains whitespace or a comma** —
+those are the delimiters, which is also what makes a ticket unambiguously one
+item per line. `--item` takes a delimited list too, so `--item 'web01,web02'`
+and `--item web01 --item web02` mean the same thing.
+
+Commas are split outside brackets only, so `node[1,3,5]` is still one range. A
+space *inside* a range is refused rather than half-expanded — `web[01-04, 06]`
+would otherwise leave a literal item called `web[01-04,` for somebody to find
+weeks later.
+
+Everything else is fine: a name may hold dots, colons, slashes or non-ASCII, so
+hostnames, paths and ticket numbers all work.
+
 ## Verbs
 
 | Verb | What it does |

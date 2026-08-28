@@ -150,7 +150,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file from the directory it lives in, so it reports the tools actually
   beside it rather than whichever ones a `sys.path` search found first.
 
+### Changed
+
+- **`muster` takes a list of items however it is delimited.** A newline, a
+  space and a comma all separate one item from the next, so `muster add
+  hosts.txt`, `muster add 'web01 web02'` and `muster add web01,web02` are
+  the same command, and `--item` accepts a list as well. That is possible
+  because an item name now never contains whitespace or a comma — they are
+  the delimiters, which is also what makes a ticket unambiguously one item
+  per line. Commas are split outside brackets only, using `agree`'s own
+  splitter, so `node[1,3,5]` is still one range; a space *inside* a range
+  is refused rather than half-expanded, since `web[01-04, 06]` would
+  otherwise leave a literal item called `web[01-04,` behind.
+
 ### Fixed
+
+- **No path argument may be the pool.** Every verb takes a filename next
+  to `--pool`, so naming the pool by mistake is one keystroke away — and
+  each way of doing it went wrong differently and quietly:
+
+  - `take -o POOL` overwrote the pool with the ticket while reporting
+    `took 5 item(s)`, taking every item and every completion with it,
+    unrecoverably.
+  - `take -o POOL.lock` left the lock holding ticket text, so it was
+    never released and the pool was jammed until `--stale-lock` ran out.
+  - `add POOL` read the pool's own schema back in as work: `item`,
+    `state`, `holder`, `lease_id` became items to be handed out.
+  - `done POOL` **completed the entire pool at once** — every row begins
+    with its item name, and a comma is a delimiter — under a wall of
+    `UNKNOWN` lines for the header fields.
+
+  All are refused now, before anything can happen. Found by soaking the
+  tool rather than by a report; the first two were fixed on their own
+  first, which left the other two, so the guard is on the class rather
+  than on `-o`.
 
 - **`netmesh` reported 100% loss against a peer that answers from a
   different address than the mesh names.** The symptom is unmistakable

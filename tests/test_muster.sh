@@ -15,6 +15,93 @@ mu() { "$PY" "$MU" "$@"; }
 # linter's own name either: that is read as a directive.)
 items() { grep -v '^#' "$1"; }
 
+t_no_path_argument_may_be_the_pool() {
+    # Every verb takes a filename next to --pool, so naming the pool by
+    # mistake is one keystroke away -- and each way of doing it went
+    # wrong differently and quietly:
+    #
+    #   take -o POOL       overwrote the pool with the ticket, reporting
+    #                      success, losing every item and completion
+    #   take -o POOL.lock  left the lock holding ticket text, so it was
+    #                      never released and the pool was jammed
+    #   add POOL           read the pool's own schema back in as work:
+    #                      item, state, holder became items
+    #   done POOL          completed the whole pool at once, because
+    #                      every row begins with its item name
+    #
+    # Fixing only -o would have left the other three.
+    cd "$TEST_TMPDIR"
+    mu add 'srv[01-20]' --pool p.csv >/dev/null 2>&1
+    for bad in "add p.csv" "done p.csv" "release p.csv" "reset p.csv" \
+               "take 1 -o p.csv" "take 1 -o p.csv.lock"; do
+        set +e
+        # shellcheck disable=SC2086
+        out="$(mu $bad --pool p.csv 2>&1)"; rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "the pool"
+    done
+    # Untouched: still 20 items, still a pool, and no lock invented.
+    assert_eq "$(mu list --pool p.csv --state any | tail -n +2 | wc -l | tr -d ' ')" "20"
+    assert_eq "$(head -1 p.csv | cut -d, -f1)" "item"
+    assert_no_file "p.csv.lock"
+}
+
+t_a_normal_ticket_path_still_works() {
+    # The guard must not cost the ordinary case.
+    cd "$TEST_TMPDIR"
+    mu add 'srv[01-04]' --pool p.csv >/dev/null 2>&1
+    mu take 2 -o fine.txt --pool p.csv >/dev/null 2>&1
+    mu "done" fine.txt --pool p.csv >/dev/null 2>&1
+    assert_status $? 0
+    assert_eq "$(mu list --pool p.csv --state "done" | tail -n +2 | wc -l | tr -d ' ')" "2"
+}
+
+t_items_may_be_delimited_by_space_comma_or_newline() {
+    cd "$TEST_TMPDIR"
+    mu add 'a01 a02' >/dev/null 2>&1
+    mu add 'b01,b02' >/dev/null 2>&1
+    printf 'c01 c02,c03\nc04\tc05\n' | mu add - >/dev/null 2>&1
+    body="$(mu list --state any | tail -n +2 | cut -d, -f1 | tr '\n' ' ')"
+    for n in a01 a02 b01 b02 c01 c02 c03 c04 c05; do
+        assert_contains "$body" "$n"
+    done
+    assert_eq "$(mu list --state any | tail -n +2 | wc -l | tr -d ' ')" "9"
+}
+
+t_a_comma_inside_a_range_still_belongs_to_the_range() {
+    # node[1,3,5] is one range, not three items. The comma split has to
+    # be bracket-aware, which is why agree's splitter is copied here.
+    cd "$TEST_TMPDIR"
+    mu add 'node[1,3,5]' >/dev/null 2>&1
+    body="$(mu list --state any | tail -n +2 | cut -d, -f1 | tr '\n' ' ')"
+    assert_contains "$body" "node1"
+    assert_contains "$body" "node3"
+    assert_contains "$body" "node5"
+    assert_eq "$(mu list --state any | tail -n +2 | wc -l | tr -d ' ')" "3"
+}
+
+t_a_space_inside_a_range_is_refused_not_half_expanded() {
+    # Whitespace splits first, so 'web[01-04, 06]' would otherwise leave a
+    # literal item called 'web[01-04,' for somebody to find weeks later.
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(mu add 'web[01-04, 06]' 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "unbalanced"
+    assert_no_file "muster.csv"
+}
+
+t_item_flags_take_a_delimited_list_too() {
+    cd "$TEST_TMPDIR"
+    mu add 'srv[01-06]' >/dev/null 2>&1
+    mu take --item 'srv01,srv02' -o mine.txt >/dev/null 2>&1
+    assert_eq "$(items mine.txt | wc -l | tr -d ' ')" "2"
+    mu "done" --item 'srv01 srv02' >/dev/null 2>&1
+    assert_eq "$(mu list --state "done" | tail -n +2 | wc -l | tr -d ' ')" "2"
+}
+
 t_a_malformed_duration_is_refused_not_a_traceback() {
     # "." and "1.2.3" are runs of digits and dots that are not numbers;
     # both reached float() and raised a bare ValueError at the user.
@@ -477,10 +564,12 @@ t_a_fresh_lock_is_waited_for_then_refused() {
 }
 
 t_an_item_with_a_control_character_is_refused() {
-    # An item is a line in a ticket file; a newline in one would come
-    # back as two items with names nobody chose.
+    # A control character in a name would come back from the CSV as
+    # something else. Whitespace ones are not the case to test any more
+    # -- a tab is a delimiter now, so "bad\tone" is legitimately two
+    # items -- so this uses one that no splitter consumes.
     cd "$TEST_TMPDIR"
-    printf 'good\nbad\tone\n' > in.txt
+    printf 'good\nbad\001one\n' > in.txt
     set +e
     out="$(mu add in.txt 2>&1)"; rc=$?
     set -e
@@ -534,6 +623,12 @@ t_help_prints_every_verbs_flags() {
 }
 
 echo "muster"
+run_test "no path argument may be the pool"  t_no_path_argument_may_be_the_pool
+run_test "a normal ticket path still works"  t_a_normal_ticket_path_still_works
+run_test "space, comma or newline delimits"  t_items_may_be_delimited_by_space_comma_or_newline
+run_test "a comma in a range is the range's" t_a_comma_inside_a_range_still_belongs_to_the_range
+run_test "a space in a range is refused"     t_a_space_inside_a_range_is_refused_not_half_expanded
+run_test "--item takes a delimited list"     t_item_flags_take_a_delimited_list_too
 run_test "a malformed duration is refused"    t_a_malformed_duration_is_refused_not_a_traceback
 run_test "shared flags work before the verb" t_the_shared_flags_work_before_the_verb_too
 run_test "an unwritable ticket puts back"    t_a_ticket_that_cannot_be_written_puts_the_items_back
