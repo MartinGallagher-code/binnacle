@@ -467,6 +467,7 @@ VERBATIM = [
     ("_WriteGuard", "why_slow.py", "muster.py"),
     ("expand_range", "agree.py", "reachable.py"),
     ("expand_range", "agree.py", "muster.py"),
+    ("split_commas", "agree.py", "muster.py"),
     ("split_host_port", "agree.py", "reachable.py"),
     ("is_ipv6", "agree.py", "reachable.py"),
 ]
