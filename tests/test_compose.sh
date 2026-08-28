@@ -234,7 +234,7 @@ def walk(parser, flags, seen):
 
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
-             "during", "skew", "binnacle", "muster"):
+             "during", "skew", "binnacle", "muster", "manifest"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -446,8 +446,8 @@ VERBATIM = [
     ("read_pressure", "why_slow.py", "during.py"),
     ("_read", "why_slow.py", "resolve.py"),
     ("_read", "why_slow.py", "skew.py"),
-    # Duplicated into all eight instruments and into the index, so all
-    # nine files are held to it.
+    # Duplicated into all ten instruments and into the index, so all
+    # eleven files are held to it.
     ("_stdio_safe", "why_slow.py", "agree.py"),
     ("_stdio_safe", "why_slow.py", "logtriage.py"),
     ("_stdio_safe", "why_slow.py", "netmesh.py"),
@@ -457,6 +457,7 @@ VERBATIM = [
     ("_stdio_safe", "why_slow.py", "skew.py"),
     ("_stdio_safe", "why_slow.py", "binnacle.py"),
     ("_stdio_safe", "why_slow.py", "muster.py"),
+    ("_stdio_safe", "why_slow.py", "manifest.py"),
     ("_WriteGuard", "why_slow.py", "agree.py"),
     ("_WriteGuard", "why_slow.py", "logtriage.py"),
     ("_WriteGuard", "why_slow.py", "netmesh.py"),
@@ -468,6 +469,8 @@ VERBATIM = [
     ("expand_range", "agree.py", "reachable.py"),
     ("expand_range", "agree.py", "muster.py"),
     ("split_commas", "agree.py", "muster.py"),
+    ("split_commas", "agree.py", "manifest.py"),
+    ("expand_range", "agree.py", "manifest.py"),
     ("split_host_port", "agree.py", "reachable.py"),
     ("is_ipv6", "agree.py", "reachable.py"),
 ]

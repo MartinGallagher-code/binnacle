@@ -24,22 +24,22 @@ pkg_version() {
 
 t_lists_every_installed_tool() {
     out="$(bn)"
-    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster; do
+    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest; do
         assert_contains "$out" "$tool"
     done
 }
 
 t_names_a_version_for_each_tool() {
     # The point of the column: every instrument is asked separately, so
-    # the answer is per-file rather than one number printed eight times.
+    # the answer is per-file rather than one number printed ten times.
     v="$(pkg_version)"
     count="$(bn list --quiet | awk -v v="$v" '$2 == v {n++} END {print n+0}')"
-    assert_eq "$count" "9"
+    assert_eq "$count" "10"
 }
 
 t_says_when_they_all_agree() {
     out="$(bn)"
-    assert_contains "$out" "9 instruments, all at $(pkg_version)."
+    assert_contains "$out" "10 instruments, all at $(pkg_version)."
     assert_not_contains "$out" "SKEW"
     assert_not_contains "$out" "BROKEN"
 }
@@ -60,7 +60,7 @@ t_help_covers_every_tool() {
     out="$(bn help)"
     # Each tool's help is its own module docstring, so its usage line is
     # the thing to look for -- and under its own name, not binnacle's.
-    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster; do
+    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest; do
         assert_contains "$out" "usage: $tool"
     done
 }
@@ -188,7 +188,7 @@ t_an_unregistered_tool_still_shows_up() {
 
     out="$("$PY" "$bn_copy" 2>&1)"
     assert_contains "$out" "newtool"
-    assert_contains "$out" "10 instruments"
+    assert_contains "$out" "11 instruments"
 }
 
 t_private_files_are_not_instruments() {
@@ -218,7 +218,7 @@ t_quiet_is_the_table_alone() {
     out="$(bn list --quiet)"
     assert_not_contains "$out" "the housing"
     assert_not_contains "$out" "binnacle help"
-    assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "9"
+    assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "10"
 }
 
 echo "binnacle"

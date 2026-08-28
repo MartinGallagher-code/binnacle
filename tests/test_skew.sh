@@ -13,7 +13,15 @@ set -u
 source "$(dirname "${BASH_SOURCE[0]}")/test_helper.bash"
 SK="$BINNACLE_DIR/skew.py"
 
-sk() { "$PY" "$SK" "$@"; }
+# No hardware clock unless a test asks for one. Left to the default, every
+# invocation here reads the real /sys/class/rtc of whatever box the suite
+# is running on, and that box's RTC then appears in reports these tests
+# make assertions about -- a CI runner whose hardware clock was ten
+# minutes out failed "a reply not echoing the query", because the report
+# said `10m 08s` about the runner rather than about the 600s offset the
+# test had injected. The tests that mean to exercise the RTC pass their
+# own --rtc-path after this one, and the later flag wins.
+sk() { "$PY" "$SK" --rtc-path "$TEST_TMPDIR/no-such-rtc" "$@"; }
 
 # --- the rules, from facts -------------------------------------------------
 
@@ -252,6 +260,10 @@ t_a_reply_that_does_not_echo_the_query_is_not_an_answer() {
     start_fake_ntp "$port" '{"offset": 600, "bad_origin": true}'
     out="$(sk --server "127.0.0.1:$port" --samples 1 --timeout 1 --attempts 1)"
     assert_contains "$out" "all 1 configured source unreachable"
+    # 600s renders as `10m 00s`, so the injected offset would show up here
+    # or nowhere.  Named rather than bare, because the report has more
+    # than one place a duration can appear.
+    assert_not_contains "$out" "system vs sources"
     assert_not_contains "$out" "10m"
 }
 

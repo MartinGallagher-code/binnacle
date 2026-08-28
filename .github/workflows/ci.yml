@@ -144,7 +144,7 @@ jobs:
       - name: Install the wheel and smoke-test every entry point
         run: |
           python -m pip install dist/*.whl
-          for cmd in binnacle why-slow agree logtriage netmesh reachable resolve during skew muster; do
+          for cmd in binnacle why-slow agree logtriage netmesh reachable resolve during skew muster manifest; do
             "$cmd" --version
           done
           # binnacle is the one that checks the other eight agree on a

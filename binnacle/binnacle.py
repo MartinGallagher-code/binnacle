@@ -18,7 +18,7 @@ What it does
   A binnacle is the housing that holds the instruments; this is the
   housing talking.  It answers the two questions you have before you can
   use any of the others: **what is installed here**, and **how do I drive
-  it** -- without needing to already know the nine names.
+  it** -- without needing to already know the ten names.
 
   `binnacle` on its own prints one row per instrument: the command name,
   the version that instrument reports for *itself*, and the question it

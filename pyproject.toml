@@ -90,9 +90,9 @@ Issues = "https://github.com/MartinGallagher-code/binnacle/issues"
 # hyphenated because that is how it reads in a sentence; the module under
 # it has to be why_slow because Python says so.
 [project.scripts]
-# The index first: `binnacle` is the housing rather than a ninth
+# The index first: `binnacle` is the housing rather than a tenth
 # instrument -- it lists what is installed and prints every tool's help,
-# so a new user has one name to remember instead of eight.
+# so a new user has one name to remember instead of nine.
 binnacle = "binnacle.binnacle:main"
 why-slow = "binnacle.why_slow:main"
 agree = "binnacle.agree:main"
@@ -103,6 +103,7 @@ resolve = "binnacle.resolve:main"
 during = "binnacle.during:main"
 skew = "binnacle.skew:main"
 muster = "binnacle.muster:main"
+manifest = "binnacle.manifest:main"
 
 [tool.setuptools]
 packages = ["binnacle"]
