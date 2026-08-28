@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`manifest --sample` prints a layout to start from.** The tool reads a
+  `.dc` file, which is not much help the first time, when you have no `.dc`
+  file and the format is a paragraph of prose in the help text. `--sample`
+  writes a commented layout that uses every construct the parser
+  understands — nested rooms, rows and racks, `[01..04]` ranges and an
+  `[01..08x2]` step, inherited attributes and tags, `name={room}{rack}{id}`
+  placeholders, and `net`/`link` cabling lines that are read past — so it
+  is a worked example of the format and a file to edit into your own floor.
+
+  It takes no layout, since having none is the reason to reach for it, and
+  writes only the file: the summary stays on stderr where `> floor.dc`
+  cannot catch it. The sample states its own totals (328 servers, 18
+  switches) and the suite asserts the tool agrees with them, so a sample
+  that stopped parsing, or quietly changed shape, fails CI rather than
+  teaching the format wrong.
+
 ## [0.5.0] - 2026-08-28
 
 ### Added

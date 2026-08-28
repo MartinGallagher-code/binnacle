@@ -7,6 +7,7 @@ Usage: manifest dc.dc 'rack[1-3]'          every server in racks 1 to 3
        manifest dc.dc 'row[A,C]' +gpu      gpu servers in rows A and C
        manifest dc.dc r1u1,r1u7,r5u27      those three by name
        manifest dc.dc 'room[1]' --csv      the same, with where each one is
+       manifest --sample > floor.dc        a layout to start from
 
 Options:
       --layout FILE   the layout, if not the first argument   (MANIFEST_LAYOUT)
@@ -17,6 +18,7 @@ Options:
       --count         print how many matched, and nothing else
       --sort          sort the output (default: layout order)
       --quiet         no summary on stderr
+      --sample        print a layout to start from, and nothing else
 
 What it does
   A fleet list is a datacenter fact, but it is usually kept as a text file
@@ -48,6 +50,10 @@ The layout file
   hostname like `wr12r06u15`; where a name is set, that is what this
   prints.  Attributes and tags inherit downward, so a `+prod` on the room
   is carried by every machine under it.
+
+  `--sample` prints a commented layout using every construct understood
+  here, which is the fastest way to see the format and a reasonable file
+  to edit into your own floor.
 
   That project is the format's reference implementation -- see its README
   for the full grammar.  What is understood here is the element half:
@@ -670,6 +676,70 @@ def row_of(el):
     }
 
 
+# ---------------------------------------------------------------------------
+# A layout to start from
+# ---------------------------------------------------------------------------
+
+# Written here rather than shipped as a data file, because a tool that is
+# routinely scp'd to a bare machine on its own has to carry everything it
+# needs inside the one file.  It is also original rather than copied from
+# the reference implementation's examples: that project ships no licence,
+# and this one is GPL and REUSE-compliant.
+#
+# Every construct this parser understands appears at least once, and the
+# comments say what each line is doing -- so `manifest --sample > floor.dc`
+# is both a worked example and a file you can edit into your own floor.
+SAMPLE_LAYOUT = """\
+# A small site, in the .dc format manifest reads.
+#
+#   <kind> <id-spec> [key=value ...] [+tag ...]
+#
+# Indentation nests: a rack indented under a row is in that row.  An
+# id-spec in brackets expands, so one line describes a whole floor.
+
+dc IAD1 name="Ashburn 1" region=us-east +prod
+                                  # attrs and tags inherit downward, so
+                                  # every machine below is +prod, us-east
+
+  room wr[01..02] +hall           # 01..02 is a range: two rooms
+
+    row A                         # rack numbers run on across the rows so
+      rack r[01..04] u=42         # the flat name below stays unique
+        node tor at=42 role=tor +switch name={room}{rack}tor
+        node u[01..20] role=server name={room}{rack}{id} +x86 model=r7625
+
+    row B                         # ...continuing r05..r08 here
+      rack r[05..08] u=42
+        node tor at=42 role=tor +switch name={room}{rack}tor
+        node u[01..20] role=server name={room}{rack}{id} +x86 model=r7625
+
+  room gpu1 +hall +gpu            # a room named outright, not from a range
+    row A
+      rack g[01..02] u=48
+        node tor at=48 role=tor +switch name={room}{rack}tor
+        node u[01..08x2] role=server name={room}{rack}{id} model=hgx-h100
+                                  # 01..08x2 steps by two: u01 u03 u05 u07,
+                                  # for chassis that take two U each
+
+# net and link describe cabling rather than machines.  manifest reads past
+# them; the viewer draws them.
+net data label="Data" color=#4fa3ff
+net mgmt label="Mgmt" color=#8b93a7 style=dashed
+
+link data role=server role=tor scope=rack
+link mgmt role=server role=tor scope=rack
+
+# 328 servers and 18 switches.  Things to try against it:
+#
+#   manifest floor.dc 'rack[1-4]'        row A of both halls
+#   manifest floor.dc 'room[gpu1]'       the gpu room
+#   manifest floor.dc +gpu               the same, by inherited tag
+#   manifest floor.dc 'model=hgx*'       by attribute, globbed
+#   manifest floor.dc 'room[1]' --csv    with where each machine is
+#   manifest floor.dc --role tor         the switches instead
+"""
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog=PROG, description=__doc__,
@@ -691,12 +761,19 @@ def build_parser():
     p.add_argument("--count", action="store_true")
     p.add_argument("--sort", action="store_true")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--sample", action="store_true")
     return p
 
 
 def main(argv=None):
     _stdio_safe()
     args = build_parser().parse_args(argv)
+
+    if args.sample:
+        # Before the layout is looked for: the whole point is to have one
+        # when you do not yet.
+        sys.stdout.write(SAMPLE_LAYOUT)
+        return 0
 
     rest = list(args.args)
     layout = args.layout

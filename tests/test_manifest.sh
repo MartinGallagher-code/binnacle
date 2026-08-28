@@ -329,6 +329,47 @@ t_a_big_range_gives_the_same_answer() {
     set -e
 }
 
+t_sample_prints_a_layout_to_start_from() {
+    # The point of it: you have no layout yet, so it must not need one.
+    cd "$TEST_TMPDIR"
+    out="$(mf --sample)"
+    assert_status $? 0
+    assert_contains "$out" "dc IAD1"
+    assert_contains "$out" "room wr[01..02]"
+}
+
+t_the_sample_is_a_layout_this_tool_reads() {
+    # A sample that does not parse is worse than none: it teaches the
+    # format wrong and the first thing anyone does is feed it back in.
+    cd "$TEST_TMPDIR"
+    mf --sample > floor.dc 2>/dev/null
+    assert_eq "$(mf floor.dc '*' --count 2>/dev/null)" "328"
+    assert_eq "$(mf floor.dc --role tor --count 2>/dev/null)" "18"
+    # Every construct the file's own comments claim, exercised:
+    assert_eq "$(mf floor.dc 'rack[1-4]' --count 2>/dev/null)" "168"
+    assert_eq "$(mf floor.dc 'room[gpu1]' --count 2>/dev/null)" "8"
+    assert_eq "$(mf floor.dc '+gpu' --count 2>/dev/null)" "8"
+    assert_eq "$(mf floor.dc 'model=hgx*' --count 2>/dev/null)" "8"
+    # x2 steps by two, so the gpu chassis land on odd Us only.
+    assert_eq "$(mf floor.dc 'rack[g01]' --sort 2>/dev/null | tr '\n' ' ')" \
+              "gpu1g01u01 gpu1g01u03 gpu1g01u05 gpu1g01u07 "
+    # ...and the counts its footer states are the counts it produces.
+    assert_contains "$(cat floor.dc)" "328 servers and 18 switches"
+}
+
+t_the_sample_is_the_only_thing_printed() {
+    # It is a file being written, so a summary on stderr is fine but a
+    # stray line on stdout would corrupt it.
+    cd "$TEST_TMPDIR"
+    mf --sample > floor.dc 2>err.txt
+    assert_eq "$(head -1 floor.dc)" "# A small site, in the .dc format manifest reads."
+    assert_eq "$(wc -l < err.txt | tr -d ' ')" "0"
+    # A layout argument alongside it is ignored rather than read: the
+    # flag answers "I have no layout".
+    mf --sample nosuch.dc >/dev/null 2>&1
+    assert_status $? 0
+}
+
 t_version_matches_the_house_format() {
     out="$(mf --version)"
     assert_contains "$out" "Copyright (C) 2026 Martin J. Gallagher"
@@ -366,5 +407,8 @@ run_test "an absent kind is named"            t_a_kind_the_layout_lacks_is_named
 run_test "a range past any building"          t_a_range_larger_than_a_building_is_refused
 run_test "a directory is not a layout"        t_a_directory_is_not_a_layout
 run_test "a wide range answers the same"      t_a_big_range_gives_the_same_answer
+run_test "--sample prints a layout"           t_sample_prints_a_layout_to_start_from
+run_test "the sample parses as a layout"      t_the_sample_is_a_layout_this_tool_reads
+run_test "the sample is all that is printed"  t_the_sample_is_the_only_thing_printed
 run_test "--version matches the house format" t_version_matches_the_house_format
 finish
