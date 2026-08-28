@@ -165,14 +165,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **`muster take -o` could destroy the pool.** `-o` and `--pool` sit next
-  to each other and both take a filename, so `--pool p.csv -o p.csv` is
-  one keystroke away — and it reported `took 5 item(s)` while the ticket
-  overwrote the pool, taking every item and every completion with it,
-  unrecoverably. The same typo against the lock file left the lock holding
-  ticket text, so it was never released and the pool was jammed until
-  `--stale-lock` ran out. Both are refused now, before anything is leased.
-  Found by soaking the tool rather than by a report.
+- **No path argument may be the pool.** Every verb takes a filename next
+  to `--pool`, so naming the pool by mistake is one keystroke away — and
+  each way of doing it went wrong differently and quietly:
+
+  - `take -o POOL` overwrote the pool with the ticket while reporting
+    `took 5 item(s)`, taking every item and every completion with it,
+    unrecoverably.
+  - `take -o POOL.lock` left the lock holding ticket text, so it was
+    never released and the pool was jammed until `--stale-lock` ran out.
+  - `add POOL` read the pool's own schema back in as work: `item`,
+    `state`, `holder`, `lease_id` became items to be handed out.
+  - `done POOL` **completed the entire pool at once** — every row begins
+    with its item name, and a comma is a delimiter — under a wall of
+    `UNKNOWN` lines for the header fields.
+
+  All are refused now, before anything can happen. Found by soaking the
+  tool rather than by a report; the first two were fixed on their own
+  first, which left the other two, so the guard is on the class rather
+  than on `-o`.
 
 - **`netmesh` reported 100% loss against a peer that answers from a
   different address than the mesh names.** The symptom is unmistakable

@@ -15,35 +15,46 @@ mu() { "$PY" "$MU" "$@"; }
 # linter's own name either: that is read as a directive.)
 items() { grep -v '^#' "$1"; }
 
-t_a_ticket_cannot_overwrite_the_pool() {
-    # -o and --pool sit next to each other and both take a filename, so
-    # `--pool p.csv -o p.csv` is one keystroke away -- and it reported
-    # "took 5 item(s)" while the ticket overwrote the pool, taking every
-    # item and every completion with it.
+t_no_path_argument_may_be_the_pool() {
+    # Every verb takes a filename next to --pool, so naming the pool by
+    # mistake is one keystroke away -- and each way of doing it went
+    # wrong differently and quietly:
+    #
+    #   take -o POOL       overwrote the pool with the ticket, reporting
+    #                      success, losing every item and completion
+    #   take -o POOL.lock  left the lock holding ticket text, so it was
+    #                      never released and the pool was jammed
+    #   add POOL           read the pool's own schema back in as work:
+    #                      item, state, holder became items
+    #   done POOL          completed the whole pool at once, because
+    #                      every row begins with its item name
+    #
+    # Fixing only -o would have left the other three.
     cd "$TEST_TMPDIR"
     mu add 'srv[01-20]' --pool p.csv >/dev/null 2>&1
-    set +e
-    out="$(mu take 5 --pool p.csv -o p.csv 2>&1)"; rc=$?
-    set -e
-    assert_status $rc 2
-    assert_contains "$out" "overwrite the pool"
+    for bad in "add p.csv" "done p.csv" "release p.csv" "reset p.csv" \
+               "take 1 -o p.csv" "take 1 -o p.csv.lock"; do
+        set +e
+        # shellcheck disable=SC2086
+        out="$(mu $bad --pool p.csv 2>&1)"; rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "the pool"
+    done
+    # Untouched: still 20 items, still a pool, and no lock invented.
     assert_eq "$(mu list --pool p.csv --state any | tail -n +2 | wc -l | tr -d ' ')" "20"
     assert_eq "$(head -1 p.csv | cut -d, -f1)" "item"
+    assert_no_file "p.csv.lock"
 }
 
-t_a_ticket_cannot_overwrite_the_lock() {
-    # The same typo against the lock file jammed the pool: the lock then
-    # held ticket text, so it was never released and every later run
-    # waited out --stale-lock.
+t_a_normal_ticket_path_still_works() {
+    # The guard must not cost the ordinary case.
     cd "$TEST_TMPDIR"
-    mu add 'srv[01-05]' --pool p.csv >/dev/null 2>&1
-    set +e
-    out="$(mu take 2 --pool p.csv -o p.csv.lock 2>&1)"; rc=$?
-    set -e
-    assert_status $rc 2
-    assert_contains "$out" "lock file"
-    assert_no_file "p.csv.lock"
-    assert_contains "$(mu status --pool p.csv)" "5 item(s)"
+    mu add 'srv[01-04]' --pool p.csv >/dev/null 2>&1
+    mu take 2 -o fine.txt --pool p.csv >/dev/null 2>&1
+    mu "done" fine.txt --pool p.csv >/dev/null 2>&1
+    assert_status $? 0
+    assert_eq "$(mu list --pool p.csv --state "done" | tail -n +2 | wc -l | tr -d ' ')" "2"
 }
 
 t_items_may_be_delimited_by_space_comma_or_newline() {
@@ -612,8 +623,8 @@ t_help_prints_every_verbs_flags() {
 }
 
 echo "muster"
-run_test "a ticket cannot overwrite the pool" t_a_ticket_cannot_overwrite_the_pool
-run_test "a ticket cannot overwrite the lock" t_a_ticket_cannot_overwrite_the_lock
+run_test "no path argument may be the pool"  t_no_path_argument_may_be_the_pool
+run_test "a normal ticket path still works"  t_a_normal_ticket_path_still_works
 run_test "space, comma or newline delimits"  t_items_may_be_delimited_by_space_comma_or_newline
 run_test "a comma in a range is the range's" t_a_comma_inside_a_range_still_belongs_to_the_range
 run_test "a space in a range is refused"     t_a_space_inside_a_range_is_refused_not_half_expanded

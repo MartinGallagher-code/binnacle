@@ -627,12 +627,42 @@ def wanted_items(args, verb):
         return names_in(" ".join(args.item)), ""
     if not args.ticket:
         die("%s needs a ticket file or --item NAME" % verb)
+    not_the_pool(args.ticket, args, "that ticket")
     return read_ticket(args.ticket)
 
 
 # ---------------------------------------------------------------------------
 # Verbs
 # ---------------------------------------------------------------------------
+
+def not_the_pool(path, args, what):
+    """Refuse a path argument that is the pool, or its lock.
+
+    Every verb takes a filename next to --pool, so naming the pool by
+    mistake is one keystroke away -- and each way of doing it went wrong
+    differently and quietly:
+
+      take -o POOL      overwrote the pool with the ticket, reporting
+                        success, taking every item and completion with it
+      take -o POOL.lock left the lock holding ticket text, so it was
+                        never released and the pool was jammed
+      add POOL          read the pool's own schema back in as work:
+                        `item`, `state`, `holder` became items
+      done POOL         completed the whole pool at once, because every
+                        row begins with its item name and commas split
+
+    None of those is a thing anyone means. Checked before any of them
+    can happen, so a refusal costs nothing.
+    """
+    if not path or path == "-":
+        return
+    here = os.path.realpath(path)
+    pool = os.path.realpath(args.pool)
+    if here == pool:
+        die("%s is the pool itself: %s" % (what, path))
+    if here == pool + ".lock":
+        die("%s is the pool's lock file: %s" % (what, path))
+
 
 def _open(args):
     """Lock the pool, read it, and expire what has run out.
@@ -658,6 +688,7 @@ def _open(args):
 def cmd_add(args):
     names = []
     for source in args.source:
+        not_the_pool(source, args, "that source")
         if source == "-":
             names.extend(names_in(sys.stdin.read()))
         elif os.path.isfile(source):
@@ -751,15 +782,7 @@ def cmd_take(args):
     # every item and every completion with it. The same typo against the
     # lock file jammed the pool until --stale-lock ran out. Checked
     # before anything is leased, so a refusal costs nothing.
-    if args.output:
-        out = os.path.realpath(args.output)
-        pool = os.path.realpath(args.pool)
-        if out == pool:
-            die("the ticket would overwrite the pool itself: %s"
-                % args.output)
-        if out == pool + ".lock":
-            die("the ticket would overwrite the pool's lock file: %s"
-                % args.output)
+    not_the_pool(args.output, args, "the ticket to write")
 
     lease_secs = parse_duration(args.lease)
     holder = args.holder or whoami()
