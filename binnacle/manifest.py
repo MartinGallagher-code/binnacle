@@ -98,7 +98,7 @@ import os
 import re
 import sys
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PROG = os.path.basename(sys.argv[0]) or "manifest.py"
 
 DEFAULT_ROLE = "server"
