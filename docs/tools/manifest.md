@@ -37,6 +37,23 @@ manifest floor.dc 'room[1]' | netmesh gen --servers -
 It reads and prints. Nothing is contacted — no ssh, no DNS, no inventory
 API — nothing is written, and the layout file is never modified.
 
+## Starting from nothing
+
+`--sample` prints a commented layout that uses every construct this tool
+understands, so it is both the fastest way to see the format and a
+reasonable file to edit into your own floor:
+
+```bash
+manifest --sample > floor.dc
+manifest floor.dc 'rack[1-4]'
+```
+
+It needs no layout of its own — that is the point of it — and it writes
+only the file, so the summary line stays on stderr where a redirect cannot
+catch it. The sample describes two halls and a GPU room: 328 servers and 18
+switches, with the counts stated in its own footer so you can check the
+tool agrees with the file.
+
 ## The layout file
 
 The `.dc` format from the
@@ -152,7 +169,7 @@ where they are, and an empty column for every machine in the fleet would be
 the wrong answer to give.
 
 `--path` prints the full path instead of the name, and `--count` prints how
-many matched and nothing else.
+many matched and nothing else. `--sample` writes the example layout above.
 
 ## Exit status
 
