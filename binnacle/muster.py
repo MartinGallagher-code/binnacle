@@ -97,6 +97,7 @@ import argparse
 import csv
 import errno
 import io
+import math
 import os
 import random
 import re
@@ -240,6 +241,16 @@ def expand_range(spec):
 # Time
 # ---------------------------------------------------------------------------
 
+def _float_or_die(num, text):
+    """A run of digits and dots is not always a number: "." and "1.2.3"
+    both get this far and both used to raise a bare ValueError, which is
+    a traceback where a one-line refusal belongs."""
+    try:
+        return float(num)
+    except ValueError:
+        die("bad duration: %s" % text)
+
+
 def parse_duration(text):
     """'45m', '2h', '90', '1h30m' -> seconds.  A bare number is seconds."""
     s = str(text).strip().lower()
@@ -253,12 +264,12 @@ def parse_duration(text):
         elif ch in units:
             if not num:
                 die("bad duration: %s" % text)
-            total += float(num) * units[ch]
+            total += _float_or_die(num, text) * units[ch]
             num, seen = "", True
         else:
             die("bad duration: %s" % text)
     if num:
-        total += float(num)
+        total += _float_or_die(num, text)
         seen = True
     if not seen:
         die("bad duration: %s" % text)
@@ -412,8 +423,15 @@ class Item(object):
         return dict((f, getattr(self, f)) for f in FIELDS)
 
     def expired(self, now):
-        return (self.state == HELD and self.expires_ts
-                and _num(self.expires_ts) <= now)
+        if self.state != HELD:
+            return False
+        # A held row carrying no deadline is not a lease either: nothing
+        # could ever free it, so the item would be held forever and the
+        # report would print the epoch as a countdown. Hand-edited pools
+        # and half-written rows are where these come from.
+        if not self.expires_ts:
+            return True
+        return _num(self.expires_ts) <= now
 
     def free(self):
         self.state = AVAILABLE
@@ -435,6 +453,7 @@ def read_pool(path):
     if not os.path.exists(path):
         return []
     items = []
+    dupes = []
     try:
         with io.open(path, encoding="utf-8-sig", newline="",
                      errors="replace") as fh:
@@ -445,10 +464,14 @@ def read_pool(path):
             if missing:
                 die("%s is not a muster pool (no %s column)"
                     % (path, ", ".join(missing)))
+            seen = set()
             for row in reader:
                 name = (row.get("item") or "").strip()
                 if not name:
                     continue
+                if name in seen:
+                    dupes.append(name)
+                seen.add(name)
                 items.append(Item(
                     name,
                     state=(row.get("state") or AVAILABLE).strip() or AVAILABLE,
@@ -461,6 +484,16 @@ def read_pool(path):
                     note=row.get("note") or ""))
     except OSError as exc:
         die("cannot read %s: %s" % (path, exc))
+    if dupes:
+        # add() cannot make these and every write is under the lock, so a
+        # duplicate means the file was edited or merged by hand. Two rows
+        # for one item disagree about its state, every count is wrong,
+        # and only one of them would ever be updated again -- so this is
+        # worth stopping for rather than guessing which row is real.
+        die("%s names %s twice: %s\n"
+            "%s: two rows for one item disagree about its state; keep one"
+            % (path, "an item" if len(set(dupes)) == 1 else "items",
+               ", ".join(sorted(set(dupes))[:5]), PROG))
     return items
 
 
@@ -563,11 +596,23 @@ def wanted_items(args, verb):
 # ---------------------------------------------------------------------------
 
 def _open(args):
-    """Lock the pool, read it, and expire what has run out."""
+    """Lock the pool, read it, and expire what has run out.
+
+    The caller releases the lock in its own finally, but that finally is
+    not in force until this has returned -- so anything that fails in
+    here has to hand the lock back itself. It used to not, and a pool
+    that would not parse left its lock behind: every later run then
+    waited out --stale-lock before it could do anything, and on a shared
+    pool that is the whole fleet stopped by one bad row.
+    """
     lock = PoolLock(args.pool, args.lock_timeout, args.stale_lock, args.quiet)
     lock.__enter__()
-    items = read_pool(args.pool)
-    freed = reclaim(items, time.time())
+    try:
+        items = read_pool(args.pool)
+        freed = reclaim(items, time.time())
+    except BaseException:
+        lock.__exit__(None, None, None)
+        raise
     return lock, items, freed
 
 
@@ -582,6 +627,8 @@ def cmd_add(args):
                     names.extend(_names_from_lines(fh.read().splitlines()))
             except OSError as exc:
                 die("cannot read %s: %s" % (source, exc))
+        elif os.path.isdir(source):
+            die("%s is a directory, not a list of items" % source)
         else:
             # Not a file, so it is a name or a range.  A typo'd path
             # would otherwise be silently added as an item called
@@ -618,10 +665,19 @@ def cmd_add(args):
     return 0
 
 
+# A comment opens the line or follows whitespace.  Splitting on a bare
+# "#" instead turned `file#1` and `file#2` into two copies of `file`:
+# one item where there were two, and the other silently never worked on.
+COMMENT_RE = re.compile(r"(?:^|\s)#")
+
+
 def _names_from_lines(lines):
     out = []
     for line in lines:
-        line = line.split("#", 1)[0].strip()
+        m = COMMENT_RE.search(line)
+        if m:
+            line = line[:m.start()]
+        line = line.strip()
         if line:
             out.extend(expand_range(line))
     return out
@@ -637,7 +693,13 @@ def cmd_take(args):
     holder = args.holder or whoami()
     now = time.time()
     lease_id = new_lease_id()
-    expires = int(now + lease_secs)
+    # Rounded up, not truncated. int() threw away the fraction, so every
+    # lease came out up to a second shorter than it was asked for -- a
+    # 1s lease measured 0.93s here. Short is the dangerous direction: a
+    # lease that ends early hands the item to somebody else while the
+    # first worker is still on it, which is the duplicate work this tool
+    # exists to prevent. Up to a second long costs nothing.
+    expires = int(math.ceil(now + lease_secs))
 
     lock, items, freed = _open(args)
     try:
@@ -683,9 +745,20 @@ def cmd_take(args):
 
     ticket = render_ticket(taken, args.pool, holder, lease_id, expires)
     if args.output:
-        with _WriteGuard(args.output):
+        try:
             with io.open(args.output, "w", encoding="utf-8") as fh:
                 fh.write(ticket)
+        except OSError as exc:
+            # The pool is already written, so the items are leased to a
+            # holder who has no record of which ones -- unreachable until
+            # the lease runs out, which is the whole hour by default.
+            # A full disk or a typo'd -o is enough to hit this, so hand
+            # them straight back rather than stranding them.
+            back = give_back(args, lease_id)
+            die("cannot write %s: %s\n"
+                "%s: the %d item(s) taken were put back -- a lease nobody "
+                "can read is worse than no lease" % (args.output, exc,
+                                                     PROG, back))
     else:
         sys.stdout.write(ticket)
 
@@ -698,6 +771,29 @@ def cmd_take(args):
     else:
         note("took nothing: the pool has no available items", args.quiet)
     return 1 if refused else 0
+
+
+def give_back(args, lease_id):
+    """Free every item still held under LEASE_ID.  Returns how many.
+
+    Used when a take succeeded in the pool but the ticket could not be
+    written: the lease exists and nobody can act on it.
+    """
+    lock = PoolLock(args.pool, args.lock_timeout, args.stale_lock, True)
+    lock.__enter__()
+    try:
+        items = read_pool(args.pool)
+        freed = 0
+        for it in items:
+            if it.state == HELD and it.lease_id == lease_id:
+                it.note = "ticket could not be written; put back"
+                it.free()
+                freed += 1
+        if freed:
+            write_pool(args.pool, items)
+        return freed
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def _close(args, verb):
@@ -919,12 +1015,17 @@ def render_status(items, freed, pool, now):
     out.append("  PROGRESS   %d of %d done (%s), %d held, %d available"
                % (len(done), total, pct_str(len(done), total),
                   len(held), len(avail)))
-    if held:
-        soon = [it for it in held if _num(it.expires_ts) - now < 300]
-        nearest = min(_num(it.expires_ts) - now for it in held)
+    dated = [it for it in held if it.expires_ts]
+    if dated:
+        soon = [it for it in dated if _num(it.expires_ts) - now < 300]
+        nearest = min(_num(it.expires_ts) - now for it in dated)
         out.append("  LEASES     %d held, next expires in %s%s"
                    % (len(held), fmt_secs(nearest),
                       ", %d within 5m" % len(soon) if soon else ""))
+    elif held:
+        # Only reachable if a row was hand-edited between the reclaim and
+        # here; say so rather than counting down from the epoch.
+        out.append("  LEASES     %d held, none carrying a deadline" % len(held))
     if freed:
         out.append("  RECLAIMED  %d lease(s) had expired and went back in "
                    "the pile" % len(freed))
@@ -986,14 +1087,25 @@ def render_status(items, freed, pool, now):
 # CLI
 # ---------------------------------------------------------------------------
 
-def _common(p):
-    p.add_argument("--pool", default=_env("POOL", DEFAULT_POOL))
+def _common(p, defaults=False):
+    """The flags that mean the same thing whatever the verb.
+
+    Added to the top-level parser *and* to every verb, so `muster --pool
+    p.csv status` and `muster status --pool p.csv` are the same command.
+    Only the top-level copy carries real defaults; the verb's copies are
+    SUPPRESS, so giving a flag after the verb overrides one given before
+    it, and leaving it out does not overwrite it with a default.
+    """
+    def d(value):
+        return value if defaults else argparse.SUPPRESS
+    p.add_argument("--pool", default=d(_env("POOL", DEFAULT_POOL)))
     p.add_argument("--lock-timeout", type=float,
-                   default=float(_env("LOCK_TIMEOUT", DEFAULT_LOCK_TIMEOUT)))
+                   default=d(float(_env("LOCK_TIMEOUT",
+                                        DEFAULT_LOCK_TIMEOUT))))
     p.add_argument("--stale-lock", type=float,
-                   default=float(_env("STALE_LOCK", DEFAULT_STALE_LOCK)))
-    p.add_argument("--as", dest="holder", default=_env("AS"))
-    p.add_argument("--quiet", action="store_true")
+                   default=d(float(_env("STALE_LOCK", DEFAULT_STALE_LOCK))))
+    p.add_argument("--as", dest="holder", default=d(_env("AS")))
+    p.add_argument("--quiet", action="store_true", default=d(False))
     return p
 
 
@@ -1009,6 +1121,7 @@ def build_parser():
                        "This is free software: you are free to change and redistribute it.\n"
                        "There is no warranty, to the extent permitted by law."
                    ) % (PROG, VERSION))
+    _common(p, defaults=True)
     sub = p.add_subparsers(dest="cmd")
 
     a = _common(sub.add_parser("add", help="put items in the pool"))
@@ -1068,13 +1181,13 @@ def main(argv=None):
     parser, sub = build_parser()
     if argv and argv[0] == "help":
         return cmd_full_help(parser, sub)
-    # No verb is the question people actually have.
+    # No verb is the question people actually have -- including when
+    # only the shared flags were given, as in `muster --pool p.csv`.
     if not argv:
         argv = ["status"]
     args = parser.parse_args(argv)
     if not args.cmd:
-        parser.print_help()
-        return 2
+        args = parser.parse_args(["status"] + argv)
     return VERBS[args.cmd](args)
 
 

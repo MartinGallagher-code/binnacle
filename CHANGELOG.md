@@ -62,8 +62,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Leases are wall-clock deadlines, so workers have to roughly agree about
   the time — which is what `skew` is for, and the docs say so.
 
-  Thirty-four suite cases cover it, including the concurrency, the expiry,
+  Forty-two suite cases cover it, including the concurrency, the expiry,
   both late-completion paths, stale-lock breaking, and the rounding.
+
+  Eight bugs found by going at the edges of it after it was written, each
+  with a case that fails against the code before the fix:
+
+  - **A pool error stranded the lock.** The caller's `finally` is not in
+    force until `_open` has returned, so anything that failed while
+    reading the pool left the lock file behind — and every later run then
+    waited out `--stale-lock` before it could do anything. On a shared
+    pool that is the whole fleet stopped by one bad row. `_open` now
+    hands the lock back itself on any failure.
+  - **A ticket that could not be written left the items leased.** The pool
+    is written before the ticket, so a full disk or a typo'd `-o` left
+    items held by somebody with no record of which ones — unreachable for
+    the whole lease. They are handed straight back now: a lease nobody can
+    read is worse than no lease.
+  - **A `#` inside an item name truncated it.** Comments were stripped by
+    splitting on a bare `#`, so `file#1` and `file#2` both became `file`:
+    one item where there were two, and the other silently never worked
+    on. A comment now has to open the line or follow whitespace.
+  - **A held row carrying no deadline was held forever**, since expiry
+    needs a deadline to compare against — and `status` printed the epoch
+    as a countdown, `next expires in -20692d23h`. Such a row is not a
+    lease either, and is now reclaimed.
+  - **Two rows for one item were counted as two items.** `add` cannot
+    make these, but a hand edit or a merge can; the rows disagree about
+    state, every count is wrong, and only one would ever be updated
+    again. Refused, naming the item.
+  - **`--pool` and the other shared flags only worked after the verb**, so
+    `muster --pool p.csv status` — which is what people type — failed with
+    argparse blaming the verb for an invalid choice. Accepted in both
+    places now, with the later one winning.
+  - **A malformed duration raised a traceback.** `.` and `1.2.3` are runs
+    of digits and dots that are not numbers; both reached `float()` and
+    came back as a bare `ValueError` where a one-line refusal belongs.
+  - **`add somedir` added the directory as an item.** A directory is not a
+    list of items and is now refused, like a mistyped file path already
+    was.
+  - **Every lease was up to a second shorter than it was asked for.** The
+    deadline was `int(now + lease)`, which threw the fraction away — a 1s
+    lease measured 0.93s, and a take could come back already expired.
+    Short is the dangerous direction: a lease that ends early hands the
+    item to somebody else while the first worker is still on it, which is
+    the duplicate work this exists to prevent. Rounded up now, so a lease
+    is never shorter than asked and at most a second longer. Found by the
+    3.6 container, where the margin a fast machine hid was gone.
 
 
 - **`binnacle` — one command that says what is installed and prints every
