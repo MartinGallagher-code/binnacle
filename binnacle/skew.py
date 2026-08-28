@@ -128,7 +128,7 @@ import sys
 import time
 from collections import namedtuple
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 PROG = os.path.basename(sys.argv[0]) or "skew.py"
 
 CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"
