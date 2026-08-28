@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-28
+
 ### Added
 
 - **`manifest` — which servers are those, in the layout?** A fleet list is
@@ -262,6 +264,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same peer never converged: every size read as a black hole and the pair
   reported no path MTU at all. It is now resolved by index too. Both are
   covered by suite cases that fail against the previous code.
+
+- **The test box's own hardware clock leaked into skew's reports.** The
+  skew suite's `sk()` helper ran the tool with no `--rtc-path`, so every
+  live-socket test read the real `/sys/class/rtc` of whatever machine the
+  suite was on. A CI runner whose hardware clock was ten minutes out then
+  failed *a reply not echoing the query* — a test that injects a 600s NTP
+  offset and asserts the report never says `10m`. The offset was rejected
+  correctly; the `10m 08s` in the report was the runner's own RTC, in the
+  CLOCK section and in an `RTC_DRIFT` warning. Exactly one of five matrix
+  jobs failed, because each gets its own VM. The helper now defaults the
+  hardware clock to a path that does not exist, so the box underneath
+  cannot appear in a report the tests assert about; the two tests that
+  mean to exercise the RTC pass their own `--rtc-path` and win.
 
 - **CI shipped three console scripts it never ran.** The wheel smoke-test
   in both `ci.yml` and `publish.yml` drove five of the eight entry points,
@@ -1088,7 +1103,8 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
-[Unreleased]: https://github.com/MartinGallagher-code/binnacle/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/MartinGallagher-code/binnacle/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/MartinGallagher-code/binnacle/compare/v0.2.0...v0.2.1

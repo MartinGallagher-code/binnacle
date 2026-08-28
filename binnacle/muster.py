@@ -123,7 +123,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PROG = os.path.basename(sys.argv[0]) or "muster.py"
 
 DEFAULT_POOL = "muster.csv"

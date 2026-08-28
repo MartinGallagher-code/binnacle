@@ -17,18 +17,20 @@ binnacle help netmesh   # just that one
 ## What you get
 
 ```text
-binnacle 0.4.0 -- the housing, and what is in it
+binnacle 0.5.0 -- the housing, and what is in it
 
-  why-slow   0.4.0  why is this box slow?
-  agree      0.4.0  which hosts in this fleet disagree with the rest?
-  logtriage  0.4.0  which ten lines of this log matter?
-  netmesh    0.4.0  is it the network, and which link is sick?
-  reachable  0.4.0  which entries in this server list are still real?
-  resolve    0.4.0  is it DNS, and which resolver is wrong?
-  during     0.4.0  what limited this run, and can you trust the number?
-  skew       0.4.0  does this box know what time it is?
+  why-slow   0.5.0  why is this box slow?
+  agree      0.5.0  which hosts in this fleet disagree with the rest?
+  logtriage  0.5.0  which ten lines of this log matter?
+  netmesh    0.5.0  is it the network, and which link is sick?
+  reachable  0.5.0  which entries in this server list are still real?
+  resolve    0.5.0  is it DNS, and which resolver is wrong?
+  during     0.5.0  what limited this run, and can you trust the number?
+  skew       0.5.0  does this box know what time it is?
+  muster     0.5.0  who has which of these, and what is still outstanding?
+  manifest   0.5.0  which servers are those, in the layout?
 
-  8 instruments, all at 0.4.0.
+  10 instruments, all at 0.5.0.
 
   binnacle help        every instrument's --help, in one page
   binnacle help TOOL   just that one
@@ -56,7 +58,7 @@ Every instrument is therefore asked separately, and a disagreement is a
 finding:
 
 ```text
-  SKEW     netmesh says 0.3.0; this command says 0.4.0.
+  SKEW     netmesh says 0.4.0; this command says 0.5.0.
            A tool carries its own version because it is
            routinely copied to a machine on its own, and
            `agree` groups a fleet by what --version says.
@@ -65,7 +67,7 @@ finding:
 ```
 
 A file that cannot be imported at all is reported the same way, as `BROKEN`,
-and the other seven still list — one unimportable file must not cost you the
+and the other nine still list — one unimportable file must not cost you the
 answer to *what is installed here*.
 
 ## It runs nothing
