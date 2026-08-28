@@ -8,7 +8,7 @@
 [![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds nine, for Linux boxes, the fleets they belong to, and the networks
+one holds ten, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -22,6 +22,7 @@ between them.
 | `during` | What limited this run, and can I trust the number? |
 | `skew` | Does this box know what time it is? |
 | `muster` | Who has which of these, and what is still outstanding? |
+| `manifest` | Which servers are those, in the layout? |
 
 ```bash
 pip install binnacle
@@ -36,8 +37,8 @@ binnacle          # what is installed here, and what version each tool says it i
 binnacle help     # every tool's --help, on one page
 ```
 
-`binnacle` is the housing rather than a ninth instrument -- one name to
-remember instead of eight, and the only thing that will tell you a module
+`binnacle` is the housing rather than a tenth instrument -- one name to
+remember instead of nine, and the only thing that will tell you a module
 was left behind at an older version.
 
 ## Diagnose, don't dump
@@ -91,7 +92,7 @@ agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --c
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The eight, briefly
+## The ten, briefly
 
 ### why-slow
 
@@ -188,6 +189,30 @@ that disagree means the daemon may have picked the liar; and stratum 16 is
 separated from both alive and dead, since a source reporting itself
 unsynchronised answers every health check and provides no time.
 
+### muster
+
+A pool of items handed out under a lease, once each, with an honest answer
+to how much is left. The thing that actually goes wrong on a list of forty
+hosts is never the work, it is the bookkeeping: two people take the same
+host, somebody's laptop shuts and eleven items are held by nobody forever,
+and at the end nobody can say which twelve are left. **An expired lease is
+not a lease**, worked out from the timestamps as each command opens the
+pool, so nothing has to run and nothing has to notice -- there is no daemon
+and no reaper, only the CSV you named. Finishing after your lease lapsed is
+still accepted, because the work did happen, but it is reported as a
+`CONFLICT` naming whoever holds it now.
+
+### manifest
+
+Turns a datacenter layout into a list of hostnames. `manifest floor.dc
+'rack[1-3]'` is the servers in those racks, one per line, which is already
+the input to `agree`, `reachable` or `muster`. **A selector names elements
+and the answer is the machines at or under them** -- one rule, so `room[1]`,
+`row[A,C]`, `+gpu`, `model=hgx*` and a bare hostname all mean the obvious
+thing without anyone having to know that a rack is not a server. It reads
+the layout and nothing else: no ssh, no DNS, no inventory API, and the file
+is never written to.
+
 ## Documentation
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
@@ -198,7 +223,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # nine suites, 234 checks
+bash tests/run_tests.sh          # twelve suites, 348 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

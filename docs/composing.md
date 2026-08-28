@@ -1,6 +1,6 @@
 # Composing them
 
-Each tool is useful alone. The reason to have eight is that they fit
+Each tool is useful alone. The reason to have ten is that they fit
 together: four of them produce deterministic CSV, one of them fans things
 out across a fleet, and one keeps the host list honest so the fan-out is not
 half wasted.

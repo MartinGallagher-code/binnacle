@@ -31,25 +31,25 @@ usual cause of `invalid-publisher`.
 
 ## Cutting a release
 
-1. Update the version in **all twelve** places — they must agree, and
+1. Update the version in **all thirteen** places — they must agree, and
    the suite fails if they do not:
    - `pyproject.toml` → `version`
    - `binnacle/__init__.py` → `VERSION`
-   - each tool's own `VERSION`, in all nine modules
+   - each tool's own `VERSION`, in all ten modules
    - `binnacle/binnacle.py` → `VERSION`
 
-   The nine are not redundant. A tool is routinely `scp`'d to a machine
+   The ten are not redundant. A tool is routinely `scp`'d to a machine
    that has never heard of this package, where its own `VERSION` is the
    only version there is — and `agree` groups a fleet by what `--version`
    reports, so a module left behind at the old number reads as version
    skew across the fleet rather than as a release that was cut carelessly.
 
-   `binnacle` is the twelfth because it is the command that reports
-   the other eleven: it compares each instrument's `VERSION` against its
+   `binnacle` is the thirteenth because it is the command that reports
+   the other twelve: it compares each instrument's `VERSION` against its
    own and calls a disagreement `SKEW`, so a `binnacle` left behind
-   would accuse the nine tools that were bumped correctly. The
+   would accuse the ten tools that were bumped correctly. The
    `binnacle/*.py` glob below already covers it — and running
-   `binnacle` after the bump is the fastest check that all twelve
+   `binnacle` after the bump is the fastest check that all thirteen
    moved, since it exits 1 if they did not.
 
    ```bash
@@ -81,7 +81,7 @@ python -m twine check dist/*
 
 # The published artifact must be a working tool, not just valid metadata.
 python -m pip install dist/*.whl
-binnacle          # all twelve versions agree, and it exits 0
+binnacle          # all thirteen versions agree, and it exits 0
 netmesh selftest
 ```
 

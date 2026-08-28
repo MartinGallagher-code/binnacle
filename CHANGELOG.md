@@ -8,6 +8,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`manifest` — which servers are those, in the layout?** A fleet list is
+  a datacenter fact — these racks, in that room, hold these machines — but
+  it is almost always kept as a text file somebody maintains by hand, so it
+  is always slightly wrong. The machines decommissioned last quarter are
+  still in it, the row added in March is not, and nobody finds out until a
+  fan-out quietly skips a rack.
+
+  The building already knows, and if that description exists as a file then
+  the host list is a *query* against it rather than a second copy that has
+  to be kept in step. `manifest floor.dc 'rack[1-3]'` prints the servers in
+  those racks, one per line, which is already the input to `muster add -`,
+  `agree --hosts` or `netmesh gen --servers -`.
+
+  It reads the `.dc` format from the layout_visualizer project: indentation
+  nests, `room`/`row`/`rack`/`node` with `[01..20]` ranges, `key=value`
+  attributes and `+tag`s that inherit downward, and `name={room}{rack}{id}`
+  placeholders that give every machine a flat hostname. `net` and `link`
+  lines are cabling rather than machines and are read past.
+
+  **A selector names elements; the answer is the machines at or under
+  them.** That single rule is what makes `rack[1-3]` mean what a reader
+  expects: a rack is not a server, so matching the rack elements and then
+  filtering for `role=server` would leave nothing at all. Each machine is
+  tested against the selector and against every ancestor it has, so naming
+  a container names its contents — and `room[1]`, `row[A,C]`, `+gpu`,
+  `model=hgx*`, a path, a glob and a bare hostname all work the same way,
+  with `!` to negate. Arguments AND together, commas inside one OR.
+
+  Ids are matched forgivingly, because a rack called `R01` is the rack you
+  mean when you type `rack[1]` and having to remember the zero padding
+  would make the tool useless from memory. Both range spellings are
+  accepted — `rack[1-3]` as the rest of this package writes one, `rack[1..3]`
+  as the layout file does — as is a plural kind, so `racks[1-3]` is the same
+  question.
+
+  `--role` decides what counts as a server (default `server`, `--role any`
+  turns it off); a layout that sets no `role=` anywhere gets its leaf nodes
+  and is told so, rather than silently including the switches. `--csv`
+  adds where each machine is, `--path` prints paths, `--count` prints the
+  number. It reads and prints: nothing is contacted, nothing is written,
+  and the layout file is never modified.
+
 - **`muster` — hand out work from a pool, once each, and know what is
   left.** Some jobs are a list and a promise: forty hosts to patch, nine
   hundred files to re-encode, every switch in a rack to walk up to. The

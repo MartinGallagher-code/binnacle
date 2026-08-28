@@ -145,7 +145,7 @@ names its codec instead of taking what the locale offers:
 * **`_stdio_safe()` runs first in every `main`** — when the locale claims
   ASCII, stdout and stderr are rewrapped with `backslashreplace` so a
   report is never lost to the terminal printing it. It is one of the
-  verbatim-duplicated helpers below, so the eight copies are held identical.
+  verbatim-duplicated helpers below, so the eleven copies are held identical.
 
 The failure this prevents is not hypothetical or even a crash: before the
 rule, a BOM made `resolve` read a healthy box's `resolv.conf` as empty and
@@ -159,7 +159,7 @@ it surfaces on a developer machine and all of it surfaces on the fleet.
 ## Testing
 
 ```bash
-bash tests/run_tests.sh              # all nine suites, 234 checks
+bash tests/run_tests.sh              # all twelve suites, 348 checks
 bash tests/run_tests.sh agree        # one suite
 ```
 
