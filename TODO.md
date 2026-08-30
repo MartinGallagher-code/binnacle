@@ -20,7 +20,7 @@ shipped and two tools have been added:
   and `manifest` (turn a datacenter layout into a server list).
 - **0.6.0** — `manifest --sample`.
 
-**351 checks across twelve suites** (was 234 across nine). The verification
+**358 checks across twelve suites** (was 234 across nine). The verification
 gate in section 4 is what was actually run before each of those releases,
 not a description of what ought to be run.
 
@@ -28,49 +28,40 @@ No open pull requests, no open issues, no stale branches.
 
 ---
 
-## 1. `netmesh` 2b: path change mid-run, via reply TTL — **next**
+## 1. The netmesh backlog is empty
 
-**The fault:** an ECMP rehash or route flap partway through a window means
-the two halves measured **different physical paths**, so averaging them
-averages two experiments. This is a **trust** rule, shaped exactly like
-`PEER_NOT_CONCURRENT` in `during`.
+Both remaining network-testing features have landed. What is here is the
+shape of them, so the next change does not have to rediscover it.
 
-**Shape:** record the IP TTL of each reply, per interval. A hop-count change
-means the route moved. No traceroute and no root.
+**Path change mid-run (reply TTL).** A reply's TTL is the hop count it
+survived, so a change in it means the route moved and the window spans more
+than one path. `reply_ttl` and `ttl_hops` carry it; `PATH CHANGED` reports
+it. A trust rule, not a performance one.
 
-**Where to work:** the agent's receive path. This needs `IP_RECVTTL` plus
-`recvmsg()` to get the ancillary data — the fiddliest part of what is left.
-Then one appended column on the `tx` row, and a rule in `summarize`.
+**Locating the queue (`--hops N`).** The first N hops of each path are
+timed alongside the probes, and `QUEUE AT HOP` names the first hop whose
+own delay rose between the idle and loaded windows. First riser, not
+worst: everything past a full buffer inherits its wait. Off by default,
+because it is extra probes on the fabric being measured.
 
-**Notes:**
-- Slots straight into the idle/loaded split: a path change *at* the split is
-  a different story from one mid-window.
-- Where `IP_RECVTTL` is unavailable the column is blank and the rule skips —
-  blank means not measured, as everywhere else.
-- **The flow sockets are the receive path now too.** `--flows N` gave each
-  bucket its own socket, and `recvmsg()` has to be wired into every one of
-  them, not just `self.sock`, or the TTL is recorded for an
-  unrepresentative slice of the probes. This is the one place where the
-  flow-hash work made this item bigger rather than smaller.
-- Nothing has been started: there is no `IP_RECVTTL` or `recvmsg` anywhere
-  in `netmesh.py` today.
+Both work without root. `IP_RECVTTL` gives the reply TTL; `IP_RECVERR`
+plus `MSG_ERRQUEUE` gives the ICMP Time Exceeded that a low-TTL probe
+provokes -- the `tracepath` mechanism. A raw ICMP socket would have been
+simpler and is not available to a fleet.
 
-## 2. `netmesh` 2c: locate the queue
+Ideas worth considering next, none of them started:
 
-**The fault:** we know *that* latency rose under load, and (from the
-flow-hash work) *which path*; we still do not know *where* along it. The
-difference between "the network got slow" and "the queue on the second hop
-is the one to fix".
+- **Per-hop loss, not just latency.** The sweep already knows how many
+  probes each hop answered. A hop that answers 60% of the time is either
+  rate-limiting ICMP (normal, and not a finding) or dropping (a finding),
+  and telling those apart is the work.
+- **A path-change and a queue at the same hop** is one story, not two.
+  Nothing currently correlates them.
+- **IPv6.** Everything here is `AF_INET`: `IPV6_RECVHOPLIMIT` and
+  `IPV6_RECVERR` are the equivalents, and the mesh format would need to
+  carry v6 endpoints first.
 
-**Shape:** probe with increasing TTL during the loaded window; the hop where
-the latency delta appears is the buffer that filled.
-
-**Where to work:** a new probe mode in the agent, plus reporting. Largest of
-the three, and the natural sequel to `under_load()` and to 2b.
-
----
-
-## 3. Release mechanics that still need a person
+## 2. Release mechanics that still need a person
 
 Two things about publishing are worth knowing before the next release,
 because neither is visible from the repository alone.
@@ -96,7 +87,7 @@ like this one is the human's.
 
 ---
 
-## 4. Things learned the hard way
+## 3. Things learned the hard way
 
 Worth reading before touching the suite — each of these cost a red run.
 
@@ -108,6 +99,21 @@ Worth reading before touching the suite — each of these cost a red run.
   `10m` — the rejection worked, and the `10m 08s` was the runner's own RTC.
   Exactly one of five matrix jobs failed, because each gets its own VM.
   When a case asserts on a report, pin every input the report can read.
+- **A fixture has to be able to tell the right answer from a plausible
+  one.** The `QUEUE AT HOP` case asserted that the *first* rising hop is
+  named rather than the worst -- and passed against an implementation that
+  picked the worst, because in that fixture one hop was both. A fixed
+  delay added at one hop makes the ratios *fall* along the path, so the two
+  answers coincide unless a second interface queues as well. Before
+  trusting a test that encodes a choice, write the variant you rejected and
+  watch the test fail.
+- **`select()` reports a socket's error queue as readable, not as an
+  exceptional condition.** With the hop socket only in the exceptional set
+  it never woke, and every hop came out timed at the probe pacing
+  interval -- the loop's own poll delay, measured and reported as the
+  network. It looked plausible: ~50ms, stable, and wrong by two orders of
+  magnitude. It was caught only by having measured the same hops
+  independently first. `poll()` shows it as `POLLERR`.
 - **Assertions must use short fragments.** Reports wrap at **76 columns**, so
   any `assert_contains` string longer than a line will straddle a break and
   never match. This bit four separate cases. Assert on a distinctive short
@@ -196,7 +202,7 @@ Worth reading before touching the suite — each of these cost a red run.
   `--from-facts` and the flag does nothing. Resolve flag → fact file →
   default, then stamp back into the facts.
 
-## 5. The full verification gate
+## 4. The full verification gate
 
 Everything CI runs, in the order worth running locally:
 

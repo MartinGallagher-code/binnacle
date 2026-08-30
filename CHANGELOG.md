@@ -8,6 +8,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`netmesh --hops N` locates the queue.** `--baseline` says a pair got
+  slower under load; this says *where* along the path. A queue forms in
+  front of one interface and everything downstream inherits the wait, so
+  knowing the path got slow does not say which buffer filled — the
+  difference between "the network got slow" and "the egress queue on the
+  second hop is the one to fix".
+
+  The first `N` hops of each path are timed alongside the normal probes,
+  and `summarize` reports the hop whose own delay rose between the idle
+  and loaded windows as `QUEUE AT HOP`.
+
+  **The hop named is the first riser, not the worst.** Every hop past a
+  full buffer inherits its delay, so the largest riser is usually the far
+  end reporting somebody else's queue. A hop that stopped answering under
+  load is not listed at all: it has been shown to stop answering, not to
+  be slow.
+
+  **No root and no raw socket.** A probe sent with a small TTL dies at a
+  router, which says so with an ICMP Time Exceeded; `IP_RECVERR` queues
+  that to the very socket that sent it, readable with `MSG_ERRQUEUE` —
+  what `tracepath` does, and what this package's no-`CAP_NET_RAW` rule
+  requires. One socket carries the whole sweep, because the kernel reports
+  the destination port of the offending datagram, so the TTL is encoded
+  there (`33434 + ttl`) rather than held open as thirty sockets.
+
+  **Off by default**, because the sweep is extra probes on the fabric
+  being measured, and a tool that quietly adds traffic to look harder
+  causes the congestion it then reports.
+
 - **`netmesh` reports when the route moved mid-run.** An ECMP rehash or a
   route flap partway through a window means the two halves of it went over
   different physical links — and the window is still reported as one

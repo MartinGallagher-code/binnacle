@@ -156,7 +156,7 @@ interval:
 ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,
 rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,
 path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,
-reply_ttl,ttl_hops
+reply_ttl,ttl_hops,hop_ttl,hop_addr
 ```
 
 `dir` is `tx` (this host probed peer), `rx` (this host answered peer) or
@@ -192,6 +192,8 @@ that host's outbound path being slower than its inbound.
 
 ## What summarize computes
 
+- **`QUEUE AT HOP`** — with `--hops`, the first hop whose own delay rose
+  under load: the buffer that filled, rather than the pair that felt it.
 - **`PATH CHANGED`** — replies for a pair came back over more than one hop
   count, so the window spans more than one path and its average is an
   average of two experiments. A trust rule, not a performance one.
@@ -463,6 +465,56 @@ than as an idle baseline of zero and an infinite regression against it.
 `--bloat-factor` moves the line (default 4×). It is a ratio rather than an
 absolute, because 200 µs to 800 µs on a LAN and 20 ms to 80 ms across a WAN
 are the same finding about the same queue.
+
+## Where along the path did it queue?
+
+[Latency under load](#latency-under-load) says a pair got slower. This says
+**where**.
+
+A queue forms in front of one interface. Everything downstream of it
+inherits the wait, so knowing the path got slow does not tell you which
+buffer filled — and that is the difference between "the network got slow"
+and "the egress queue on the second hop is the one to fix".
+
+`--hops N` times the first `N` hops of each path alongside the normal
+probes:
+
+```bash
+netmesh check web03 db01 --hops 8 --pps 80
+netmesh summarize --load-split $(date +%s)
+```
+
+```text
+  QUEUE AT HOP  where the delay under load appeared
+
+    a -> b                 hop 2   10.0.1.1         300us -> 2.4ms  (8.0x)
+```
+
+**The hop named is the first one that rose, not the worst.** Every hop past
+a full buffer inherits its delay, so the largest riser is usually the far
+end reporting somebody else's queue. The first riser is the interface to
+look at.
+
+A hop that stopped answering under load is not listed. It has been shown to
+stop answering, not to be slow, and those want different things done about
+them.
+
+### How it works without root
+
+A probe sent with a small TTL dies at a router, which says so with an ICMP
+Time Exceeded. `IP_RECVERR` queues that error to the very socket that sent
+the probe, readable with `MSG_ERRQUEUE` — the same mechanism `tracepath`
+uses, and **no raw socket, no `CAP_NET_RAW`, no root**. A raw ICMP socket
+would have been simpler and is not available to a fleet.
+
+One socket carries the whole sweep. The kernel reports the destination port
+of the datagram that provoked each error, so the TTL is encoded in that port
+(`33434 + ttl`) and every hop is in flight at once, rather than holding
+thirty sockets open or serialising the sweep behind a wait.
+
+**It is off by default.** The sweep is one extra probe per hop per interval
+— small beside the probe stream, but not nothing, and a tool that quietly
+adds traffic to look harder causes the congestion it then reports.
 
 ## See also
 
