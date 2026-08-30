@@ -74,3 +74,17 @@ jobs:
 
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # An upload of a file PyPI already holds is a no-op, not a
+          # failure. PyPI never allows a filename to be reused, so a
+          # second run against an already-published version can only ever
+          # fail -- and it is an easy run to start, because the version
+          # lives in the tree rather than in the dispatch form. Both
+          # failures this workflow has had were exactly that: a dispatch
+          # re-uploading a version that was already up.
+          #
+          # This does not paper over a real mistake. Bumping the version
+          # is what makes an upload new, and an unbumped one has nothing
+          # to publish; skipping it says so quietly instead of ending the
+          # run red. A genuinely new file in the same run still uploads.
+          skip-existing: true
