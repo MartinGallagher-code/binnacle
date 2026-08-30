@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A Release whose tag disagrees with the version is refused before
+  anything is built.** A Release builds from its tag, so the tag is a claim
+  about what is in the tree — and the two can disagree. Tagging `v0.7.0` on
+  a tree that still says 0.6.0 would publish 0.6.0 under a v0.7.0 release,
+  or collide with the 0.6.0 already on PyPI; neither failure says what
+  actually went wrong. `publish.yml` now compares the tag against
+  `pyproject.toml` as its first step on a release-triggered run, so the run
+  fails on the mismatch itself. A manual dispatch has no tag and skips the
+  check.
+
 - **Running the publish workflow twice is no longer a failure.** The upload
   now passes `skip-existing: true`, so a file PyPI already holds is skipped
   rather than ending the run red.
