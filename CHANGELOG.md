@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Running the publish workflow twice is no longer a failure.** The upload
+  now passes `skip-existing: true`, so a file PyPI already holds is skipped
+  rather than ending the run red.
+
+  PyPI never lets a filename be reused, so a second run against a version
+  that is already up could only ever fail — and it is an easy run to start
+  by accident, because the version comes from the tree rather than from the
+  dispatch form, so nothing about starting the run says which version it is
+  about to upload. Both failures this workflow has had were exactly that.
+
+  It does not hide a real mistake: bumping the version is what makes an
+  upload new, an unbumped one has nothing to publish, and every file being
+  skipped is the visible tell that the bump was missed.
+
+  `PUBLISHING.md` gains a section on this, with two things worth knowing
+  when reading a publish log: a rebuilt wheel is not byte-identical to the
+  published one even from the same commit, because wheels embed file
+  timestamps; and a dispatch builds from the branch while a Release builds
+  from the tag, which agree only while the tag is the branch head.
+
 ## [0.6.0] - 2026-08-28
 
 ### Added

@@ -88,6 +88,31 @@ netmesh selftest
 `twine check` catches a README that PyPI will not render, which is the most
 common cosmetic failure.
 
+## Running the publish twice
+
+Harmless. The upload passes `skip-existing: true`, so a file PyPI already
+holds is skipped rather than failing the run.
+
+That matters because **PyPI never lets a filename be reused**. Re-running
+the publish against a version that is already up could otherwise only ever
+fail, and it is an easy run to start by accident: the version comes from
+the tree, not from the dispatch form, so nothing about starting the run
+tells you which version it is about to upload.
+
+What it does not do is hide a mistake. Bumping the version is what makes an
+upload new; an unbumped one has nothing to publish, and is now skipped
+quietly instead of ending the run red. If you expected new files and see
+every one skipped, the version was not bumped.
+
+Two related things are worth knowing when reading a publish log:
+
+- **A rebuilt wheel is not byte-identical to the one already published,**
+  even from the same commit, because wheels embed file timestamps. A
+  different hash in the log is not evidence that the wrong thing was built.
+- **A dispatch builds from whatever the branch says, a Release builds from
+  the tag.** They agree only while the tag is the branch head. Publishing
+  the Release is the safer of the two for exactly that reason.
+
 ## Testing the whole path first
 
 To rehearse without touching the real index, add a second trusted publisher
