@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`netmesh` reports when the route moved mid-run.** An ECMP rehash or a
+  route flap partway through a window means the two halves of it went over
+  different physical links — and the window is still reported as one
+  measurement, so its average is an average of two experiments and the p50
+  belongs to neither. Nothing in the package could see it.
+
+  Every reply carries the hop count it survived in its IP TTL, so the agent
+  records it: `reply_ttl` is the hop count the interval ended on, and
+  `ttl_hops` how many times it moved within that interval. A change either
+  way raises `PATH CHANGED` in `summarize`.
+
+  **A trust rule, not a performance one**, shaped like `during`'s
+  `PEER_NOT_CONCURRENT`: it does not say the path got worse, it says the
+  numbers above it describe more than one path. No traceroute and no root —
+  just `IP_RECVTTL` on the socket.
+
+  The TTL is read on **every** receiving socket, including each `--flows`
+  bucket. Those buckets are the receive path too, and reading it off the
+  main socket alone would have recorded the hop count for one probe in N
+  and reported it as the path.
+
+  Two details that had to be measured rather than assumed: Python exposes
+  no `IP_RECVTTL` constant on Linux, and the option you set (12) is not the
+  type the kernel tags the ancillary data with (`IP_TTL`, 2). The payload
+  is a native int on Linux and a single byte elsewhere; both are read,
+  because guessing wrong yields a plausible hop count rather than an error.
+  Where the platform lacks it, both columns are blank and the rule skips —
+  blank means *not measured*, which is not *the route held*.
+
 ### Fixed
 
 - **A Release whose tag disagrees with the version is refused before

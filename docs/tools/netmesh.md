@@ -155,14 +155,19 @@ interval:
 ```text
 ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,
 rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,
-path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow
+path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,
+reply_ttl,ttl_hops
 ```
 
 `dir` is `tx` (this host probed peer), `rx` (this host answered peer) or
 `host` (totals). `flow` is blank on every row except the per-source-port
 breakdown described under [Which path did it take?](#which-path-did-it-take);
-a row carrying one is part of the row above it, never an addition to it. Percentiles come from a constant-memory quarter-octave
-histogram — about 20% wide, which is ample to tell 200 µs from 8 ms.
+a row carrying one is part of the row above it, never an addition to it.
+`reply_ttl` and `ttl_hops` are the hop count replies came back over and how
+often it moved, described under [Did the path hold
+still?](#did-the-path-hold-still). Percentiles come from a constant-memory
+quarter-octave histogram — about 20% wide, which is ample to tell 200 µs
+from 8 ms.
 
 **A blank cell means "not measured", never zero.** A pair whose replies
 dried up writes no RTT at all, because averaging blanks in as zeroes would
@@ -187,6 +192,9 @@ that host's outbound path being slower than its inbound.
 
 ## What summarize computes
 
+- **`PATH CHANGED`** — replies for a pair came back over more than one hop
+  count, so the window spans more than one path and its average is an
+  average of two experiments. A trust rule, not a performance one.
 - The headline is the **median of pair p50s**, not a mean of means, so one
   sick pair neither moves the headline nor hides inside it. Worst-pair
   figures get their own columns.
@@ -356,6 +364,47 @@ duplex mismatch, a dirty fibre. One that is only slow under load is not
 broken at all: it is carrying more than its share, which is what an uneven
 hash does to an otherwise healthy bundle. The two want different things
 done about them, so they are reported as different findings.
+
+## Did the path hold still?
+
+`--flows` answers *which* path a probe took. This answers a different
+question: whether the path a pair was measured over was the **same path
+throughout**.
+
+An ECMP rehash or a route flap partway through a run means the two halves
+of a window went over different physical links. The window is still
+reported as one measurement, so its average is an average of two
+experiments — and the p50 belongs to neither.
+
+Every reply carries the hop count it survived, in its IP TTL. `netmesh`
+records it, and a change in it means the route moved:
+
+```text
+  PATH CHANGED  replies came back over more than one hop count
+
+    b -> a                   TTL 58                 2 change(s)
+    a -> b                   TTL 58, 60             1 change(s)
+```
+
+Two ways it is seen, and they are the same finding. A TTL that differs
+**between** intervals is a route that moved during the run. One that
+changed **within** an interval is counted by the agent as it happens, in
+the `ttl_hops` column, because by report time the interval has already been
+averaged.
+
+**This is a trust rule, not a performance one.** Nothing in it says the
+path got worse — `PATH CHANGED` says the numbers above it describe more
+than one path, so read that pair per interval before believing its p50.
+It is shaped like [`during`](during.md)'s `PEER_NOT_CONCURRENT`: a finding
+about whether a measurement means what it appears to.
+
+It needs no traceroute and no root — just `IP_RECVTTL` on the socket. Where
+the platform does not have it, both columns are blank and the rule skips,
+because blank means *not measured* and is not the same as *the route held*.
+
+The TTL is read on **every** socket, including each `--flows` bucket. They
+are the receive path too, and reading it off the main socket alone would
+record the hop count for one probe in N and report it as the path.
 
 ## Latency under load
 

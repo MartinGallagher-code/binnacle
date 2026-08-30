@@ -63,10 +63,17 @@ Output format
   interval:
     ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,
     rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,
-    path_mtu,mtu_state,agent_cpu_pct,note
+    path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,
+    reply_ttl,ttl_hops
   dir is tx (this host probed peer), rx (this host answered peer) or host
   (this host's totals).  A blank cell means "not measured" and never zero,
   so averages skip it rather than being flattered by it.
+
+  reply_ttl is the hop count the last reply of that interval survived, and
+  ttl_hops how many times it changed within the interval.  A change means
+  the route moved, so the window spans more than one path -- `summarize`
+  reports that as PATH CHANGED.  Both are blank where the platform has no
+  IP_RECVTTL, which is not the same as no change.
 
   --grid DIR additionally writes N*N grids in the mesh's own shape:
   rtt_p50, rtt_p99, jitter, loss, mtu and asym.  A dark row is a host whose
@@ -138,6 +145,19 @@ DEFAULT_PMTU_EVERY = 300.0
 MIN_MTU_PAYLOAD = 508               # 576-byte IPv4 minimum, less headers
 IP_HDR_UDP = 28                     # IPv4 20 + UDP 8
 
+# Asking for the reply's TTL, and reading it back.  Two different numbers,
+# which is the trap: IP_RECVTTL (12) is the option that turns the ancillary
+# data on, but what arrives alongside each datagram is tagged IP_TTL (2).
+# Python exposes neither name on Linux, so both are spelled out.  The
+# payload is a native int on Linux and a single byte elsewhere; both are
+# read, because guessing wrong yields a plausible number rather than an
+# error.
+IP_RECVTTL_OPT = 12
+IP_TTL_CMSG = 2
+# Linux hands the TTL over as a native int, other kernels as one byte.
+# Room for the larger, so neither is truncated.
+MAX_TTL_CMSG = 8
+
 # Flow spreading.  One source port means one 5-tuple, which means one path
 # through any LAG or ECMP fabric: a sick bundle member is hit or missed by
 # luck, and that is the classic fault that will not reproduce.  Sweeping
@@ -164,7 +184,7 @@ REPORT_FIELDS = [
     "sent", "recv", "loss_pct",
     "rtt_min_us", "rtt_avg_us", "rtt_p50_us", "rtt_p99_us", "rtt_max_us",
     "jitter_us", "path_mtu", "mtu_state", "agent_cpu_pct", "note",
-    "rx_usecs", "flow",
+    "rx_usecs", "flow", "reply_ttl", "ttl_hops",
 ]
 
 CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every",
@@ -291,6 +311,25 @@ def _env_num(name, default, cast=float):
 
 RTT_OCTAVES = 32
 RTT_NBUCKETS = RTT_OCTAVES * 4
+
+
+def _ttl_of(ancillary):
+    """The reply's TTL out of one datagram's ancillary data, or None.
+
+    The option asked for is IP_RECVTTL, but what comes back is tagged
+    IP_TTL, and Python names neither on Linux -- so this matches on the
+    numbers and reads the payload both ways it is written.  Anything it
+    does not recognise is None rather than a guess: a wrong TTL here is a
+    plausible number that would be reported as a path change.
+    """
+    for level, ctype, data in ancillary or ():
+        if level != socket.IPPROTO_IP or ctype != IP_TTL_CMSG:
+            continue
+        if len(data) >= 4:
+            return struct.unpack("i", data[:4])[0]
+        if len(data) >= 1:
+            return ord(data[:1])
+    return None
 
 
 def rtt_bucket(us):
@@ -660,6 +699,13 @@ class Stream(object):
         self.jitter = 0.0
         self.last_rtt = None
         self.note = ""
+        # The reply TTL, and how often it changed within this interval.
+        # Two scalars rather than one overloaded cell: the last TTL says
+        # which path the interval ended on, and the count says whether it
+        # was the same path throughout. A range like "58-60" in one column
+        # would have been a string in a column of numbers.
+        self.ttl_last = None
+        self.ttl_hops = 0
 
     def record(self, rtt_us):
         self.recv += 1
@@ -675,6 +721,20 @@ class Stream(object):
             d = abs(rtt_us - self.last_rtt)
             self.jitter += (d - self.jitter) / 16.0
         self.last_rtt = rtt_us
+
+    def record_ttl(self, ttl):
+        """One reply's TTL.  A change in it means the route moved.
+
+        Counted rather than collected: what matters is that the hop count
+        changed and how often, not the histogram of values it took.  A
+        flap back and forth is two changes, which is the honest reading --
+        the window still spans more than one path.
+        """
+        if ttl is None:
+            return
+        if self.ttl_last is not None and ttl != self.ttl_last:
+            self.ttl_hops += 1
+        self.ttl_last = ttl
 
 
 class FlowState(Stream):
@@ -815,6 +875,7 @@ class Agent(object):
         self.flow_socks = []
         self.flow_by_fd = {}
         self.pmtu_supported = True
+        self.ttl_supported = False
         self.ping_procs = {}
         self.cpu_prev = read_self_cpu()
         self.cpu_wall = time.monotonic()
@@ -833,6 +894,7 @@ class Agent(object):
             die("cannot bind %s:%d -- %s" % (self.bind or "0.0.0.0",
                                              self.port, exc))
         self.sock.setblocking(False)
+        self.ttl_supported = self._ask_for_ttl(self.sock)
 
         if self.flows > 1 and self.peers:
             self._open_flow_socks()
@@ -849,6 +911,40 @@ class Agent(object):
                 self.mtu_sock = None
                 for st in self.peers.values():
                     st.mtu_state = "unsupported"
+
+    @staticmethod
+    def _ask_for_ttl(sock):
+        """Turn on the reply-TTL ancillary data, if the platform has it.
+
+        Returns whether it took.  Where it does not, the column is blank
+        and the rule that reads it skips -- blank means not measured, as
+        everywhere else here.  Both the setsockopt and `recvmsg` itself
+        are checked, because a kernel can accept the option while the
+        Python build has no `recvmsg` to read the result with.
+        """
+        if not hasattr(sock, "recvmsg") or not hasattr(socket, "CMSG_SPACE"):
+            return False
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, IP_RECVTTL_OPT, 1)
+        except (OSError, socket.error):
+            return False
+        return True
+
+    def _recv(self, sock):
+        """One datagram, with the reply's TTL where the platform gives it.
+
+        Returns (data, src, ttl); ttl is None when it was not measured.
+        Every receiving socket goes through here -- the flow buckets are
+        the receive path too, and reading the TTL off only `self.sock`
+        would record it for one probe in `--flows N` and call that the
+        path.
+        """
+        if not self.ttl_supported:
+            data, src = sock.recvfrom(MAX_SIZE)
+            return data, src, None
+        data, anc, _flags, src = sock.recvmsg(
+            MAX_SIZE, socket.CMSG_SPACE(MAX_TTL_CMSG))
+        return data, src, _ttl_of(anc)
 
     def _open_flow_socks(self):
         """Bind one ephemeral source port per bucket.
@@ -869,6 +965,7 @@ class Agent(object):
                 sk.close()
                 break
             sk.setblocking(False)
+            self._ask_for_ttl(sk)
             self.flow_socks.append(sk)
             self.flow_by_fd[sk.fileno()] = len(self.flow_socks) - 1
         if len(self.flow_socks) < 2:
@@ -922,7 +1019,8 @@ class Agent(object):
                 st.note = "send: %s" % exc.strerror
         st.seq += 1
 
-    def handle_packet(self, data, src, on_mtu_sock=False, flow=None):
+    def handle_packet(self, data, src, on_mtu_sock=False, flow=None,
+                      ttl=None):
         if len(data) < HDR_SIZE:
             return
         magic, kind, flags, idx, plen, rlen, seq, t_send = HDR.unpack(
@@ -970,8 +1068,10 @@ class Agent(object):
         # The bucket is the socket it arrived on, so nothing about the
         # bucket has to be carried on the wire.
         st.record(rtt)
+        st.record_ttl(ttl)
         if flow is not None and flow < len(st.flows):
             st.flows[flow].record(rtt)
+            st.flows[flow].record_ttl(ttl)
         return
 
     def _reply_peer(self, idx, src):
@@ -1154,6 +1254,8 @@ class Agent(object):
             "rtt_avg_us": "" if avg is None else "%.0f" % avg,
             "rtt_max_us": "" if src.rtt_max is None else "%.0f" % src.rtt_max,
             "jitter_us": "%.0f" % src.jitter if src.recv else "",
+            "reply_ttl": "" if src.ttl_last is None else src.ttl_last,
+            "ttl_hops": src.ttl_hops if src.ttl_last is not None else "",
             "note": src.note,
         }
         if probe == "udp":
@@ -1269,10 +1371,10 @@ class Agent(object):
                     flow = self.flow_by_fd.get(s.fileno())
                     while True:
                         try:
-                            data, src = s.recvfrom(MAX_SIZE)
+                            data, src, ttl = self._recv(s)
                         except (BlockingIOError, socket.error):
                             break
-                        self.handle_packet(data, src, on_mtu, flow)
+                        self.handle_packet(data, src, on_mtu, flow, ttl)
 
                 now = time.monotonic()
                 for st in self.peers.values():
@@ -1328,10 +1430,11 @@ class Agent(object):
                     flow = self.flow_by_fd.get(s.fileno())
                     while True:
                         try:
-                            data, src = s.recvfrom(MAX_SIZE)
+                            data, src, ttl = self._recv(s)
                         except (BlockingIOError, socket.error):
                             break
-                        self.handle_packet(data, src, s is self.mtu_sock, flow)
+                        self.handle_packet(data, src, s is self.mtu_sock,
+                                           flow, ttl)
 
             # Final partial interval: report it rather than lose it.
             for st in self.ping_peers.values():
@@ -1988,6 +2091,81 @@ def flow_spread(rows, min_samples=FLOW_MIN_SAMPLES):
     return recs
 
 
+def path_changes(rows):
+    """Pairs whose replies came back over more than one hop count.
+
+    Two ways the route can be seen to move, and both are the same finding:
+    the TTL changed *within* an interval, which the agent counted as it
+    happened; or it differed *between* intervals, which only shows up
+    here, with every interval of the run in front of us.
+
+    This is a trust rule rather than a performance one, shaped like
+    `PEER_NOT_CONCURRENT` in `during`: nothing here says the path got
+    worse, only that a window which is reported as one measurement spans
+    more than one path, so averaging it averages two experiments.
+
+    A pair with no TTL at all is absent rather than clean -- the platform
+    had no `IP_RECVTTL`, and saying "no change" would be inventing the
+    measurement that was skipped.
+    """
+    seen = {}
+    for r in rows:
+        if r.get("dir") != "tx" or r.get("flow"):
+            continue
+        host, peer = r.get("host"), r.get("peer")
+        ttl = r.get("reply_ttl")
+        if not host or not peer or peer == "*" or not ttl:
+            continue
+        rec = seen.get((host, peer))
+        if rec is None:
+            rec = seen[(host, peer)] = {"src": host, "dst": peer,
+                                        "ttls": [], "within": 0}
+        rec["ttls"].append(_int(ttl))
+        rec["within"] += _int(r.get("ttl_hops"))
+
+    recs = []
+    for rec in seen.values():
+        distinct = sorted(set(rec["ttls"]))
+        changes = rec["within"] + (len(distinct) - 1)
+        if changes <= 0:
+            continue
+        rec["distinct"] = distinct
+        rec["changes"] = changes
+        # Between-interval movement is the one worth leading with: a
+        # within-interval flap can be a single reordered reply, while a
+        # run that starts on one hop count and ends on another measured
+        # two paths for certain.
+        rec["between"] = len(distinct) - 1
+        recs.append(rec)
+    recs.sort(key=lambda r: (-r["changes"], r["src"], r["dst"]))
+    return recs
+
+
+def render_path_change(recs, top=5):
+    """The PATH CHANGED section, or nothing when every route held."""
+    if not recs:
+        return []
+    lines = ["", "  PATH CHANGED  replies came back over more than one "
+                 "hop count", ""]
+    for r in recs[:top]:
+        hops = ", ".join(str(t) for t in r["distinct"])
+        lines.append("    %-24s TTL %-18s %d change(s)"
+                     % ("%s -> %s" % (r["src"], r["dst"]), hops,
+                        r["changes"]))
+    if len(recs) > top:
+        lines.append("    ... and %d more" % (len(recs) - top))
+    lines.append("")
+    lines.append("    " + _wrap_text(
+        "A reply's TTL is the hop count it survived, so a change in it "
+        "means the route moved mid-run. Nothing here says the path got "
+        "worse -- it says a window reported as one measurement spans more "
+        "than one path, so its average is an average of two experiments. "
+        "Re-read the pairs above per interval before trusting their p50, "
+        "and check the fabric for a rehash or a flap over the same "
+        "window.", 4))
+    return lines
+
+
 def _pair_p50(ps):
     return ps.p50.mean if ps.p50.n else ps.avg.mean
 
@@ -2511,6 +2689,14 @@ def cmd_summarize(args, mesh=None, fleet=None):
             for f in findings:
                 log("    %s" % _wrap_text(f, 4))
             log("")
+
+    # Before the performance sections: a window that spans two paths is a
+    # reason to distrust the numbers above, so it has to be read first.
+    moved = path_changes(rows)
+    if moved:
+        for line in render_path_change(moved, args.top):
+            log(line)
+        log("")
 
     spread = flow_spread(rows)
     if spread:
