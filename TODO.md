@@ -83,24 +83,16 @@ now checks the tag against `pyproject.toml` before building so that the
 first time it does fire, a tag that disagrees with the tree fails on the
 mismatch rather than on its consequence.
 
-**Only `v0.5.0` and `v0.6.0` are tagged.** `v0.1.0` through `v0.4.0` were
-released and published without tags, so the compare links at the foot of
-`CHANGELOG.md` point at tags that do not exist. Each version resolves
-cleanly to the merge commit on `main` that carries it, verified by reading
-`pyproject.toml` at that commit:
+**Every release is now tagged** — `v0.1.0` through `v0.6.0`, each on the
+merge commit that carries it, verified by reading `pyproject.toml` at each
+commit. `v0.1.0` to `v0.4.0` were released without tags and got them
+retrospectively; the compare links at the foot of `CHANGELOG.md` resolve
+because of it, so a new release only has to keep the pattern going.
 
-```bash
-git tag -a v0.1.0 -m "binnacle 0.1.0" 1b55dec
-git tag -a v0.2.0 -m "binnacle 0.2.0" f6f5e42
-git tag -a v0.2.1 -m "binnacle 0.2.1" 8a256e7
-git tag -a v0.3.0 -m "binnacle 0.3.0" eb9e210
-git tag -a v0.4.0 -m "binnacle 0.4.0" 033a122
-git push origin v0.1.0 v0.2.0 v0.2.1 v0.3.0 v0.4.0
-```
-
-That has to be run by a person: **the sandbox cannot push tags.** A branch
-push succeeds and a `refs/tags/*` push is refused with HTTP 403, so any
-tagging step in a handover like this one is the human's.
+Tagging has to be run by a person: **the sandbox cannot push tags.** A
+branch push succeeds and a `refs/tags/*` push is refused with HTTP 403
+(measured, five attempts with backoff). Any tagging step in a handover
+like this one is the human's.
 
 ---
 
