@@ -63,10 +63,20 @@ Output format
   interval:
     ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,
     rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,
-    path_mtu,mtu_state,agent_cpu_pct,note
+    path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,
+    reply_ttl,ttl_hops
   dir is tx (this host probed peer), rx (this host answered peer) or host
   (this host's totals).  A blank cell means "not measured" and never zero,
   so averages skip it rather than being flattered by it.
+
+  dir is also `hop` when --hops is on: one row per timed hop, with
+  hop_ttl the position in the path and hop_addr the router that answered.
+
+  reply_ttl is the hop count the last reply of that interval survived, and
+  ttl_hops how many times it changed within the interval.  A change means
+  the route moved, so the window spans more than one path -- `summarize`
+  reports that as PATH CHANGED.  Both are blank where the platform has no
+  IP_RECVTTL, which is not the same as no change.
 
   --grid DIR additionally writes N*N grids in the mesh's own shape:
   rtt_p50, rtt_p99, jitter, loss, mtu and asym.  A dark row is a host whose
@@ -138,6 +148,35 @@ DEFAULT_PMTU_EVERY = 300.0
 MIN_MTU_PAYLOAD = 508               # 576-byte IPv4 minimum, less headers
 IP_HDR_UDP = 28                     # IPv4 20 + UDP 8
 
+# Asking for the reply's TTL, and reading it back.  Two different numbers,
+# which is the trap: IP_RECVTTL (12) is the option that turns the ancillary
+# data on, but what arrives alongside each datagram is tagged IP_TTL (2).
+# Python exposes neither name on Linux, so both are spelled out.  The
+# payload is a native int on Linux and a single byte elsewhere; both are
+# read, because guessing wrong yields a plausible number rather than an
+# error.
+IP_RECVTTL_OPT = 12
+IP_TTL_CMSG = 2
+
+# Locating the queue: a probe sent with a small TTL dies at a router, which
+# says so with an ICMP Time Exceeded.  IP_RECVERR queues that to the very
+# socket that sent it, readable with MSG_ERRQUEUE -- no raw socket and no
+# root, which is what `tracepath` does and what this package's "needs no
+# CAP_NET_RAW" rule requires.  A raw ICMP socket would have been simpler
+# and is not available to the fleet.
+IP_RECVERR_OPT = 11
+SO_EE_ORIGIN_ICMP = 2
+ICMP_TIME_EXCEEDED = 11
+ICMP_DEST_UNREACH = 3
+# Which probe an error belongs to is read off the destination port the
+# kernel reports for the offending datagram, so one socket can have all
+# the hops in flight at once instead of one socket per TTL.
+HOP_PORT_BASE = 33434
+MAX_HOPS = 30
+# Linux hands the TTL over as a native int, other kernels as one byte.
+# Room for the larger, so neither is truncated.
+MAX_TTL_CMSG = 8
+
 # Flow spreading.  One source port means one 5-tuple, which means one path
 # through any LAG or ECMP fabric: a sick bundle member is hit or missed by
 # luck, and that is the classic fault that will not reproduce.  Sweeping
@@ -164,11 +203,11 @@ REPORT_FIELDS = [
     "sent", "recv", "loss_pct",
     "rtt_min_us", "rtt_avg_us", "rtt_p50_us", "rtt_p99_us", "rtt_max_us",
     "jitter_us", "path_mtu", "mtu_state", "agent_cpu_pct", "note",
-    "rx_usecs", "flow",
+    "rx_usecs", "flow", "reply_ttl", "ttl_hops", "hop_ttl", "hop_addr",
 ]
 
 CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every",
-               "flows")
+               "flows", "hops")
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +330,77 @@ def _env_num(name, default, cast=float):
 
 RTT_OCTAVES = 32
 RTT_NBUCKETS = RTT_OCTAVES * 4
+
+
+def _ttl_of(ancillary):
+    """The reply's TTL out of one datagram's ancillary data, or None.
+
+    The option asked for is IP_RECVTTL, but what comes back is tagged
+    IP_TTL, and Python names neither on Linux -- so this matches on the
+    numbers and reads the payload both ways it is written.  Anything it
+    does not recognise is None rather than a guess: a wrong TTL here is a
+    plausible number that would be reported as a path change.
+    """
+    for level, ctype, data in ancillary or ():
+        if level != socket.IPPROTO_IP or ctype != IP_TTL_CMSG:
+            continue
+        if len(data) >= 4:
+            return struct.unpack("i", data[:4])[0]
+        if len(data) >= 1:
+            return ord(data[:1])
+    return None
+
+
+class HopStat(object):
+    """One hop's worth of one peer's path, for one interval.
+
+    Keyed by TTL rather than by address, because the address is what
+    changes when the route moves and the position in the path is what
+    stays comparable.  The address is carried along so a finding can name
+    the router, but two intervals are compared by hop number.
+    """
+
+    def __init__(self, ttl):
+        self.ttl = ttl
+        self.addr = ""
+        self.reset()
+
+    def reset(self):
+        self.sent = 0
+        self.recv = 0
+        self.rtt_sum = 0.0
+        self.rtt_min = None
+        self.rtt_max = None
+        self.hist = [0] * RTT_NBUCKETS
+
+    def record(self, rtt_us, addr):
+        self.recv += 1
+        self.rtt_sum += rtt_us
+        if self.rtt_min is None or rtt_us < self.rtt_min:
+            self.rtt_min = rtt_us
+        if self.rtt_max is None or rtt_us > self.rtt_max:
+            self.rtt_max = rtt_us
+        self.hist[rtt_bucket(rtt_us)] += 1
+        if addr:
+            self.addr = addr
+
+
+def _hop_error(data):
+    """One MSG_ERRQUEUE ancillary blob -> (icmp_type, icmp_code, router).
+
+    `struct sock_extended_err` is 16 bytes -- errno, origin, type, code,
+    pad, info, data -- followed by the `sockaddr_in` of whoever sent the
+    error.  Read by offset rather than by a name Python does not define.
+    Anything not originating from ICMP is None: a local error such as an
+    unreachable route is a real failure but not a hop.
+    """
+    if data is None or len(data) < 24:
+        return None
+    origin, etype, ecode = struct.unpack("BBB", data[4:7])
+    if origin != SO_EE_ORIGIN_ICMP:
+        return None
+    addr = socket.inet_ntoa(data[20:24])
+    return etype, ecode, addr
 
 
 def rtt_bucket(us):
@@ -660,6 +770,13 @@ class Stream(object):
         self.jitter = 0.0
         self.last_rtt = None
         self.note = ""
+        # The reply TTL, and how often it changed within this interval.
+        # Two scalars rather than one overloaded cell: the last TTL says
+        # which path the interval ended on, and the count says whether it
+        # was the same path throughout. A range like "58-60" in one column
+        # would have been a string in a column of numbers.
+        self.ttl_last = None
+        self.ttl_hops = 0
 
     def record(self, rtt_us):
         self.recv += 1
@@ -675,6 +792,20 @@ class Stream(object):
             d = abs(rtt_us - self.last_rtt)
             self.jitter += (d - self.jitter) / 16.0
         self.last_rtt = rtt_us
+
+    def record_ttl(self, ttl):
+        """One reply's TTL.  A change in it means the route moved.
+
+        Counted rather than collected: what matters is that the hop count
+        changed and how often, not the histogram of values it took.  A
+        flap back and forth is two changes, which is the honest reading --
+        the window still spans more than one path.
+        """
+        if ttl is None:
+            return
+        if self.ttl_last is not None and ttl != self.ttl_last:
+            self.ttl_hops += 1
+        self.ttl_last = ttl
 
 
 class FlowState(Stream):
@@ -694,6 +825,13 @@ class PeerState(Stream):
     """Everything one direction of one pair needs, in O(1) memory."""
 
     def __init__(self, name, idx, addr, port, rate, ping_only=False):
+        # Per-hop state for the TTL sweep: what each hop measured, which
+        # probes are outstanding, how long the path turned out to be, and
+        # why the sweep is empty when it is.
+        self.hop_stats = {}
+        self.hop_sent = {}
+        self.hop_last = None
+        self.hop_note = ""
         self.name = name
         self.idx = idx
         self.addr = addr
@@ -783,6 +921,13 @@ class Agent(object):
         self.pmtu_every = float(mesh.cfg.get("pmtu_every", DEFAULT_PMTU_EVERY))
         self.flows = max(1, min(int(mesh.cfg.get("flows", DEFAULT_FLOWS)),
                                 MAX_FLOWS))
+        # 0 is off, and off is the default: the sweep is one extra probe
+        # per hop per interval, which is small beside the probe stream but
+        # is not nothing, and a tool that quietly adds traffic to look
+        # harder is the thing 2a's rate split exists to avoid.
+        self.hops = max(0, min(int(mesh.cfg.get("hops", 0)), MAX_HOPS))
+        self.hop_sock = None
+        self.hop_supported = bool(self.hops)
         self.my_idx = mesh.index(me)
 
         self.peers = {}
@@ -815,6 +960,7 @@ class Agent(object):
         self.flow_socks = []
         self.flow_by_fd = {}
         self.pmtu_supported = True
+        self.ttl_supported = False
         self.ping_procs = {}
         self.cpu_prev = read_self_cpu()
         self.cpu_wall = time.monotonic()
@@ -833,9 +979,13 @@ class Agent(object):
             die("cannot bind %s:%d -- %s" % (self.bind or "0.0.0.0",
                                              self.port, exc))
         self.sock.setblocking(False)
+        self.ttl_supported = self._ask_for_ttl(self.sock)
 
         if self.flows > 1 and self.peers:
             self._open_flow_socks()
+
+        if self.hops and self.peers:
+            self._open_hop_sock()
 
         if self.do_pmtu and self.peers:
             self.mtu_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -849,6 +999,127 @@ class Agent(object):
                 self.mtu_sock = None
                 for st in self.peers.values():
                     st.mtu_state = "unsupported"
+
+    @staticmethod
+    def _ask_for_ttl(sock):
+        """Turn on the reply-TTL ancillary data, if the platform has it.
+
+        Returns whether it took.  Where it does not, the column is blank
+        and the rule that reads it skips -- blank means not measured, as
+        everywhere else here.  Both the setsockopt and `recvmsg` itself
+        are checked, because a kernel can accept the option while the
+        Python build has no `recvmsg` to read the result with.
+        """
+        if not hasattr(sock, "recvmsg") or not hasattr(socket, "CMSG_SPACE"):
+            return False
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, IP_RECVTTL_OPT, 1)
+        except (OSError, socket.error):
+            return False
+        return True
+
+    def _recv(self, sock):
+        """One datagram, with the reply's TTL where the platform gives it.
+
+        Returns (data, src, ttl); ttl is None when it was not measured.
+        Every receiving socket goes through here -- the flow buckets are
+        the receive path too, and reading the TTL off only `self.sock`
+        would record it for one probe in `--flows N` and call that the
+        path.
+        """
+        if not self.ttl_supported:
+            data, src = sock.recvfrom(MAX_SIZE)
+            return data, src, None
+        data, anc, _flags, src = sock.recvmsg(
+            MAX_SIZE, socket.CMSG_SPACE(MAX_TTL_CMSG))
+        return data, src, _ttl_of(anc)
+
+    def _open_hop_sock(self):
+        """One socket for the whole TTL sweep, with the error queue on.
+
+        One rather than one per TTL: the kernel reports the destination
+        port of the datagram that provoked each error, so encoding the
+        TTL in that port tells the replies apart without holding thirty
+        sockets open or serialising the sweep behind a wait.
+        """
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sk.setsockopt(socket.IPPROTO_IP, IP_RECVERR_OPT, 1)
+            sk.bind((self.bind, 0))
+            sk.setblocking(False)
+        except (OSError, socket.error):
+            sk.close()
+            self.hop_supported = False
+            for st in self.peers.values():
+                st.hop_note = "no IP_RECVERR"
+            return
+        self.hop_sock = sk
+
+    def _sweep_hops(self):
+        """One probe per hop per peer.  Cheap, and never on the hot path.
+
+        Sent to a port nothing is listening on, which is what makes the
+        far end answer Port Unreachable and so identify itself as the end
+        of the path.  The agent's own probe port is untouched: these go to
+        HOP_PORT_BASE + ttl.
+        """
+        if not self.hop_sock:
+            return
+        for st in self.peers.values():
+            if st.ping_only or st.unresolved:
+                continue
+            for ttl in range(1, self.hops + 1):
+                hs = st.hop_stats.get(ttl)
+                if hs is None:
+                    hs = st.hop_stats[ttl] = HopStat(ttl)
+                try:
+                    self.hop_sock.setsockopt(socket.IPPROTO_IP,
+                                             socket.IP_TTL, ttl)
+                    self.hop_sock.sendto(b"\0" * 16,
+                                         (st.addr, HOP_PORT_BASE + ttl))
+                except (OSError, socket.error):
+                    continue
+                hs.sent += 1
+                st.hop_sent[HOP_PORT_BASE + ttl] = self._now_us()
+
+    def _drain_hop_errors(self):
+        """Read whatever the routers said, and file it by hop.
+
+        Time Exceeded is a hop along the way; Port Unreachable is the far
+        end answering, which is the last hop and the end of the sweep.
+        Anything else is left alone rather than counted as a hop that is
+        not one.
+        """
+        if not self.hop_sock:
+            return
+        while True:
+            try:
+                _d, anc, _f, offender = self.hop_sock.recvmsg(
+                    512, 1024, socket.MSG_ERRQUEUE)
+            except (BlockingIOError, socket.error):
+                return
+            port = offender[1] if offender else 0
+            ttl = port - HOP_PORT_BASE
+            if ttl < 1 or ttl > self.hops:
+                continue
+            for _lvl, _typ, data in anc:
+                got = _hop_error(data)
+                if not got:
+                    continue
+                etype, ecode, router = got
+                if etype not in (ICMP_TIME_EXCEEDED, ICMP_DEST_UNREACH):
+                    continue
+                for st in self.peers.values():
+                    t0 = st.hop_sent.pop(port, None)
+                    if t0 is None:
+                        continue
+                    hs = st.hop_stats.get(ttl)
+                    if hs is not None:
+                        hs.record(self._now_us() - t0, router)
+                    if etype == ICMP_DEST_UNREACH and ecode == 3:
+                        # The far end answered: the path is this long.
+                        st.hop_last = ttl
+                    break
 
     def _open_flow_socks(self):
         """Bind one ephemeral source port per bucket.
@@ -869,6 +1140,7 @@ class Agent(object):
                 sk.close()
                 break
             sk.setblocking(False)
+            self._ask_for_ttl(sk)
             self.flow_socks.append(sk)
             self.flow_by_fd[sk.fileno()] = len(self.flow_socks) - 1
         if len(self.flow_socks) < 2:
@@ -922,7 +1194,8 @@ class Agent(object):
                 st.note = "send: %s" % exc.strerror
         st.seq += 1
 
-    def handle_packet(self, data, src, on_mtu_sock=False, flow=None):
+    def handle_packet(self, data, src, on_mtu_sock=False, flow=None,
+                      ttl=None):
         if len(data) < HDR_SIZE:
             return
         magic, kind, flags, idx, plen, rlen, seq, t_send = HDR.unpack(
@@ -970,8 +1243,10 @@ class Agent(object):
         # The bucket is the socket it arrived on, so nothing about the
         # bucket has to be carried on the wire.
         st.record(rtt)
+        st.record_ttl(ttl)
         if flow is not None and flow < len(st.flows):
             st.flows[flow].record(rtt)
+            st.flows[flow].record_ttl(ttl)
         return
 
     def _reply_peer(self, idx, src):
@@ -1154,6 +1429,8 @@ class Agent(object):
             "rtt_avg_us": "" if avg is None else "%.0f" % avg,
             "rtt_max_us": "" if src.rtt_max is None else "%.0f" % src.rtt_max,
             "jitter_us": "%.0f" % src.jitter if src.recv else "",
+            "reply_ttl": "" if src.ttl_last is None else src.ttl_last,
+            "ttl_hops": src.ttl_hops if src.ttl_last is not None else "",
             "note": src.note,
         }
         if probe == "udp":
@@ -1185,6 +1462,22 @@ class Agent(object):
                 writer.writerow(self._tx_row(ts, st, "udp", fs))
         for st in sorted(self.ping_peers.values(), key=lambda s: s.name):
             writer.writerow(self._tx_row(ts, st, "ping"))
+        for st in sorted(self.peers.values(), key=lambda s: s.name):
+            for ttl in sorted(st.hop_stats):
+                hs = st.hop_stats[ttl]
+                if not hs.sent:
+                    continue
+                avg = (hs.rtt_sum / hs.recv) if hs.recv else None
+                writer.writerow({
+                    "ts": ts, "host": self.me, "dir": "hop", "peer": st.name,
+                    "probe": "udp", "sent": hs.sent, "recv": hs.recv,
+                    "hop_ttl": ttl, "hop_addr": hs.addr,
+                    "rtt_min_us": "" if hs.rtt_min is None else "%.0f" % hs.rtt_min,
+                    "rtt_avg_us": "" if avg is None else "%.0f" % avg,
+                    "rtt_max_us": "" if hs.rtt_max is None else "%.0f" % hs.rtt_max,
+                    "rtt_p50_us": _fmt_opt(rtt_percentile(hs.hist, 0.50)),
+                    "note": st.hop_note,
+                })
         for name in sorted(self.rx):
             st = self.rx[name]
             writer.writerow({
@@ -1241,8 +1534,16 @@ class Agent(object):
                 self._ping_start(st, self.interval)
 
             next_report = now + self.interval
+            self._sweep_hops()
             socks = ([self.sock] + list(self.flow_socks)
                      + ([self.mtu_sock] if self.mtu_sock else []))
+            # The hop socket carries its answers on the error queue, and
+            # select reports those as *readable* -- not, as it looks like
+            # it should be, as an exceptional condition.  Measured: with
+            # the socket only in the exceptional set it never woke, and
+            # every hop timed at the probe pacing interval instead of the
+            # path, reporting the loop's own poll delay as the network.
+            wait_socks = socks + ([self.hop_sock] if self.hop_sock else [])
 
             while not self.stopping:
                 now = time.monotonic()
@@ -1261,18 +1562,21 @@ class Agent(object):
                 timeout = max(0.0, min(wake - now, 1.0))
 
                 try:
-                    ready = select.select(socks, [], [], timeout)[0]
+                    ready = select.select(wait_socks, [], [], timeout)[0]
                 except (OSError, select.error):
                     ready = []
                 for s in ready:
+                    if s is self.hop_sock:
+                        self._drain_hop_errors()
+                        continue
                     on_mtu = (s is self.mtu_sock)
                     flow = self.flow_by_fd.get(s.fileno())
                     while True:
                         try:
-                            data, src = s.recvfrom(MAX_SIZE)
+                            data, src, ttl = self._recv(s)
                         except (BlockingIOError, socket.error):
                             break
-                        self.handle_packet(data, src, on_mtu, flow)
+                        self.handle_packet(data, src, on_mtu, flow, ttl)
 
                 now = time.monotonic()
                 for st in self.peers.values():
@@ -1298,13 +1602,24 @@ class Agent(object):
                                 now >= st.mtu_next and st.mtu_state:
                             self._pmtu_start(st, now)
 
+                # The sweep's replies are ICMP errors on the sending
+                # socket, so they are read every pass rather than waited
+                # for -- the loop never blocks on a router that will not
+                # answer, which is most of them.
+                self._drain_hop_errors()
+
                 if now >= next_report:
                     for st in self.ping_peers.values():
                         self._ping_collect(st)
+                    self._drain_hop_errors()
                     self.write_interval(writer, int(time.time()))
                     fh.flush()
                     for st in self.peers.values():
                         st.reset()
+                        for hs in st.hop_stats.values():
+                            hs.reset()
+                        st.hop_sent.clear()
+                    self._sweep_hops()
                     for st in self.rx.values():
                         st.reset()
                     for st in self.ping_peers.values():
@@ -1321,17 +1636,21 @@ class Agent(object):
             drain_until = time.monotonic() + 0.3
             while time.monotonic() < drain_until:
                 try:
-                    ready = select.select(socks, [], [], 0.05)[0]
+                    ready = select.select(wait_socks, [], [], 0.05)[0]
                 except (OSError, select.error):
                     break
                 for s in ready:
+                    if s is self.hop_sock:
+                        self._drain_hop_errors()
+                        continue
                     flow = self.flow_by_fd.get(s.fileno())
                     while True:
                         try:
-                            data, src = s.recvfrom(MAX_SIZE)
+                            data, src, ttl = self._recv(s)
                         except (BlockingIOError, socket.error):
                             break
-                        self.handle_packet(data, src, s is self.mtu_sock, flow)
+                        self.handle_packet(data, src, s is self.mtu_sock,
+                                           flow, ttl)
 
             # Final partial interval: report it rather than lose it.
             for st in self.ping_peers.values():
@@ -1536,7 +1855,7 @@ def cmd_gen(args):
            "pmtu": "0" if args.no_pmtu else "1",
            "mtu_ceiling": args.mtu_ceiling,
            "pmtu_every": "%g" % args.pmtu_every,
-           "flows": args.flows}
+           "flows": args.flows, "hops": getattr(args, "hops", 0)}
     hosts, addrs, ports, pingonly, rate = build_mesh(tokens, args.pps, cfg)
     with _WriteGuard(args.mesh):
         write_mesh(args.mesh, hosts, addrs, ports, pingonly, rate, cfg)
@@ -1988,6 +2307,81 @@ def flow_spread(rows, min_samples=FLOW_MIN_SAMPLES):
     return recs
 
 
+def path_changes(rows):
+    """Pairs whose replies came back over more than one hop count.
+
+    Two ways the route can be seen to move, and both are the same finding:
+    the TTL changed *within* an interval, which the agent counted as it
+    happened; or it differed *between* intervals, which only shows up
+    here, with every interval of the run in front of us.
+
+    This is a trust rule rather than a performance one, shaped like
+    `PEER_NOT_CONCURRENT` in `during`: nothing here says the path got
+    worse, only that a window which is reported as one measurement spans
+    more than one path, so averaging it averages two experiments.
+
+    A pair with no TTL at all is absent rather than clean -- the platform
+    had no `IP_RECVTTL`, and saying "no change" would be inventing the
+    measurement that was skipped.
+    """
+    seen = {}
+    for r in rows:
+        if r.get("dir") != "tx" or r.get("flow"):
+            continue
+        host, peer = r.get("host"), r.get("peer")
+        ttl = r.get("reply_ttl")
+        if not host or not peer or peer == "*" or not ttl:
+            continue
+        rec = seen.get((host, peer))
+        if rec is None:
+            rec = seen[(host, peer)] = {"src": host, "dst": peer,
+                                        "ttls": [], "within": 0}
+        rec["ttls"].append(_int(ttl))
+        rec["within"] += _int(r.get("ttl_hops"))
+
+    recs = []
+    for rec in seen.values():
+        distinct = sorted(set(rec["ttls"]))
+        changes = rec["within"] + (len(distinct) - 1)
+        if changes <= 0:
+            continue
+        rec["distinct"] = distinct
+        rec["changes"] = changes
+        # Between-interval movement is the one worth leading with: a
+        # within-interval flap can be a single reordered reply, while a
+        # run that starts on one hop count and ends on another measured
+        # two paths for certain.
+        rec["between"] = len(distinct) - 1
+        recs.append(rec)
+    recs.sort(key=lambda r: (-r["changes"], r["src"], r["dst"]))
+    return recs
+
+
+def render_path_change(recs, top=5):
+    """The PATH CHANGED section, or nothing when every route held."""
+    if not recs:
+        return []
+    lines = ["", "  PATH CHANGED  replies came back over more than one "
+                 "hop count", ""]
+    for r in recs[:top]:
+        hops = ", ".join(str(t) for t in r["distinct"])
+        lines.append("    %-24s TTL %-18s %d change(s)"
+                     % ("%s -> %s" % (r["src"], r["dst"]), hops,
+                        r["changes"]))
+    if len(recs) > top:
+        lines.append("    ... and %d more" % (len(recs) - top))
+    lines.append("")
+    lines.append("    " + _wrap_text(
+        "A reply's TTL is the hop count it survived, so a change in it "
+        "means the route moved mid-run. Nothing here says the path got "
+        "worse -- it says a window reported as one measurement spans more "
+        "than one path, so its average is an average of two experiments. "
+        "Re-read the pairs above per interval before trusting their p50, "
+        "and check the fabric for a rehash or a flap over the same "
+        "window.", 4))
+    return lines
+
+
 def _pair_p50(ps):
     return ps.p50.mean if ps.p50.n else ps.avg.mean
 
@@ -2031,6 +2425,109 @@ def under_load(rows, split_ts):
             "idle_loss": a.loss_pct, "load_loss": b.loss_pct,
         })
     return out or None
+
+
+def build_hops(rows):
+    """Per-peer, per-hop stats out of the hop rows.
+
+    Keyed by hop number rather than by router address on purpose: the
+    address is what moves when the route changes, and the position in the
+    path is what stays comparable between two windows.  The address is
+    carried so a finding can name the router it found.
+    """
+    hops = {}
+    for r in rows:
+        if r.get("dir") != "hop":
+            continue
+        host, peer, ttl = r.get("host"), r.get("peer"), _int(r.get("hop_ttl"))
+        if not host or not peer or not ttl:
+            continue
+        rec = hops.get((host, peer, ttl))
+        if rec is None:
+            rec = hops[(host, peer, ttl)] = {
+                "src": host, "dst": peer, "ttl": ttl, "addr": "",
+                "sent": 0, "recv": 0, "p50": Agg()}
+        rec["sent"] += _int(r.get("sent"))
+        rec["recv"] += _int(r.get("recv"))
+        if r.get("hop_addr"):
+            rec["addr"] = r["hop_addr"]
+        rec["p50"].add(r.get("rtt_p50_us"), keep=True)
+    return hops
+
+
+def locate_queue(rows, split_ts, factor=2.0):
+    """Which hop the latency appeared at, idle window against loaded.
+
+    `under_load` says a pair got slower; this says *where*.  A queue fills
+    in front of one interface, so the hop it formed on is the first one
+    whose own delay rose -- every hop beyond it inherits that delay, which
+    is why the finding is the first riser and not the largest.
+
+    Per hop rather than per router, and only where both windows measured
+    the same hop: a router that answered idle and went quiet under load
+    has not been shown to be slow, it has been shown to stop answering,
+    and those are different findings.  Returns [] rather than a guess when
+    a path could not be timed at all.
+    """
+    idle_rows, load_rows = [], []
+    for r in rows:
+        ts = _int(r.get("ts"))
+        if not ts:
+            continue
+        (idle_rows if ts < split_ts else load_rows).append(r)
+    if not idle_rows or not load_rows:
+        return []
+    idle, load = build_hops(idle_rows), build_hops(load_rows)
+
+    by_pair = {}
+    for key in sorted(set(idle) & set(load)):
+        a, b = idle[key], load[key]
+        if not a["p50"].n or not b["p50"].n:
+            continue
+        before, after = a["p50"].mean, b["p50"].mean
+        if before <= 0:
+            continue
+        by_pair.setdefault((a["src"], a["dst"]), []).append({
+            "ttl": a["ttl"], "addr": b["addr"] or a["addr"],
+            "idle": before, "load": after, "ratio": after / before,
+        })
+
+    out = []
+    for (src, dst), hops in by_pair.items():
+        hops.sort(key=lambda h: h["ttl"])
+        risers = [h for h in hops if h["ratio"] >= factor]
+        if not risers:
+            continue
+        first = risers[0]
+        out.append({"src": src, "dst": dst, "hop": first,
+                    "hops": hops, "n_risers": len(risers)})
+    out.sort(key=lambda r: -r["hop"]["ratio"])
+    return out
+
+
+def render_queue_at_hop(recs, top=3):
+    """The QUEUE AT HOP section, or nothing when no hop rose."""
+    if not recs:
+        return []
+    lines = ["", "  QUEUE AT HOP  where the delay under load appeared", ""]
+    for r in recs[:top]:
+        h = r["hop"]
+        lines.append("    %-22s hop %-3d %-16s %s -> %s  (%.1fx)"
+                     % ("%s -> %s" % (r["src"], r["dst"]), h["ttl"],
+                        h["addr"] or "unnamed", fmt_us(h["idle"]),
+                        fmt_us(h["load"]), h["ratio"]))
+    if len(recs) > top:
+        lines.append("    ... and %d more" % (len(recs) - top))
+    lines.append("")
+    lines.append("    " + _wrap_text(
+        "A queue forms in front of one interface, and every hop past it "
+        "inherits the wait -- so the hop named is the *first* one that "
+        "rose, not the worst. That is the buffer that filled, and the "
+        "interface to look at: its egress queue, its shaper, or the "
+        "bundle member it sits on. Hops that stopped answering under load "
+        "are not listed, because a router that went quiet has not been "
+        "shown to be slow.", 4))
+    return lines
 
 
 def default_iface():
@@ -2511,6 +3008,23 @@ def cmd_summarize(args, mesh=None, fleet=None):
             for f in findings:
                 log("    %s" % _wrap_text(f, 4))
             log("")
+
+    # After under_load, which says a pair got slower: this says where.
+    if split:
+        placed = locate_queue(rows, int(split),
+                              getattr(args, "bloat_factor", 4.0) / 2.0)
+        if placed:
+            for line in render_queue_at_hop(placed, args.top):
+                log(line)
+            log("")
+
+    # Before the performance sections: a window that spans two paths is a
+    # reason to distrust the numbers above, so it has to be read first.
+    moved = path_changes(rows)
+    if moved:
+        for line in render_path_change(moved, args.top):
+            log(line)
+        log("")
 
     spread = flow_spread(rows)
     if spread:
@@ -3021,6 +3535,11 @@ def _add_probe_flags(p):
                         "they take N paths through a LAG or ECMP fabric "
                         "instead of one (try %d; the rate is split across "
                         "them, not multiplied)" % SUGGESTED_FLOWS)
+    p.add_argument("--hops", type=int,
+                   default=int(_env_num("HOPS", 0, int)), metavar="N",
+                   help="also time the first N hops of each path, so a "
+                        "queue that fills under load can be placed at the "
+                        "hop it formed on (off by default; try 8)")
 
 
 def _add_summary_flags(p):

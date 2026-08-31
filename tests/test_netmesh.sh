@@ -90,7 +90,7 @@ t_agent_writes_documented_columns() {
     wait $p1 $p2
     assert_file_exists da/report.csv
     header="$(head -1 da/report.csv)"
-    assert_eq "$header" "ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow"
+    assert_eq "$header" "ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,reply_ttl,ttl_hops,hop_ttl,hop_addr"
     body="$(cat da/report.csv)"
     assert_contains "$body" ",tx,b,"
     assert_contains "$body" ",rx,b,"
@@ -455,6 +455,179 @@ t_two_pairs_tied_on_asymmetry_do_not_crash() {
     assert_contains "$out" "d -> c is"
 }
 
+t_a_reply_ttl_is_recorded_for_every_bucket_not_just_one() {
+    # The trap this feature is built around: --flows N gives each bucket
+    # its own socket, so reading the TTL off the main socket alone would
+    # record it for one probe in N and call that the path.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5450 b=127.0.0.1:5451 --mesh mt.csv --pps 40 \
+        --no-pmtu --flows 3 >/dev/null
+    mkdir -p ta tb
+    nm agent --mesh mt.csv --host a --dir ta --interval 2 --duration 4 \
+        --bind 127.0.0.1 &
+    p1=$!
+    nm agent --mesh mt.csv --host b --dir tb --interval 2 --duration 4 \
+        --bind 127.0.0.1 &
+    p2=$!
+    wait $p1 $p2
+    assert_file_exists ta/report.csv
+    check="$("$PY" - <<'EOF'
+import csv
+agg = buckets = 0
+for r in csv.DictReader(open("ta/report.csv")):
+    if r["dir"] != "tx" or r["peer"] != "b" or not int(r["recv"] or 0):
+        continue
+    if r["flow"]:
+        buckets += 1 if r["reply_ttl"] else 0
+    else:
+        agg += 1 if r["reply_ttl"] else 0
+# Every bucket that received anything carries a TTL, not just the
+# aggregate row above them.
+print("agg=%d buckets=%d" % (agg, buckets))
+EOF
+)"
+    assert_contains "$check" "agg="
+    assert_not_contains "$check" "buckets=0"
+}
+
+t_a_steady_path_reports_no_change() {
+    # Loopback never rehashes, so a clean run must not raise the finding.
+    # A rule that fires on a path that did not move would make every
+    # report untrustworthy in the direction that matters least.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5452 b=127.0.0.1:5453 --mesh ms.csv --pps 40 \
+        --no-pmtu >/dev/null
+    mkdir -p sa sb
+    nm agent --mesh ms.csv --host a --dir sa --interval 1 --duration 3 \
+        --bind 127.0.0.1 &
+    p1=$!
+    nm agent --mesh ms.csv --host b --dir sb --interval 1 --duration 3 \
+        --bind 127.0.0.1 &
+    p2=$!
+    wait $p1 $p2
+    cp sa/report.csv sb/report.csv reports_steady_a.csv 2>/dev/null || true
+    mkdir -p rs && cp sa/report.csv rs/a.csv && cp sb/report.csv rs/b.csv
+    out="$(nm summarize --no-collect --reports rs --mesh nonexistent.csv)"
+    assert_not_contains "$out" "PATH CHANGED"
+    # ...and the TTL really was measured, so this is not a pass by absence.
+    assert_contains "$(cat rs/a.csv)" ",64,"
+}
+
+t_a_moved_route_is_reported_as_a_path_change() {
+    # Off a fixture, because an ECMP rehash cannot be arranged on
+    # loopback. Both ways of seeing it: the hop count differing between
+    # intervals, and the agent counting a change within one.
+    cd "$TEST_TMPDIR"
+    mkdir -p rc
+    hdr="ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,reply_ttl,ttl_hops"
+    {
+        echo "$hdr"
+        # between intervals: 58 then 60
+        echo "100,a,tx,b,udp,64,10,100,100,0.000,200,220,220,400,900,15,9000,confirmed,,,,,58,0"
+        echo "102,a,tx,b,udp,64,10,100,100,0.000,200,220,220,400,900,15,9000,confirmed,,,,,60,0"
+    } > rc/a.csv
+    {
+        echo "$hdr"
+        # within one interval: the agent counted two flaps itself
+        echo "100,b,tx,a,udp,64,10,100,100,0.000,200,220,220,400,900,15,9000,confirmed,,,,,58,2"
+    } > rc/b.csv
+    out="$(nm summarize --no-collect --reports rc --mesh nonexistent.csv)"
+    assert_contains "$out" "PATH CHANGED"
+    assert_contains "$out" "a -> b"
+    assert_contains "$out" "b -> a"
+    # It says what it means: not slower, but two paths in one average.
+    assert_contains "$out" "more than one path"
+}
+
+t_a_platform_without_the_ttl_is_not_a_clean_path() {
+    # Blank means not measured. A report with no TTL column values must
+    # not read as "the route held" -- that would be inventing the
+    # measurement that was skipped.
+    cd "$TEST_TMPDIR"
+    mkdir -p rn
+    hdr="ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,reply_ttl,ttl_hops"
+    {
+        echo "$hdr"
+        echo "100,a,tx,b,udp,64,10,100,100,0.000,200,220,220,400,900,15,9000,confirmed,,,,,,"
+        echo "102,a,tx,b,udp,64,10,100,100,0.000,200,220,220,400,900,15,9000,confirmed,,,,,,"
+    } > rn/a.csv
+    out="$(nm summarize --no-collect --reports rn --mesh nonexistent.csv)"
+    assert_not_contains "$out" "PATH CHANGED"
+    # The rest of the report still works without it.
+    assert_contains "$out" "WHAT TO DO NEXT"
+}
+
+t_the_hop_sweep_is_off_unless_asked_for() {
+    # It is extra probes on the fabric being measured. A tool that
+    # quietly adds traffic to look harder causes what it then reports.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5470 b=127.0.0.1:5471 --mesh mq.csv --pps 40 \
+        --no-pmtu >/dev/null
+    assert_contains "$(cat mq.csv)" "hops=0"
+    mkdir -p qa qb
+    nm agent --mesh mq.csv --host a --dir qa --interval 1 --duration 2 \
+        --bind 127.0.0.1 &
+    p1=$!
+    nm agent --mesh mq.csv --host b --dir qb --interval 1 --duration 2 \
+        --bind 127.0.0.1 &
+    p2=$!
+    wait $p1 $p2
+    assert_file_exists qa/report.csv
+    assert_not_contains "$(cat qa/report.csv)" ",hop,"
+}
+
+t_the_queue_is_placed_at_the_first_hop_that_rose() {
+    # The point of the whole feature. A queue forms in front of one
+    # interface and every hop past it inherits the wait, so the answer is
+    # the FIRST riser -- hop 3 rose further here and is the wrong answer.
+    cd "$TEST_TMPDIR"
+    mkdir -p qr
+    hdr="ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,reply_ttl,ttl_hops,hop_ttl,hop_addr"
+    {
+        echo "$hdr"
+        echo "100,a,tx,b,udp,64,10,100,100,0.000,200,220,220,400,900,15,9000,confirmed,,,,,64,0,,"
+        echo "100,a,hop,b,udp,,,1,1,,150,150,150,,150,,,,,,,,,,1,10.0.0.1"
+        echo "100,a,hop,b,udp,,,1,1,,300,300,300,,300,,,,,,,,,,2,10.0.1.1"
+        echo "100,a,hop,b,udp,,,1,1,,450,450,450,,450,,,,,,,,,,3,10.0.2.1"
+        echo "200,a,tx,b,udp,64,10,100,100,0.000,900,980,980,2200,4000,80,9000,confirmed,,,,,64,0,,"
+        # Two interfaces queue, not one. Hop 2 is the FIRST to rise
+        # (4.3x); hop 3 has its own queue on top of the one it inherits
+        # and rises FURTHEST (9.9x). Picking the worst would answer hop 3
+        # and send someone to the second interface while the first is
+        # still filling -- so the fixture has to tell the two apart.
+        echo "200,a,hop,b,udp,,,1,1,,160,160,160,,160,,,,,,,,,,1,10.0.0.1"
+        echo "200,a,hop,b,udp,,,1,1,,1300,1300,1300,,1300,,,,,,,,,,2,10.0.1.1"
+        echo "200,a,hop,b,udp,,,1,1,,4450,4450,4450,,4450,,,,,,,,,,3,10.0.2.1"
+    } > qr/a.csv
+    out="$(nm summarize --no-collect --reports qr --mesh nope.csv --load-split 150)"
+    assert_contains "$out" "QUEUE AT HOP"
+    assert_contains "$out" "hop 2"
+    assert_contains "$out" "10.0.1.1"
+    assert_not_contains "$out" "hop 3"
+    # And it says why the first riser is the answer.
+    assert_contains "$out" "inherits"
+}
+
+t_a_hop_that_went_quiet_is_not_called_slow() {
+    # A router that stopped answering under load has been shown to stop
+    # answering, not to be slow. Naming it would send someone to the
+    # wrong interface.
+    cd "$TEST_TMPDIR"
+    mkdir -p qq
+    hdr="ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,reply_ttl,ttl_hops,hop_ttl,hop_addr"
+    {
+        echo "$hdr"
+        echo "100,a,tx,b,udp,64,10,100,100,0.000,200,220,220,400,900,15,9000,confirmed,,,,,64,0,,"
+        echo "100,a,hop,b,udp,,,1,1,,150,150,150,,150,,,,,,,,,,1,10.0.0.1"
+        echo "100,a,hop,b,udp,,,1,1,,300,300,300,,300,,,,,,,,,,2,10.0.1.1"
+        echo "200,a,tx,b,udp,64,10,100,100,0.000,900,980,980,2200,4000,80,9000,confirmed,,,,,64,0,,"
+        echo "200,a,hop,b,udp,,,1,1,,155,155,155,,155,,,,,,,,,,1,10.0.0.1"
+        echo "200,a,hop,b,udp,,,1,0,,,,,,,,,,,,,,,,2,10.0.1.1"
+    } > qq/a.csv
+    out="$(nm summarize --no-collect --reports qq --mesh nope.csv --load-split 150)"
+    assert_not_contains "$out" "QUEUE AT HOP"
+}
+
 t_flow_buckets_break_the_rate_down_they_do_not_multiply_it() {
     # The one property that matters for trusting these numbers: turning
     # flow spreading on must not put more traffic on the fabric being
@@ -593,6 +766,13 @@ run_test "a p50 that is really the timer"      t_a_p50_that_is_really_the_cards_
 run_test "small coalescing is not mentioned"   t_coalescing_well_under_the_measurement_is_not_mentioned
 run_test "no setting means absent, not zero"   t_without_the_setting_the_note_is_absent_not_zero
 run_test "tied asymmetry does not crash"     t_two_pairs_tied_on_asymmetry_do_not_crash
+run_test "the hop sweep is opt-in"             t_the_hop_sweep_is_off_unless_asked_for
+run_test "queue placed at the first riser"     t_the_queue_is_placed_at_the_first_hop_that_rose
+run_test "a quiet hop is not called slow"      t_a_hop_that_went_quiet_is_not_called_slow
+run_test "reply ttl on every bucket"           t_a_reply_ttl_is_recorded_for_every_bucket_not_just_one
+run_test "a steady path is not a finding"      t_a_steady_path_reports_no_change
+run_test "a moved route is a path change"      t_a_moved_route_is_reported_as_a_path_change
+run_test "no ttl is not a clean path"          t_a_platform_without_the_ttl_is_not_a_clean_path
 run_test "flow buckets split, not multiply"    t_flow_buckets_break_the_rate_down_they_do_not_multiply_it
 run_test "one slow flow names the member"      t_one_slow_flow_is_named_as_a_bundle_member
 run_test "flows that agree are not a finding"  t_flows_that_agree_are_not_a_finding

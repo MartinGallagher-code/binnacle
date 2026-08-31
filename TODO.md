@@ -1,119 +1,89 @@
 # What to do next
 
-Written 2026-08-18, refreshed after 0.3.0 was published and the flow-hash
-work landed. Everything here is enough to pick the work up cold.
+Refreshed 2026-08-30, after 0.6.0 was published. Everything here is enough
+to pick the work up cold.
 
 ## Where things stand
 
-**0.3.0 is published** — on PyPI and imported on Read the Docs, so
-`pip install binnacle` works and the README's badges resolve. That closes
-the whole publishing section of the previous handover.
+**0.6.0 is published** — on PyPI and installable, with all ten instruments
+and the `binnacle` index answering `0.6.0` from the wheel. `main` is at
+**`ff40a91`**.
 
-`main` is at **`afdf3e4`**. Note that the commit the last handover called
-`main`, `7eed30f`, differed from it only in `TODO.md` itself: the document
-was written on a branch and then merged, so it named the commit it was
-about to stop being. Nothing behind it moved.
+Since the previous handover (written against 0.3.0) three releases have
+shipped and two tools have been added:
 
-On top of that, branch `claude/project-bundle-txt-4845kd` carries **2a, the
-flow-hash sweep** — the highest-value item on the previous list. It is
-`Unreleased` in the changelog; the version is deliberately still 0.3.0 in
-all ten places, because `PUBLISHING.md` bumps at release-cut time rather
-than per change.
+- **0.4.0** — the `binnacle` index command, and a real `netmesh` fix: a peer
+  answering from a different address than the one it was probed at had every
+  reply discarded, reported as 100% loss in one direction on a healthy
+  network.
+- **0.5.0** — `muster` (hand out work from a pool, once each, under a lease)
+  and `manifest` (turn a datacenter layout into a server list).
+- **0.6.0** — `manifest --sample`.
 
-**234 checks across nine suites** (was 227; the seven new ones are all
-`netmesh`). Verified directly rather than trusted: full suite, shellcheck,
-the 3.6 floor under vermin, `sphinx-build -W`, `reuse lint`, both artifacts
-through `twine check`, all eight console scripts reporting `0.3.0` from the
-installed wheel, `netmesh selftest`, and a live two-agent loopback run with
-`--flows 4` summarized end to end from that wheel.
+**358 checks across twelve suites** (was 234 across nine). The verification
+gate in section 4 is what was actually run before each of those releases,
+not a description of what ought to be run.
 
-`claude/tool-ideas-planning-ajsvea` is stale — zero commits ahead of `main`,
-branched from an old point. Safe to delete.
+No open pull requests, no open issues, no stale branches.
 
 ---
 
-## 1. Cut 0.4.0
+## 1. The netmesh backlog is empty
 
-The flow-hash work is a new flag and a new output column, which
-`PUBLISHING.md`'s own rule makes a minor bump. Nothing was removed or
-changed incompatibly: `flow` is appended to the report header, blank on
-every row that existed before, and old fixtures with the shorter header
-still parse.
+Both remaining network-testing features have landed. What is here is the
+shape of them, so the next change does not have to rediscover it.
 
-Follow `PUBLISHING.md`. The one-time PyPI and Read the Docs setup is
-already done, so it is now just: bump the version in all ten places, roll
-`Unreleased` into `## [0.4.0]`, update the compare links, let CI go green,
-tag, and publish the Release.
+**Path change mid-run (reply TTL).** A reply's TTL is the hop count it
+survived, so a change in it means the route moved and the window spans more
+than one path. `reply_ttl` and `ttl_hops` carry it; `PATH CHANGED` reports
+it. A trust rule, not a performance one.
 
----
+**Locating the queue (`--hops N`).** The first N hops of each path are
+timed alongside the probes, and `QUEUE AT HOP` names the first hop whose
+own delay rose between the idle and loaded windows. First riser, not
+worst: everything past a full buffer inherits its wait. Off by default,
+because it is extra probes on the fabric being measured.
 
-## 2. Two remaining network-testing features
+Both work without root. `IP_RECVTTL` gives the reply TTL; `IP_RECVERR`
+plus `MSG_ERRQUEUE` gives the ICMP Time Exceeded that a low-TTL probe
+provokes -- the `tracepath` mechanism. A raw ICMP socket would have been
+simpler and is not available to a fleet.
 
-Both are `netmesh` work, and 2b is the one to take next.
+Ideas worth considering next, none of them started:
 
-### 2a. Vary the flow hash — **done**, on the branch above
+- **Per-hop loss, not just latency.** The sweep already knows how many
+  probes each hop answered. A hop that answers 60% of the time is either
+  rate-limiting ICMP (normal, and not a finding) or dropping (a finding),
+  and telling those apart is the work.
+- **A path-change and a queue at the same hop** is one story, not two.
+  Nothing currently correlates them.
+- **IPv6.** Everything here is `AF_INET`: `IPV6_RECVHOPLIMIT` and
+  `IPV6_RECVERR` are the equivalents, and the mesh format would need to
+  carry v6 endpoints first.
 
-Kept here because the shape of it is worth knowing before touching 2b.
+## 2. Release mechanics that still need a person
 
-Each pair's probes are swept across N source ports (`--flows N`), so they
-take N paths through a LAG or ECMP fabric instead of one. `summarize` grows
-a `PATH SPREAD` section and raises a finding when one bucket sits at
-`--flow-factor` times the median bucket's p50, or drops on its own.
+Two things about publishing are worth knowing before the next release,
+because neither is visible from the repository alone.
 
-Four decisions worth not re-litigating:
+**No GitHub Release has ever been created, for any version.** All three
+successful publishes were manual `workflow_dispatch` runs — they put 0.3.0,
+0.4.0 and 0.6.0 on PyPI, which is why the index skips 0.5.0. The
+`release: [published]` trigger has therefore never fired, and `publish.yml`
+now checks the tag against `pyproject.toml` before building so that the
+first time it does fire, a tag that disagrees with the tree fails on the
+mismatch rather than on its consequence.
 
-- **The rate is split across the buckets, not multiplied by them.** Eight
-  flows at `--pps 80` is eight buckets of 10/s. A measurement tool that
-  octupled its own load when asked to look harder would cause the
-  congestion it then reported.
-- **The cost lands on per-bucket sample count instead**, which is why the
-  feature is opt-in and why a bucket under `FLOW_MIN_SAMPLES` (30) replies
-  is reported as thin rather than ranked. Saying nothing would read as
-  "the flows agree".
-- **The reference is the median bucket, not the fastest.** With one sick
-  member out of eight the median is a healthy one, so the ratio says how
-  much worse that member is than the fabric's normal.
-- **One socket per bucket, shared across every peer** — the destination
-  address already varies the rest of the tuple, so eight buckets cost eight
-  sockets whatever the size of the mesh. The ports are ephemeral and differ
-  between runs, which is honest: what is sick is a member of the bundle,
-  not a port number.
+**Every release is now tagged** — `v0.1.0` through `v0.6.0`, each on the
+merge commit that carries it, verified by reading `pyproject.toml` at each
+commit. `v0.1.0` to `v0.4.0` were released without tags and got them
+retrospectively; the compare links at the foot of `CHANGELOG.md` resolve
+because of it, so a new release only has to keep the pattern going.
 
-### 2b. Path change mid-run, via reply TTL (next)
-
-**The fault:** an ECMP rehash or route flap partway through means the two
-halves of a window measured **different physical paths**, so averaging them
-averages two experiments. This is a **trust** rule, shaped exactly like
-`PEER_NOT_CONCURRENT` in `during`.
-
-**Shape:** record the IP TTL of each reply, per interval. A hop-count change
-means the route moved. No traceroute and no root.
-
-**Where to work:** the agent's receive path. This needs `IP_RECVTTL` plus
-`recvmsg()` to get the ancillary data — the fiddliest part of what is left.
-Then one appended column on the `tx` row, and a rule in `summarize`.
-
-**Notes:**
-- Slots straight into the idle/loaded split: a path change *at* the split is
-  a different story from one mid-window.
-- Where `IP_RECVTTL` is unavailable the column is blank and the rule skips —
-  blank means not measured, as everywhere else.
-- 2a's flow sockets are the receive path now too. `recvmsg()` has to be
-  wired into every one of them, not just `self.sock`, or the TTL is
-  recorded for an unrepresentative slice of the probes. That is the one
-  place where 2a made 2b bigger rather than smaller.
-
-### 2c. Locate the queue
-
-**The fault:** we now know *that* latency rose under load, and (with 2a)
-*which path*; we still do not know *where* along it. The difference between
-"the network got slow" and "the queue on the second hop is the one to fix".
-
-**Shape:** probe with increasing TTL during the loaded window; the hop where
-the latency delta appears is the buffer that filled.
-
-**Where to work:** a new probe mode in the agent, plus reporting. Largest of
-the three. The natural sequel to `under_load()`.
+Tagging has to be run by a person: **the sandbox cannot push tags.** A
+branch push succeeds and a `refs/tags/*` push is refused with HTTP 403
+(measured, five attempts with backoff). Any tagging step in a handover
+like this one is the human's.
 
 ---
 
@@ -121,6 +91,29 @@ the three. The natural sequel to `under_load()`.
 
 Worth reading before touching the suite — each of these cost a red run.
 
+- **The test box's own state can leak into a report the suite asserts
+  about.** `test_skew.sh` ran the tool with no `--rtc-path`, so every
+  live-socket case read the real `/sys/class/rtc` of whatever machine the
+  suite was on. A CI runner whose hardware clock was ten minutes out failed
+  a case that injects a 600s offset and asserts the report never says
+  `10m` — the rejection worked, and the `10m 08s` was the runner's own RTC.
+  Exactly one of five matrix jobs failed, because each gets its own VM.
+  When a case asserts on a report, pin every input the report can read.
+- **A fixture has to be able to tell the right answer from a plausible
+  one.** The `QUEUE AT HOP` case asserted that the *first* rising hop is
+  named rather than the worst -- and passed against an implementation that
+  picked the worst, because in that fixture one hop was both. A fixed
+  delay added at one hop makes the ratios *fall* along the path, so the two
+  answers coincide unless a second interface queues as well. Before
+  trusting a test that encodes a choice, write the variant you rejected and
+  watch the test fail.
+- **`select()` reports a socket's error queue as readable, not as an
+  exceptional condition.** With the hop socket only in the exceptional set
+  it never woke, and every hop came out timed at the probe pacing
+  interval -- the loop's own poll delay, measured and reported as the
+  network. It looked plausible: ~50ms, stable, and wrong by two orders of
+  magnitude. It was caught only by having measured the same hops
+  independently first. `poll()` shows it as `POLLERR`.
 - **Assertions must use short fragments.** Reports wrap at **76 columns**, so
   any `assert_contains` string longer than a line will straddle a break and
   never match. This bit four separate cases. Assert on a distinctive short
@@ -128,6 +121,11 @@ Worth reading before touching the suite — each of these cost a red run.
   one, so a single distinctive token is always safe.
 - **`assert_contains` is a substring test, not a regex.** `\|` alternation
   matches literally.
+- **A test that exercises a nonzero exit needs `set +e` around it.**
+  `run_test` runs the body under `set -e`, so `out="$(cmd)"` on a command
+  that exits 1 kills the case before its assertion runs — and the failure
+  prints an empty message, which looks like a harness bug rather than a
+  test that never ran.
 - **`fail` does not exist in the harness — it is `_fail`.** `test_compose.sh`
   uses `fail` and gets away with it only because a missing command also
   returns non-zero under `set -e`.
@@ -147,6 +145,12 @@ Worth reading before touching the suite — each of these cost a red run.
   to 3 and not 2, and why any future per-subset statistic needs its
   threshold set against measured noise rather than against what looks like a
   big number.
+- **A filter is not a list.** `manifest`'s range selectors expand to a set of
+  wanted ids and then match every element against them; written as a scan
+  that was ten million regex comparisons for one query on the largest
+  published layout (13.4s, now 2.4s). A range that names the things to
+  create is bounded by intent; a range that filters is bounded by the size
+  of what it filters, so it needs an index and a cap.
 - **A build requirement is resolved in an isolated environment, not from
   the machine.** `pip` installs an sdist's `build-system.requires` fresh
   from the index into a throwaway environment, so the setuptools already
@@ -174,11 +178,15 @@ Worth reading before touching the suite — each of these cost a red run.
 - **`docs/conf.py` carries an explicit tool list.** A new tool added
   everywhere else will still be silently missing from the generated CLI
   reference, and the docs build will pass anyway.
-- **The version lives in ten places** — `pyproject.toml`,
-  `binnacle/__init__.py`, and each of the eight modules. The compose suite's
-  `every declared version agrees` case enforces it. `PUBLISHING.md` said
-  nine and seven until this branch fixed it; it had not been updated when
-  `skew` was added.
+- **A hand-written sample of a tool's output goes stale silently.**
+  `docs/tools/binnacle.md` shows a transcript of the index; it listed eight
+  instruments at an old version for two releases because nothing checks it.
+  Diff it against the real command when the output changes.
+- **The version lives in thirteen places** — `pyproject.toml`,
+  `binnacle/__init__.py`, and each of the ten modules, plus
+  `binnacle/binnacle.py`. The compose suite's `every declared version
+  agrees` case enforces it, and running `binnacle` after a bump is the
+  fastest check, since it exits 1 if one was left behind.
 - **Live-machine assertions need margin, not luck.** `--exit-code opts into
   severity` asked for 5-6 samples and asserted WARN, but `SHORT_RUN` is WARN
   only below 5 samples and `NOT_BOUND` only at 80% free share — two boundary
@@ -186,7 +194,7 @@ Worth reading before touching the suite — each of these cost a red run.
   passed for months and then failed on a commit that only added a markdown
   file. If a case asserts on a live run, pick parameters that put the
   expected finding well inside its threshold, and reproduce under load
-  (`nproc`×2 busy loops) before believing it. The new flow tests follow this:
+  (`nproc`×2 busy loops) before believing it. The flow tests follow this:
   the live one asserts only on structure (buckets summing to the aggregate,
   distinct ports), and every threshold assertion runs off a fixture.
 - **Thresholds are policy, not measurement.** Do not collect them into a
@@ -199,15 +207,16 @@ Worth reading before touching the suite — each of these cost a red run.
 Everything CI runs, in the order worth running locally:
 
 ```bash
-bash tests/run_tests.sh                                  # nine suites
+bash tests/run_tests.sh                                  # twelve suites
 shellcheck -e SC1091 tests/*.sh tests/test_helper.bash
 bash tests/check_python_compat.sh
 vermin --eval-annotations --violations --target=3.6- binnacle/*.py
 sphinx-build -W --keep-going -b html docs docs/_build/html
 reuse lint
 python -m build && python -m twine check dist/*
-# then install the wheel into a venv and check all eight console scripts
-# answer --version, and that `netmesh selftest` passes
+# then install the wheel into a venv and check all eleven console scripts
+# answer --version, that `binnacle` exits 0, and that `netmesh selftest`
+# passes
 rm -rf dist build ./*.egg-info docs/_build docs/cli.md   # before committing
 ```
 

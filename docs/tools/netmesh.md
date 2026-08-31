@@ -155,14 +155,19 @@ interval:
 ```text
 ts,host,dir,peer,probe,size,target_pps,sent,recv,loss_pct,
 rtt_min_us,rtt_avg_us,rtt_p50_us,rtt_p99_us,rtt_max_us,jitter_us,
-path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow
+path_mtu,mtu_state,agent_cpu_pct,note,rx_usecs,flow,
+reply_ttl,ttl_hops,hop_ttl,hop_addr
 ```
 
 `dir` is `tx` (this host probed peer), `rx` (this host answered peer) or
 `host` (totals). `flow` is blank on every row except the per-source-port
 breakdown described under [Which path did it take?](#which-path-did-it-take);
-a row carrying one is part of the row above it, never an addition to it. Percentiles come from a constant-memory quarter-octave
-histogram — about 20% wide, which is ample to tell 200 µs from 8 ms.
+a row carrying one is part of the row above it, never an addition to it.
+`reply_ttl` and `ttl_hops` are the hop count replies came back over and how
+often it moved, described under [Did the path hold
+still?](#did-the-path-hold-still). Percentiles come from a constant-memory
+quarter-octave histogram — about 20% wide, which is ample to tell 200 µs
+from 8 ms.
 
 **A blank cell means "not measured", never zero.** A pair whose replies
 dried up writes no RTT at all, because averaging blanks in as zeroes would
@@ -187,6 +192,11 @@ that host's outbound path being slower than its inbound.
 
 ## What summarize computes
 
+- **`QUEUE AT HOP`** — with `--hops`, the first hop whose own delay rose
+  under load: the buffer that filled, rather than the pair that felt it.
+- **`PATH CHANGED`** — replies for a pair came back over more than one hop
+  count, so the window spans more than one path and its average is an
+  average of two experiments. A trust rule, not a performance one.
 - The headline is the **median of pair p50s**, not a mean of means, so one
   sick pair neither moves the headline nor hides inside it. Worst-pair
   figures get their own columns.
@@ -357,6 +367,47 @@ broken at all: it is carrying more than its share, which is what an uneven
 hash does to an otherwise healthy bundle. The two want different things
 done about them, so they are reported as different findings.
 
+## Did the path hold still?
+
+`--flows` answers *which* path a probe took. This answers a different
+question: whether the path a pair was measured over was the **same path
+throughout**.
+
+An ECMP rehash or a route flap partway through a run means the two halves
+of a window went over different physical links. The window is still
+reported as one measurement, so its average is an average of two
+experiments — and the p50 belongs to neither.
+
+Every reply carries the hop count it survived, in its IP TTL. `netmesh`
+records it, and a change in it means the route moved:
+
+```text
+  PATH CHANGED  replies came back over more than one hop count
+
+    b -> a                   TTL 58                 2 change(s)
+    a -> b                   TTL 58, 60             1 change(s)
+```
+
+Two ways it is seen, and they are the same finding. A TTL that differs
+**between** intervals is a route that moved during the run. One that
+changed **within** an interval is counted by the agent as it happens, in
+the `ttl_hops` column, because by report time the interval has already been
+averaged.
+
+**This is a trust rule, not a performance one.** Nothing in it says the
+path got worse — `PATH CHANGED` says the numbers above it describe more
+than one path, so read that pair per interval before believing its p50.
+It is shaped like [`during`](during.md)'s `PEER_NOT_CONCURRENT`: a finding
+about whether a measurement means what it appears to.
+
+It needs no traceroute and no root — just `IP_RECVTTL` on the socket. Where
+the platform does not have it, both columns are blank and the rule skips,
+because blank means *not measured* and is not the same as *the route held*.
+
+The TTL is read on **every** socket, including each `--flows` bucket. They
+are the receive path too, and reading it off the main socket alone would
+record the hop count for one probe in N and report it as the path.
+
 ## Latency under load
 
 `netmesh` measures an **idle** network. `iperf_orchestrator` measures TCP
@@ -414,6 +465,56 @@ than as an idle baseline of zero and an infinite regression against it.
 `--bloat-factor` moves the line (default 4×). It is a ratio rather than an
 absolute, because 200 µs to 800 µs on a LAN and 20 ms to 80 ms across a WAN
 are the same finding about the same queue.
+
+## Where along the path did it queue?
+
+[Latency under load](#latency-under-load) says a pair got slower. This says
+**where**.
+
+A queue forms in front of one interface. Everything downstream of it
+inherits the wait, so knowing the path got slow does not tell you which
+buffer filled — and that is the difference between "the network got slow"
+and "the egress queue on the second hop is the one to fix".
+
+`--hops N` times the first `N` hops of each path alongside the normal
+probes:
+
+```bash
+netmesh check web03 db01 --hops 8 --pps 80
+netmesh summarize --load-split $(date +%s)
+```
+
+```text
+  QUEUE AT HOP  where the delay under load appeared
+
+    a -> b                 hop 2   10.0.1.1         300us -> 2.4ms  (8.0x)
+```
+
+**The hop named is the first one that rose, not the worst.** Every hop past
+a full buffer inherits its delay, so the largest riser is usually the far
+end reporting somebody else's queue. The first riser is the interface to
+look at.
+
+A hop that stopped answering under load is not listed. It has been shown to
+stop answering, not to be slow, and those want different things done about
+them.
+
+### How it works without root
+
+A probe sent with a small TTL dies at a router, which says so with an ICMP
+Time Exceeded. `IP_RECVERR` queues that error to the very socket that sent
+the probe, readable with `MSG_ERRQUEUE` — the same mechanism `tracepath`
+uses, and **no raw socket, no `CAP_NET_RAW`, no root**. A raw ICMP socket
+would have been simpler and is not available to a fleet.
+
+One socket carries the whole sweep. The kernel reports the destination port
+of the datagram that provoked each error, so the TTL is encoded in that port
+(`33434 + ttl`) and every hop is in flight at once, rather than holding
+thirty sockets open or serialising the sweep behind a wait.
+
+**It is off by default.** The sweep is one extra probe per hop per interval
+— small beside the probe stream, but not nothing, and a tool that quietly
+adds traffic to look harder causes the congestion it then reports.
 
 ## See also
 
