@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`manifest --explain` says what each selector named.** A count that is
+  not the one you expected is the normal way this tool goes wrong, and
+  working it out used to mean re-running with `--csv` and an awk over the
+  room column. `--explain` prints, per selector, the elements it actually
+  named and how many were still standing after it, so the answer is read
+  off rather than investigated. It goes to stderr, so the host list still
+  pipes, and it is asked for outright, so `--quiet` does not silence it.
+
+- **`manifest` reports an id that answered to more than one spelling.**
+  Forgiving id matching is what makes `rack[1]` find `R01` from memory, but
+  a bare number ignores the letters in front of an id entirely: `rack[1]`
+  is `r01` in each hall *and* `g01` in the GPU room, and `room[1]` is
+  `wr01` *and* `gpu1`. That is now said on stderr, naming the spellings
+  that answered and the `rack[r01]`-or-a-path way to mean one of them.
+
+  It stays a report rather than a refusal -- one number answering to two
+  spellings is often exactly what was meant -- but quietly returning a
+  second room's worth of machines is how a fan-out reaches a rack nobody
+  meant to touch.
+
 - **`netmesh --hops N` locates the queue.** `--baseline` says a pair got
   slower under load; this says *where* along the path. A queue forms in
   front of one interface and everything downstream inherits the wait, so

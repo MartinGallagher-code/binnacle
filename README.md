@@ -209,9 +209,12 @@ Turns a datacenter layout into a list of hostnames. `manifest floor.dc
 the input to `agree`, `reachable` or `muster`. **A selector names elements
 and the answer is the machines at or under them** -- one rule, so `room[1]`,
 `row[A,C]`, `+gpu`, `model=hgx*` and a bare hostname all mean the obvious
-thing without anyone having to know that a rack is not a server. It reads
-the layout and nothing else: no ssh, no DNS, no inventory API, and the file
-is never written to.
+thing without anyone having to know that a rack is not a server. Where the
+forgiving id match reaches further than it looks -- `rack[1]` is `r01` and
+also `g01`, because a bare number ignores the letters -- it says so, and
+`--explain` shows what each selector named when a count still surprises you.
+It reads the layout and nothing else: no ssh, no DNS, no inventory API, and
+the file is never written to.
 
 ## Documentation
 

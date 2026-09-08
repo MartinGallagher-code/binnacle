@@ -16,6 +16,7 @@ Options:
       --path          print the full path instead of the name
       --csv           name,path,kind,role,room,row,rack,slot
       --count         print how many matched, and nothing else
+      --explain       say what each selector named, on stderr
       --sort          sort the output (default: layout order)
       --quiet         no summary on stderr
       --sample        print a layout to start from, and nothing else
@@ -59,14 +60,26 @@ The layout file
   for the full grammar.  What is understood here is the element half:
   `net` and `link` lines describe cabling and are read past.
 
-Selectors
-  Each argument is one selector, and they are ANDed: an element has to
-  satisfy all of them.  Inside one selector, top-level commas are OR.
+How a question is answered
+  Three rules, and they are the whole tool:
 
-  A selector names elements; the answer is the machines at or under
-  them.  That one rule is what makes `rack[1-3]` mean what you expect: a
-  rack is not a server, so matching the rack elements and then filtering
-  for role=server would leave nothing at all.
+    1. The layout is a tree -- dc, room, row, rack, node.
+    2. A selector matches *any* element in it, not just machines.
+    3. The answer is the machines at or under whatever matched.
+
+  Rule 3 is why `rack[1-3]` means what you expect: a rack is not a
+  server, so matching the rack elements and then filtering for
+  role=server would leave nothing at all.  It is also why `u=42` -- an
+  attribute only racks carry -- answers with the machines in the 42U
+  racks.  One rule, not a special case per kind.
+
+  Several arguments are ANDed: a machine has to satisfy all of them,
+  each by itself or by an ancestor.  Inside one argument, top-level
+  commas are OR.  `--role` (default `server`) then decides which of the
+  matched elements are machines worth printing.
+
+Selectors
+  The forms one argument can take:
 
       rack[1-3]        kind and id: racks 1, 2 and 3
       row[A,C]         rows A and C
@@ -89,6 +102,26 @@ Selectors
   and `rack[1-3]` are the same question.  A kind this layout does not
   have is named -- "nothing matched" would send you off checking rack
   numbers when the word in front of the bracket was the problem.
+
+When the count is not what you expected
+  Forgiveness has one cost: a bare number ignores the letters in front
+  of an id, so `rack[1]` is `r01` and `g01` both, and `room[1]` is
+  `wr01` and `gpu1` both.  That is said out loud when it happens --
+
+      $ manifest floor.dc 'rack[1]' --count
+      [manifest.py] rack[1] matched more than one spelling of that id
+      (g01, r01) -- a bare number ignores the letters in front of it;
+      rack[g01] or rack[r01], or a path selector, picks one out
+      44
+
+  -- and naming the letters, or giving a path like `wr01/A/r01`, is the
+  way to mean one of them.
+
+  `--explain` answers the more general form of the question.  It prints,
+  per selector, the elements it actually named and how many were left
+  after it, so a surprising count is read off rather than investigated:
+
+      manifest floor.dc 'room[1]' 'row[A]' --explain --count
 
 Exit status
   0   at least one server matched
@@ -498,7 +531,36 @@ def _range_size(body):
     return total
 
 
-def id_index(wanted):
+class LooseIds(object):
+    """Ids that answered to a bare number, kept so the answer can say so.
+
+    `rack[1]` is `r01`, and it is also `g01` in the GPU room -- a bare
+    number ignores the letters in front of it.  That is deliberate and
+    usually what you want; it is only a trap when it reaches into a
+    container you were not thinking about, which is exactly the case
+    where more than one prefix answers.
+    """
+
+    __slots__ = ("kind", "term", "by_prefix")
+
+    def __init__(self, term, kind):
+        self.term = term
+        self.kind = kind
+        self.by_prefix = {}
+
+    def record(self, ident):
+        prefix = TRAILING_DIGITS_RE.sub("", ident or "")
+        self.by_prefix.setdefault(prefix, ident)
+
+    def crossed(self):
+        """Did one number answer to ids spelled more than one way?"""
+        return len(self.by_prefix) > 1
+
+    def examples(self):
+        return [self.by_prefix[k] for k in sorted(self.by_prefix)]
+
+
+def id_index(wanted, loose=None):
     """The wanted ids, arranged so an element is a lookup rather than a scan.
 
     Matching is forgiving, because a rack called `R01` is the one you
@@ -508,6 +570,12 @@ def id_index(wanted):
     and any leading letters are ignored -- but only where the non-numeric
     part does not disagree, so `R01` answers to `1` and to `R1` and not
     to `U1` -- or if the want is a glob that matches it.
+
+    Forgiveness has one cost, and it used to be silent: a bare number
+    ignores the letters altogether, so `rack[1]` names `r01` and `g01`
+    both.  Those matches are recorded in `loose` so the caller can say
+    which spellings answered -- quietly returning a second room's worth
+    of machines is what makes this tool feel unpredictable.
 
     Written as an index rather than as a comparison because the range is
     a filter over the whole building: `rack[1-40]` against a quarter of
@@ -538,6 +606,8 @@ def id_index(wanted):
         num = _num_of(ident)
         if num is not None:
             if num in unprefixed:
+                if loose is not None:
+                    loose.record(ident)
                 return True
             if num in by_prefix.get(TRAILING_DIGITS_RE.sub("", ident), ()):
                 return True
@@ -559,13 +629,17 @@ def _plural_kinds(kind, kinds):
     return kind
 
 
-def compile_term(term, kinds, unknown):
+def compile_term(term, kinds, unknown, loose=None):
     """One OR-branch of a selector, as a predicate over elements.
 
     A kind this layout has never heard of is recorded in `unknown` rather
     than refused: `rack[1],cage[2]` is a reasonable thing to type against
     a floor plan that might have either, and the caller says so only if
     the whole question came back empty.
+
+    `loose`, where given, collects the bare-number matches this term made,
+    so an answer that reached further than it looked can say which ids
+    answered.
     """
     if term.startswith("+"):
         tag = term[1:].lower()
@@ -582,7 +656,10 @@ def compile_term(term, kinds, unknown):
         if _range_size(body) > MAX_RANGE:
             die("%s expands to more ids than any building holds -- a zero "
                 "too many?" % term)
-        hit = id_index(expand_range("[" + body + "]"))
+        seen = LooseIds(term, m.group(1))
+        if loose is not None:
+            loose.append(seen)
+        hit = id_index(expand_range("[" + body + "]"), seen)
         return lambda el: el.kind.lower() == kind and hit(el.id)
 
     at = term.find("=")
@@ -608,33 +685,49 @@ def compile_term(term, kinds, unknown):
     return bare
 
 
-def compile_selector(text, kinds, unknown):
-    """One argument: `!` negates the whole thing, top-level commas are OR."""
-    negate = text.startswith("!")
-    if negate:
-        text = text[1:]
-    terms = split_commas(text)
-    if not terms:
-        die("empty selector")
-    preds = [compile_term(t, kinds, unknown) for t in terms]
+class Selector(object):
+    """One command-line argument, as a question you can ask an element.
 
-    # One answer per element, kept because the walk below asks the same
-    # question of the same rack once for every machine in it.
-    cache = {}
+    Calling it answers "is this machine in the answer"; `names` answers
+    the narrower "did this element itself satisfy a term", which is what
+    `--explain` needs in order to show what a selector actually picked
+    out rather than only how many machines came back.
+    """
 
-    def match(el):
+    __slots__ = ("text", "negate", "preds", "loose", "cache")
+
+    def __init__(self, text, kinds, unknown):
+        self.text = text
+        self.negate = text.startswith("!")
+        body = text[1:] if self.negate else text
+        terms = split_commas(body)
+        if not terms:
+            die("empty selector")
+        self.loose = []
+        self.preds = [compile_term(t, kinds, unknown, self.loose)
+                      for t in terms]
+        # One answer per element, kept because the walk below asks the
+        # same question of the same rack once for every machine in it.
+        self.cache = {}
+
+    def names(self, el):
+        """Does this element itself satisfy a term, ignoring its ancestors?"""
+        return any(p(el) for p in self.preds)
+
+    def __call__(self, el):
         # A selector that names a container names everything under it:
         # `rack[1-3]` is the servers in those racks, not the three rack
         # elements, and filtering those by role=server would leave
         # nothing at all. So a term is tried against the element and then
         # against each of its ancestors.
+        cache = self.cache
         node, chain = el, []
         while node is not None:
             if node in cache:
                 hit = cache[node]
                 break
             chain.append(node)
-            if any(p(node) for p in preds):
+            if self.names(node):
                 hit = True
                 break
             node = node.parent
@@ -642,8 +735,16 @@ def compile_selector(text, kinds, unknown):
             hit = False
         for node in chain:
             cache[node] = hit
-        return (not hit) if negate else hit
-    return match
+        return (not hit) if self.negate else hit
+
+    def ambiguous(self):
+        """The bare-number matches that answered to more than one spelling."""
+        return [lo for lo in self.loose if lo.crossed()]
+
+
+def compile_selector(text, kinds, unknown):
+    """One argument: `!` negates the whole thing, top-level commas are OR."""
+    return Selector(text, kinds, unknown)
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +775,67 @@ def row_of(el):
         # be the wrong answer to give.
         "slot": el.attrs.get("at") or el.id or "",
     }
+
+
+# ---------------------------------------------------------------------------
+# Showing the work
+# ---------------------------------------------------------------------------
+
+# Enough to see what a selector picked out; a rack list is the point, not
+# a second copy of the output.
+EXPLAIN_MAX = 8
+
+
+def explain_steps(layout, elements, steps, servers, want):
+    """What each selector named, and what it left -- on stderr.
+
+    A count that surprises you is the normal way this tool goes wrong,
+    and working out why used to mean re-running it with --csv and an awk
+    over the room column.  This says it directly: which elements each
+    selector actually named, and how many were still standing after it.
+    """
+    w = sys.stderr.write
+    w("[%s] explain: %s, %d element(s), role=%s\n"
+      % (PROG, layout, len(elements), want or "any"))
+    if not steps:
+        w("  no selectors -- every machine in the layout\n")
+    for i, (sel, before, named, after) in enumerate(steps, 1):
+        w("  %d. %s\n" % (i, sel.text))
+        w("       %s %d element(s); %d -> %d element(s)\n"
+          % ("excludes" if sel.negate else "names",
+             len(named), before, after))
+        if not named:
+            w("       nothing carries that -- the answer is empty here\n")
+        # Only the ids that reached across spellings are flagged: a bare
+        # number matching r01 is the forgiveness working, not a surprise.
+        loose = set()
+        for lo in sel.ambiguous():
+            loose.update(v.lower() for v in lo.by_prefix.values())
+        for el in named[:EXPLAIN_MAX]:
+            w("       %-5s %-8s %s%s\n"
+              % (el.kind, el.id, el.path,
+                 "   <- by number, not by name" if el.id.lower() in loose
+                 else ""))
+        if len(named) > EXPLAIN_MAX:
+            w("       ... and %d more\n" % (len(named) - EXPLAIN_MAX))
+    w("  = %d server(s)\n" % len(servers))
+
+
+def ambiguity_notes(steps, quiet):
+    """Say when one bare number answered to ids spelled more than one way.
+
+    `room[1]` is room wr01, and it is also room gpu1, because a bare
+    number ignores the letters.  Answering with both and saying nothing
+    is how a fan-out reaches a room nobody meant to touch.
+    """
+    for sel, _, _, _ in steps:
+        for lo in sel.ambiguous():
+            ex = lo.examples()[:4]
+            spelled = " or ".join("%s[%s]" % (lo.kind, e) for e in ex)
+            note("%s matched more than one spelling of that id (%s) -- a "
+                 "bare number ignores the letters in front of it; %s, or a "
+                 "path selector, picks one out"
+                 % (lo.term, ", ".join(ex), spelled), quiet)
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +921,7 @@ def build_parser():
     p.add_argument("--path", action="store_true")
     p.add_argument("--csv", action="store_true")
     p.add_argument("--count", action="store_true")
+    p.add_argument("--explain", action="store_true")
     p.add_argument("--sort", action="store_true")
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--sample", action="store_true")
@@ -795,9 +958,15 @@ def main(argv=None):
     kinds = set(el.kind.lower() for el in elements)
 
     picked, unknown = elements, set()
+    steps = []
     for text in rest:
-        match = compile_selector(text, kinds, unknown)
-        picked = [el for el in picked if match(el)]
+        sel = compile_selector(text, kinds, unknown)
+        before = len(picked)
+        # What the selector named in its own right, kept only when it is
+        # going to be shown: it is a second pass over the elements.
+        named = [el for el in picked if sel.names(el)] if args.explain else []
+        picked = [el for el in picked if sel(el)]
+        steps.append((sel, before, named, len(picked)))
 
     want = (args.role or "").lower()
     if want in ("any", "all", ""):
@@ -815,6 +984,11 @@ def main(argv=None):
 
     if args.sort:
         servers.sort(key=lambda el: (el.name, el.path))
+
+    if args.explain:
+        # Asked for outright, so --quiet does not silence it.
+        explain_steps(layout, elements, steps, servers, want)
+    ambiguity_notes(steps, args.quiet)
 
     if args.count:
         sys.stdout.write("%d\n" % len(servers))
