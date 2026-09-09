@@ -509,6 +509,12 @@ def parse_token(tok):
             port = int(p)
         except ValueError:
             die("bad port in host token %r" % tok)
+        # Checked here rather than left to fail at bind time: int() is
+        # happy with -5 and 99999, and the socket error that follows names
+        # the port without naming the mesh row it came from.
+        if not 1 <= port <= 65535:
+            die("port %d is out of range in host token %r (want 1-65535)"
+                % (port, tok))
         if bare:
             name = addr
     if not name or not addr:

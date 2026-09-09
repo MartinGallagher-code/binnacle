@@ -184,16 +184,41 @@ TIME_MASKS = [
     ("clock", re.compile(r"\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b"), "<TS>"),
 ]
 
+# The identifiers built out of colons come first, before the time masks.
+# `clock` is `\d{2}:\d{2}:\d{2}`, and the first three octets of a MAC are
+# very often a valid-looking time -- 08:00:27 is VirtualBox's own prefix --
+# so with the time masks in front, `08:00:27:aa:bb:cc` templated as
+# `<TS>:aa:bb:cc` and two machines' MACs became two templates. A whole
+# identifier has to be claimed before a pattern for something shorter can
+# take a bite out of it. Nothing is lost the other way round: a timestamp
+# has no `::` and never eight colon-separated groups, so neither the MAC
+# nor the IPv6 pattern can match one.
 BASE_MASKS = [
     ("ansi", re.compile(r"\x1b\[[0-9;]*[A-Za-z]"), ""),
-] + TIME_MASKS + [
     ("uuid", re.compile(
         r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
         r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"), "<UUID>"),
     ("mac", re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b"), "<MAC>"),
+    # An address is masked whole or it is not masked at all.  The old
+    # pattern could only start at a `::`, so `2001:db8::1` templated as
+    # `<NUM>:db8<IP6>` -- the leading group fell through to the number
+    # mask -- and two lines differing only in their v6 address became two
+    # templates, which is the one thing this tool exists to prevent.  It
+    # also matched `12:34:56`, so a duration the time masks had not caught
+    # became an address.  The alternatives below are the textual forms
+    # from RFC 4291, in the order a line is likely to carry them:
+    # v4-mapped, compressed with a leading group, compressed without one,
+    # and written out in full.  A zone (`fe80::1%eth0`) belongs to the
+    # address and is taken with it.
     ("ipv6", re.compile(
-        r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b|::[0-9a-fA-F:]+"),
+        r"(?<![\w:.])::(?:ffff(?::0{1,4})?:)?\d{1,3}(?:\.\d{1,3}){3}"
+        r"|(?<![\w:.])(?:[0-9a-fA-F]{1,4}:){1,7}:"
+        r"(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6})?(?:%[\w.-]+)?"
+        r"|(?<![\w:.])::(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,7})?"
+        r"(?:%[\w.-]+)?"
+        r"|(?<![\w:.])(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}(?![\w:])"),
      "<IP6>"),
+] + TIME_MASKS + [
     ("ipv4", re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "<IP>"),
     ("url", re.compile(r"\b[a-z][a-z0-9+.-]*://\S+"), "<URL>"),
     ("email", re.compile(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b"), "<EMAIL>"),

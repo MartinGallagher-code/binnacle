@@ -241,6 +241,25 @@ def is_ipv6(addr):
     return ":" in addr
 
 
+# canonical copy: binnacle/agree.py _port_of.
+def _port_of(text, spec):
+    """A port number, or a refusal naming the token it came from.
+
+    The range is checked here for the same reason the address is: a port
+    of 0 or 65536 is not a port, and letting one through turns into a
+    connection error that names the wrong cause -- or, where a whole list
+    is being judged, a file in which every entry failed for a reason that
+    was never on the network at all.
+    """
+    if not text.isdigit():
+        die("bad port %r in host token %r" % (text, spec))
+    port = int(text)
+    if not 1 <= port <= 65535:
+        die("port %d is out of range in host token %r (want 1-65535)"
+            % (port, spec))
+    return port
+
+
 def split_host_port(spec):
     """'host', 'host:port', '[v6]', '[v6]:port', bare v6 -> (addr, port).
 
@@ -257,9 +276,7 @@ def split_host_port(spec):
         if not sep:
             die("no closing ] in host token %r" % spec)
         if rest.startswith(":"):
-            if not rest[1:].isdigit():
-                die("bad port %r in host token %r" % (rest[1:], spec))
-            port = int(rest[1:])
+            port = _port_of(rest[1:], spec)
         elif rest:
             die("unexpected %r after ] in host token %r" % (rest, spec))
     elif spec.count(":") > 1:
@@ -267,7 +284,7 @@ def split_host_port(spec):
     elif ":" in spec:
         addr, _, p = spec.rpartition(":")
         if p.isdigit():
-            port = int(p)
+            port = _port_of(p, spec)
         else:
             addr = spec
     else:

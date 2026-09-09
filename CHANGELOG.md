@@ -8,6 +8,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two netmesh tests shared a port pair with a test that needs it
+  silent.** An agent is bounded by `--duration` rather than killed, so it
+  can outlive the test that started it. `t_loss_columns_go_blank...`
+  asserts that nothing answers on 5431 while the flow-bucket test ran a
+  live agent on the same port, and the reply-TTL test shared 5450 with the
+  unresolvable-peer test. Both read as flakes and were fixture
+  collisions; every agent test now has its own pair.
+
+- **`agree`, `reachable` and `netmesh` accepted a port that cannot
+  exist.** All three validate the address in a host token rather than
+  letting a bad one fail later as a connection error naming the wrong
+  cause -- but the port was only checked for being digits, so
+  `web01=10.0.0.1:99999` went through, and netmesh's `int()` took `-5` as
+  well. It matters most in `reachable`, which rewrites the file it is
+  given on the strength of the probe: every entry carrying that port would
+  have been commented out for a reason that was never on the network. All
+  three now refuse anything outside 1-65535.
+
+- **`logtriage` split one message into several templates over an
+  address.** Two lines that differ only in an IPv6 address have to reach
+  the same template -- that is the whole job -- but the pattern could only
+  start at a `::`, so `2001:db8::1` masked as `<NUM>:db8<IP6>` with its
+  leading group falling through to the number mask. The same pattern also
+  matched `12:34:56`, turning a duration the time masks had missed into an
+  address. It now covers the textual forms from RFC 4291, zone included.
+
+- **`logtriage` masked a MAC address as a timestamp.** The time masks ran
+  ahead of the MAC and IPv6 masks, and `clock` is `\d{2}:\d{2}:\d{2}` --
+  which the first three octets of a MAC very often look like, 08:00:27
+  being VirtualBox's own prefix. `08:00:27:aa:bb:cc` templated as
+  `<TS>:aa:bb:cc`, so two machines' MACs were two templates. The masks for
+  whole identifiers now run first; nothing is lost the other way round,
+  since a timestamp has no `::` and never eight colon-separated groups.
+
 - **`skew` printed an unsigned offset where the sign was the finding.**
   `human_seconds` documented itself as signed and then took `abs()`, so the
   SOURCES table -- the one place the direction is not also said in words --

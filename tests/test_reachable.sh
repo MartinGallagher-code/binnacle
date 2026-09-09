@@ -301,6 +301,19 @@ t_an_inline_comment_survives_a_split_range() {
     assert_not_contains "$body" "#the slow ones"
 }
 
+t_a_port_outside_the_range_is_refused() {
+    # This tool rewrites the file it is given on the strength of the
+    # probe, so a port that cannot be connected to would comment out every
+    # entry carrying it for a reason that was never on the network.
+    install_fake_probes
+    printf 'web01=10.0.0.1:99999\n' > "$TEST_TMPDIR/h.txt"
+    set +e
+    out="$(re "$TEST_TMPDIR/h.txt" --quiet 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+}
+
 echo "reachable"
 t_rewriting_keeps_the_file_it_was_given() {
     # This is the one tool that edits a file you already had, so the file
@@ -346,4 +359,5 @@ run_test "name=address form"                   t_name_equals_address_form
 run_test "--recheck-only is narrow"            t_recheck_only_touches_commented_lines
 run_test "rewriting keeps the file given"     t_rewriting_keeps_the_file_it_was_given
 run_test "inline comment survives a split" t_an_inline_comment_survives_a_split_range
+run_test "a port outside the range is refused" t_a_port_outside_the_range_is_refused
 finish

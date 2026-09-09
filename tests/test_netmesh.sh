@@ -218,6 +218,13 @@ EOF
 t_loss_columns_go_blank_not_zero_when_peer_dies() {
     # A pair whose replies dried up must write no RTT at all: averaging a
     # blank in as zero would flatter the baseline.
+    #
+    # The port pair here is this test's alone, and every other agent test
+    # in this file has its own. An agent is bounded by --duration rather
+    # than killed, so one can outlive the test that started it; while two
+    # tests shared 5430/5431 this one intermittently got real replies from
+    # the other's agent on 5431 and failed, which reads as a flake and is
+    # a fixture collision.
     cd "$TEST_TMPDIR"
     nm gen a=127.0.0.1:5430 b=127.0.0.1:5431 --mesh m.csv --pps 40 \
         --no-pmtu >/dev/null
@@ -460,7 +467,7 @@ t_a_reply_ttl_is_recorded_for_every_bucket_not_just_one() {
     # its own socket, so reading the TTL off the main socket alone would
     # record it for one probe in N and call that the path.
     cd "$TEST_TMPDIR"
-    nm gen a=127.0.0.1:5450 b=127.0.0.1:5451 --mesh mt.csv --pps 40 \
+    nm gen a=127.0.0.1:5442 b=127.0.0.1:5443 --mesh mt.csv --pps 40 \
         --no-pmtu --flows 3 >/dev/null
     mkdir -p ta tb
     nm agent --mesh mt.csv --host a --dir ta --interval 2 --duration 4 \
@@ -633,7 +640,7 @@ t_flow_buckets_break_the_rate_down_they_do_not_multiply_it() {
     # flow spreading on must not put more traffic on the fabric being
     # measured.  The buckets are a breakdown of the same probes.
     cd "$TEST_TMPDIR"
-    nm gen a=127.0.0.1:5430 b=127.0.0.1:5431 --mesh mf.csv --pps 40 \
+    nm gen a=127.0.0.1:5440 b=127.0.0.1:5441 --mesh mf.csv --pps 40 \
         --no-pmtu --flows 4 >/dev/null
     assert_contains "$(cat mf.csv)" "flows=4"
     mkdir -p fa fb
@@ -796,6 +803,25 @@ t_a_zero_destination_that_is_not_a_default() {
     assert_eq "$(default_iface_of)" "None"
 }
 
+t_a_port_outside_the_range_is_refused() {
+    # int() is happy with -5 and 99999, and the socket error that follows
+    # names the port without naming the mesh row it came from.
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(nm gen 'web01=10.0.0.1:99999' --mesh bad.tsv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+    set +e
+    out="$(nm gen 'web01=10.0.0.1:-5' --mesh bad.tsv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+    # ...and a real one still builds a mesh.
+    nm gen 'web01=10.0.0.1:2222' 'web02=10.0.0.2' --mesh ok.tsv >/dev/null 2>&1
+    assert_contains "$(cat ok.tsv)" "2222"
+}
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -840,4 +866,5 @@ run_test "a downed default is not egress"      t_a_downed_default_route_is_not_t
 run_test "the lowest metric default wins"      t_the_lowest_metric_default_wins
 run_test "a point-to-point default counts"     t_a_point_to_point_default_still_counts
 run_test "zero dest with a mask is not it"     t_a_zero_destination_that_is_not_a_default
+run_test "a bad port is refused"               t_a_port_outside_the_range_is_refused
 finish
