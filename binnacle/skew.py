@@ -726,21 +726,30 @@ def _join(items, n=4):
 
 
 def human_seconds(s):
-    """A signed duration a person can read, at the precision it deserves."""
+    """A signed duration a person can read, at the precision it deserves.
+
+    The sign is the half that matters here.  A source 40ms ahead and one
+    40ms behind are different findings -- one is a source running fast,
+    the other a source to stop trusting -- and the SOURCES table has only
+    this string to tell them apart.  Callers that say the direction in
+    words of their own ("40ms fast", "UTC-5h") pass abs() in, so the sign
+    is stated once rather than twice.
+    """
     if s is None:
         return "?"
     a = abs(s)
+    sign = "-" if s < 0 else ""
     if a < 0.001:
-        return "%.0fus" % (a * 1e6)
+        return "%s%.0fus" % (sign, a * 1e6)
     if a < 1:
-        return "%.0fms" % (a * 1000.0)
+        return "%s%.0fms" % (sign, a * 1000.0)
     if a < 60:
-        return "%.1fs" % a
+        return "%s%.1fs" % (sign, a)
     if a < 3600:
-        return "%dm %02ds" % (int(a // 60), int(a % 60))
+        return "%s%dm %02ds" % (sign, int(a // 60), int(a % 60))
     if a < 86400:
-        return "%dh %02dm" % (int(a // 3600), int((a % 3600) // 60))
-    return "%dd %02dh" % (int(a // 86400), int((a % 86400) // 3600))
+        return "%s%dh %02dm" % (sign, int(a // 3600), int((a % 3600) // 60))
+    return "%s%dd %02dh" % (sign, int(a // 86400), int((a % 86400) // 3600))
 
 
 def fast_or_slow(offset):
@@ -892,7 +901,7 @@ def _clock_offset():
     def say(f):
         o = f["clock.offset_s"]
         return ("%s %s the %d source%s that answered"
-                % (human_seconds(o), fast_or_slow(o),
+                % (human_seconds(abs(o)), fast_or_slow(o),
                    len(f.get("srv.alive") or []),
                    "" if len(f.get("srv.alive") or []) == 1 else "s"))
 
@@ -901,7 +910,7 @@ def _clock_offset():
         a = abs(o)
         s = ("Every timestamp this box writes is %s %s, including the ones "
              "you are about to compare against another machine's."
-             % (human_seconds(o), fast_or_slow(o)))
+             % (human_seconds(a), fast_or_slow(o)))
         if a >= 128:
             s += ("  Past 128 seconds chronyd will not step the clock "
                   "without makestep, so it may never close this gap on its "
@@ -1024,7 +1033,7 @@ def _rtc_drift():
     def say(f):
         d = f["rtc.delta_s"]
         return "hardware clock is %s %s the system clock" % (
-            human_seconds(d), "ahead of" if d > 0 else "behind")
+            human_seconds(abs(d)), "ahead of" if d > 0 else "behind")
 
     def fix(f):
         d = abs(f["rtc.delta_s"])
@@ -1077,7 +1086,7 @@ def _tz_not_utc():
         off = f["tz.utc_offset_s"]
         return ("timezone %s, UTC%s%s"
                 % (f.get("tz.name") or "?", "+" if off >= 0 else "-",
-                   human_seconds(off)))
+                   human_seconds(abs(off))))
 
     def fix(f):
         return ("Worth knowing rather than worth changing.  If the rest of "
@@ -1178,7 +1187,7 @@ def verdict_line(findings, facts):
         return ("This box's clock is %s %s the sources it follows.  "
                 "Everything it timestamps is wrong by that much, including "
                 "the logs you would correlate against another machine."
-                % (human_seconds(off), fast_or_slow(off)))
+                % (human_seconds(abs(off)), fast_or_slow(off)))
     return consequences.get(top.rule.id) or (
         "%s: %s" % (top.rule.title.capitalize(), top.say))
 
@@ -1280,12 +1289,12 @@ def render_human(facts, findings, skipped, passed, args, C):
         if facts.get("clock.offset_s") is not None:
             o = facts["clock.offset_s"]
             out.append("    %-24s %s %s" % ("system vs sources",
-                                            human_seconds(o),
+                                            human_seconds(abs(o)),
                                             fast_or_slow(o)))
         if facts.get("rtc.delta_s") is not None:
             d = facts["rtc.delta_s"]
             out.append("    %-24s %s %s" % ("hardware vs system",
-                                            human_seconds(d),
+                                            human_seconds(abs(d)),
                                             "ahead" if d > 0 else "behind"))
         if facts.get("tz.name"):
             out.append("    %-24s %s" % ("timezone", facts["tz.name"]))

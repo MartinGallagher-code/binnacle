@@ -742,6 +742,60 @@ t_without_flows_there_is_no_spread_section() {
 }
 
 
+# --- the default route ------------------------------------------------------
+
+# /proc/net/route holds one row per route; a default is destination and
+# mask both zero. Written as fixtures rather than read from the box, since
+# the runner's own routing table is not something a test can arrange.
+write_route() {
+    printf 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n' \
+        > "$TEST_TMPDIR/route"
+    for row in "$@"; do printf '%s\n' "$row" >> "$TEST_TMPDIR/route"; done
+}
+
+default_iface_of() {
+    "$PY" - "$NM" "$TEST_TMPDIR/route" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("nm", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.stdout.write(str(mod.default_iface(sys.argv[2])))
+EOF
+}
+
+t_a_downed_default_route_is_not_the_egress() {
+    # A decommissioned interface keeps its row. Taking the first zero
+    # destination named it, and the coalescing timer read off that card
+    # then belonged to a card carrying nothing.
+    write_route \
+        "eth1	00000000	0102A8C0	0002	0	0	0	00000000	0	0	0" \
+        "eth0	00000000	010200C0	0003	0	0	0	00000000	0	0	0"
+    assert_eq "$(default_iface_of)" "eth0"
+}
+
+t_the_lowest_metric_default_wins() {
+    # Two uplinks, both up: the kernel would use the lower metric, so the
+    # measurement has to be labelled with that one.
+    write_route \
+        "wlan0	00000000	010200C0	0003	0	0	600	00000000	0	0	0" \
+        "eth0	00000000	010200C0	0003	0	0	100	00000000	0	0	0"
+    assert_eq "$(default_iface_of)" "eth0"
+}
+
+t_a_point_to_point_default_still_counts() {
+    # `default dev tun0` carries no GATEWAY flag. Requiring one would
+    # report no egress on exactly the boxes worth naming.
+    write_route "tun0	00000000	00000000	0001	0	0	50	00000000	0	0	0"
+    assert_eq "$(default_iface_of)" "tun0"
+}
+
+t_a_zero_destination_that_is_not_a_default() {
+    # Destination zero with a non-zero mask is a route to 0.0.0.0/8, not
+    # the default route.
+    write_route "eth0	00000000	00000000	0001	0	0	0	000000FF	0	0	0"
+    assert_eq "$(default_iface_of)" "None"
+}
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -782,4 +836,8 @@ run_test "sick only under load differs"        t_a_sick_member_only_under_load_i
 run_test "without flows, no spread section"    t_without_flows_there_is_no_spread_section
 run_test "a peer on another address measures"  t_a_peer_answering_from_another_address_is_measured
 run_test "path mtu converges on that peer"     t_path_mtu_converges_to_a_peer_on_another_address
+run_test "a downed default is not egress"      t_a_downed_default_route_is_not_the_egress
+run_test "the lowest metric default wins"      t_the_lowest_metric_default_wins
+run_test "a point-to-point default counts"     t_a_point_to_point_default_still_counts
+run_test "zero dest with a mask is not it"     t_a_zero_destination_that_is_not_a_default
 finish

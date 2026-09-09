@@ -1115,10 +1115,18 @@ def _timeout_budget():
         return None
 
     def say(f):
+        # The count here has to be the one the arithmetic used, which is
+        # the configured list rather than the distinct servers probed. A
+        # resolv.conf naming the same server twice made this print a
+        # multiplication that did not come to the total beside it, and hid
+        # the repeated line that was the whole reason for the wait.
+        n = _g(f, "res.nameserver_count", _g(f, "srv.count", 0))
+        dupes = _g(f, "res.duplicates", 0) or 0
         return ("worst case %ds before resolution fails (timeout:%s x "
-                "attempts:%s x %d servers)"
+                "attempts:%s x %d server%s%s)"
                 % (f["budget.worst_s"], _g(f, "res.timeout", 5),
-                   _g(f, "res.attempts", 2), _g(f, "srv.count", 0)))
+                   _g(f, "res.attempts", 2), n, "" if n == 1 else "s",
+                   ", %d of them a repeated line" % dupes if dupes else ""))
 
     def fix(f):
         return ("Nothing waits that long: the health check, the load "

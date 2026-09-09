@@ -375,8 +375,12 @@ class Line(object):
             lines = []
             trailing = ""
             if "#" in self.payload:
-                trailing = "  " + self.payload.split("#", 1)[1].strip()
-                trailing = "  #" + trailing.lstrip("# ").rstrip()
+                # Everything after the first # is carried across verbatim,
+                # spacing included: stripping it turned "# the slow one"
+                # into "#the slow one" on every host the range split into,
+                # which is a diff against a file this tool promises only to
+                # comment and uncomment.
+                trailing = "  #" + self.payload.split("#", 1)[1].rstrip()
             for s in specs:
                 if usable_by_spec.get(s, True):
                     lines.append("%s%s" % (s, trailing))

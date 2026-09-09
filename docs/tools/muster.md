@@ -135,8 +135,15 @@ for h in $(grep -v '^#' mine.txt); do patch "$h"; done
 ```
 
 with the lease recorded in comments above it, which `done` reads to tell your
-completion from somebody else's. A hand-written list of names works too; only
-the conflict detection gets quieter.
+completion from somebody else's.
+
+A hand-written list of names, or `--item`, works too. With no lease line there
+is nothing to check a completion against, so `done` accepts it quietly.
+`release` does not: without a ticket the holder recorded on the row decides,
+so releasing an item somebody else still holds is refused rather than done
+silently -- that is the one thing the lease exists to prevent. Name yourself
+with `--as` if that is who took it, or use `reset`, which puts an item back
+regardless of who holds it.
 
 ## Naming items, and writing a list of them
 

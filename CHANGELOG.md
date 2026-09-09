@@ -6,6 +6,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`skew` printed an unsigned offset where the sign was the finding.**
+  `human_seconds` documented itself as signed and then took `abs()`, so the
+  SOURCES table -- the one place the direction is not also said in words --
+  rendered a source 40ms ahead and one 40ms behind identically as `40ms`.
+  That column exists to show which source disagrees and which way. The
+  helper now keeps the sign, and the lines that say the direction in words
+  of their own (`40ms fast`, `UTC-5h`) pass the magnitude in, so it is
+  stated once rather than twice.
+
+- **`netmesh` could name a dead interface as the egress.** `default_iface`
+  took the first row in `/proc/net/route` with a zero destination, though
+  its own comment said it checked the flags. A downed interface keeps its
+  entry and a box on two uplinks has a default per uplink, so the first row
+  is not necessarily the route in use -- and the coalescing timer read off
+  that interface then belonged to a card carrying nothing. Routes that are
+  not UP are skipped and the lowest metric wins. A point-to-point default
+  (`default dev tun0`), which carries no GATEWAY flag, still counts.
+
+- **`during` and `why-slow` reported negative disk and network rates.**
+  Both modules guard their counters against a reset -- "unknown is None,
+  never a negative rate" -- everywhere except the disk and netdev deltas,
+  which were subtracted inline. A device removed and re-added, or a veth
+  recreated mid-run, keeps its name and starts again from zero, which put a
+  negative utilisation and a negative MB/s into the series; `during`'s
+  analysis then read that sample as the quietest moment of the run, and
+  `why-slow` picked its busiest disk between numbers that were not
+  measurements. Both now leave the pair blank, as the CPU and swap
+  counters already did.
+
+- **`muster release` handed a live lease to the next worker.** Releasing
+  through a ticket refuses to touch an item held by somebody else, which is
+  the one guarantee the lease exists to give. Releasing the same item by
+  `--item` or from a hand-written list skipped the check entirely and freed
+  it silently, because the check keyed on a lease id that a bare name does
+  not carry. With no ticket the holder recorded on the row now decides.
+  `reset` remains the way to put an item back regardless of who holds it,
+  and the "a longer --lease is nearly always the fix" hint is no longer
+  printed for a conflict that has nothing to do with lease length.
+
+- **`resolve` printed a timeout budget that did not multiply out.** The
+  budget is counted from the configured nameserver list, duplicates
+  included, because that is the list the stub works down -- but the finding
+  printed the count of *distinct* servers probed. A resolv.conf naming one
+  server twice therefore read `timeout:5 x attempts:2 x 2 servers` beside a
+  total of 30. The line now shows the count the arithmetic used and names
+  the repeated line, which was the reason for the wait.
+
+- **`reachable` reformatted an inline comment it was asked only to
+  comment out.** When a range line has mixed results it is expanded to one
+  line per host, and the comment carried across lost the space after its
+  `#` -- so `# the slow one` came back as `#the slow one` on every host the
+  range split into, a diff in a file this tool promises only to comment and
+  uncomment. Everything after the first `#` is now carried over verbatim.
+
 ### Added
 
 - **`manifest --explain` says what each selector named.** A count that is

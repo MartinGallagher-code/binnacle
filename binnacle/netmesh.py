@@ -2530,25 +2530,48 @@ def render_queue_at_hop(recs, top=3):
     return lines
 
 
-def default_iface():
+# /proc/net/route flags, from linux/route.h.  Only UP is tested: a default
+# route over a point-to-point link (`default dev tun0`) carries no GATEWAY
+# flag, and refusing those would report no egress on exactly the boxes
+# whose egress is most worth naming.
+RTF_UP = 0x0001
+
+
+def default_iface(path="/proc/net/route"):
     """The interface carrying the default route, from /proc/net/route.
 
     Read rather than exec'd, and best-effort: this is only used to label a
     measurement, so a box whose egress cannot be identified reports None
     and the check that needs it skips.
+
+    A destination of zero is not on its own the default route.  The table
+    routinely holds more than one -- a downed interface keeps its entry,
+    and a box on two networks has a default per uplink -- so the flags and
+    the metric decide: routes that are not UP are skipped, and the lowest
+    metric wins, which is the one the kernel would actually use.  Matching
+    the first zero destination instead named a dead interface, and the
+    coalescing timer then read off it belonged to a card carrying nothing.
     """
     try:
-        with io.open("/proc/net/route", encoding="utf-8-sig",
-                     errors="replace") as fh:
+        with io.open(path, encoding="utf-8-sig", errors="replace") as fh:
             txt = fh.read()
     except (OSError, UnicodeDecodeError):
         return None
+    best = None
     for line in txt.splitlines()[1:]:
         f = line.split()
-        # destination 00000000 with the UP|GATEWAY flags is the default.
-        if len(f) >= 4 and f[1] == "00000000":
-            return f[0]
-    return None
+        # Destination and mask both zero: everything not matched elsewhere.
+        if len(f) < 8 or f[1] != "00000000" or f[7] != "00000000":
+            continue
+        try:
+            flags, metric = int(f[3], 16), int(f[6])
+        except ValueError:
+            continue
+        if not flags & RTF_UP:
+            continue
+        if best is None or metric < best[0]:
+            best = (metric, f[0])
+    return best[1] if best else None
 
 
 def read_rx_usecs(iface):

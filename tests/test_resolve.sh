@@ -341,6 +341,23 @@ t_an_empty_fact_file_is_not_a_clean_bill_of_health() {
     assert_contains "$out2" "does not hold a fact dictionary"
 }
 
+t_the_budget_arithmetic_adds_up() {
+    # The stub works down resolv.conf as written, duplicates and all, so
+    # the budget is counted from the configured list -- but the line was
+    # printing the distinct servers probed, so "timeout:5 x attempts:2 x 2
+    # servers" sat next to a total of 30. The multiplication has to come
+    # to the number beside it, and the repeated line is worth naming since
+    # it is the reason for the wait.
+    resolve_facts_json "$TEST_TMPDIR/f.json" res.timeout=5 res.attempts=2 \
+        'res.nameservers=["10.0.0.53","10.0.0.53","10.0.0.54"]' \
+        res.nameserver_count=3 res.duplicates=1 srv.count=2 \
+        budget.worst_s=30
+    out="$(rs --from-facts "$TEST_TMPDIR/f.json")"
+    assert_contains "$out" "timeout:5 x attempts:2 x 3 servers"
+    assert_contains "$out" "repeated line"
+    assert_not_contains "$out" "attempts:2 x 2 servers"
+}
+
 echo "resolve"
 run_test "healthy dns says so"                 t_healthy_dns_says_so
 run_test "dead resolver outranks its slowness" t_dead_first_resolver_outranks_the_slowness_it_causes
@@ -368,4 +385,5 @@ run_test "a duplicated nameserver counts once" t_a_duplicated_nameserver_still_c
 run_test "an empty fact file is not health"    t_an_empty_fact_file_is_not_a_clean_bill_of_health
 run_test "a mangled reply is an error"         t_a_mangled_reply_is_an_error_not_an_answer
 run_test "a server by name is refused"         t_a_server_by_name_is_refused_with_the_reason
+run_test "the budget arithmetic adds up"      t_the_budget_arithmetic_adds_up
 finish
