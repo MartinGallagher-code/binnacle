@@ -569,6 +569,71 @@ t_other_numbers_that_cannot_mean_anything_are_refused() {
     done
 }
 
+
+t_hosts_that_agree_on_nothing_are_not_unanimous() {
+    # The failure this tool exists to prevent, arrived at from the other
+    # side: a normalization that removes every line leaves every host
+    # holding the same empty string, and the report used to call that
+    # unanimity -- "Every host gave the same answer. Nothing to chase
+    # here." -- about a fleet nobody had compared. --grep for a line that
+    # is absent everywhere is not a typo, it is the ordinary case where
+    # its absence is the finding.
+    install_fake_ssh
+    for h in web01 web02 web03; do
+        fake_host "$h"
+        printf 'i am %s\n' "$h" > "$FAKE_ROOT/$h/who"
+    done
+    # Without the filter they genuinely disagree: three groups. That is
+    # exit 1 on its own, so it must not abort the case.
+    set +e
+    out="$(ag -H web01,web02,web03 --quiet -- cat who 2>&1)"
+    set -e
+    assert_contains "$out" "3 groups"
+
+    set +e
+    out="$(ag -H web01,web02,web03 --grep zzz-absent --quiet -- cat who 2>&1)"
+    rc=$?
+    set -e
+    assert_contains "$out" "NOTHING LEFT"
+    assert_contains "$out" "agree on nothing"
+    assert_not_contains "$out" "Nothing to chase here"
+    assert_status $rc 1
+}
+
+t_a_fleet_that_really_is_silent_still_agrees() {
+    # A command that prints nothing everywhere is an answer, and hosts
+    # agreeing on it agree. Only output that was there and was removed
+    # counts as a comparison that did not happen.
+    install_fake_ssh
+    for h in web01 web02 web03; do fake_host "$h"; done
+    out="$(ag -H web01,web02,web03 --quiet -- true 2>&1)"
+    assert_status $? 0
+    assert_contains "$out" "Nothing to chase here"
+    assert_not_contains "$out" "NOTHING LEFT"
+}
+
+t_slices_that_can_only_empty_the_comparison_are_refused() {
+    # --field is 1-based, so --field 0 is an off-by-one that handed back
+    # an empty string for every line. A negative --tail is quieter: it
+    # slices to lines[1:], dropping the first line rather than keeping
+    # the last N.
+    install_fake_ssh
+    fake_host web01
+    for pair in "--field 0" "--field -1" "--tail -1" "--head -1" "--tail 0"; do
+        set +e
+        # shellcheck disable=SC2086  # deliberate: a flag and its value
+        out="$(ag -H web01 $pair --quiet -- hostname 2>&1)"
+        rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "wants at least 1"
+    done
+    # The real thing still slices.
+    out="$(ag -H web01 --tail 1 --full --quiet -- 'printf "a\nb\n"' 2>&1)"
+    assert_contains "$out" "b"
+    assert_not_contains "$out" "    a"
+}
+
 echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
@@ -605,4 +670,7 @@ run_test "an unmakeable pull dir is survived" t_an_unmakeable_pull_dir_does_not_
 run_test "a zero guard is not a guard"        t_a_guard_that_reads_zero_as_unset_is_not_a_guard
 run_test "the canary still limits"            t_the_canary_still_limits_when_it_is_given_a_number
 run_test "other impossible numbers refused"   t_other_numbers_that_cannot_mean_anything_are_refused
+run_test "agreeing on nothing is not agreeing" t_hosts_that_agree_on_nothing_are_not_unanimous
+run_test "a really silent fleet still agrees" t_a_fleet_that_really_is_silent_still_agrees
+run_test "slices that only empty are refused" t_slices_that_can_only_empty_the_comparison_are_refused
 finish

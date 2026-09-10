@@ -8,6 +8,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`agree` called it unanimous when the normalizations had removed
+  every answer.** Hosts holding the same empty string group together, so
+  a filter that matches nothing collapses a fleet that genuinely differs
+  into one group -- digest `e3b0c44298fc`, which is the SHA-256 of the
+  empty string -- under the words *"Every host gave the same answer.
+  Nothing to chase here."* Three hosts that came back as three groups
+  became "3 hosts, 1 group, 3 agree" with one `--grep`, and `--grep` for
+  a line that turns out to be absent everywhere is not a typo: it is the
+  ordinary case where its absence is the finding.
+
+  This is the failure the tool exists to prevent, arrived at from the
+  other side -- its own docstring says a tool that moves on quietly
+  "lets you believe you checked them". A host whose output *was there*
+  and was normalized away is now named, never counted as unanimous, and
+  reflected in the exit status. A command that genuinely prints nothing
+  everywhere is untouched: that is an answer, and hosts agreeing on it
+  agree.
+
+  The arguments that could only ever produce it are refused too.
+  `--field` is 1-based, so `--field 0` was an off-by-one that returned an
+  empty string for every line; a negative `--head`/`--tail` sliced from
+  the wrong end, `--tail -1` dropping the *first* line rather than
+  keeping the last N.
+
 - **`agree`'s two fleet guards disabled themselves on a zero.** `--first`
   is the canary you run before the fleet and `--limit` is the refusal
   that stops a wide fan-out; both were written `if args.first` / `if
