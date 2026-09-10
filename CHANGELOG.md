@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`agree --pull` failed silently.** The whole point of `--pull` is to
+  bring the files back, and `pull_files`'s exit status was discarded: a
+  glob that matched nothing, an scp that failed, a `--pull-dir` that
+  could not be made -- all three looked exactly like success. The report
+  said the fleet agreed and the results directory was empty. A host that
+  brought nothing back is now named, with the reason, and counted in the
+  exit status. It is deliberately not folded into the host's *outcome*:
+  the command ran and its answer is real, so grouping it with the
+  failures would move it into a group it does not belong in.
+
+  Making the per-host directory could also take the run down with it. It
+  happens in a worker thread, where the OSError travels up through the
+  pool and replaces the entire report with a traceback -- over one
+  host's directory.
+
+- **The suite's fake NTP responder could be killed by the check waiting
+  for it.** Readiness was tested by trying to bind the responder's port
+  and treating failure as "it has it". A UDP port takes one owner, so a
+  checker that wins that race holds the port for the instant before it
+  closes -- and the responder binding in that window dies of EADDRINUSE,
+  leaving the checker to wait out its whole loop for a port nobody will
+  ever hold. Bound was also less than it looked: every use of this
+  responder cares whether it *answers*. It now writes a ready file once
+  it has the socket, and nothing contends for the port.
+
 - **`dredge` reported a path it had collected as a host with nothing to
   send.** `find "$rel" -type f` does not follow a symlink, but the
   existence check in front of it does -- so `dredge /var/log/current`,

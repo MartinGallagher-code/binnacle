@@ -28,7 +28,8 @@ Options:
   --sudo              prefix the command with `sudo -n`
   --sudo-user NAME    sudo to this user rather than root
   --push FILE         copy FILE to each host first, repeatable
-  --pull GLOB         copy matching files back afterwards
+  --pull GLOB         copy matching files back afterwards; a host it
+                      brought nothing back from is reported
   --pull-dir DIR      where pulled files land, one subdir per host (results)
   --keep-remote       leave the pushed files behind instead of cleaning up
   --remote-dir DIR    where pushed files go           (AGREE_REMOTE_DIR)
@@ -558,7 +559,7 @@ def normalize(text, host, args):
 
 class Result(object):
     __slots__ = ("host", "outcome", "rc", "stdout", "stderr", "duration",
-                 "norm", "digest", "group")
+                 "norm", "digest", "group", "pull_error")
 
     def __init__(self, host):
         self.host = host
@@ -570,6 +571,11 @@ class Result(object):
         self.norm = ""
         self.digest = ""
         self.group = None
+        # Why --pull brought nothing back from this host, if it did not.
+        # Deliberately not part of the outcome: the command ran and its
+        # answer is real, so folding a failed copy into it would move the
+        # host into a group it does not belong in.
+        self.pull_error = ""
 
 
 class Runner(object):
@@ -686,15 +692,28 @@ class Runner(object):
         return self._exec(self.ssh_argv(host, "chmod +x %s" % names), 60)[0:3:2]
 
     def pull_files(self, host, pattern, outdir):
+        """Copy matching files back.  -> "" or why nothing came back.
+
+        Making the directory can fail too, and it fails in a worker
+        thread: letting that OSError out ends the whole run with a
+        traceback instead of a report, over one host's directory.
+        """
         hostdir = os.path.join(outdir, host.name)
-        os.makedirs(hostdir, exist_ok=True)
+        try:
+            os.makedirs(hostdir, exist_ok=True)
+        except OSError as exc:
+            return "cannot make %s: %s" % (hostdir, exc)
         src = "%s:%s/%s" % (self.scp_target(host),
                              self.remote_dir, pattern)
         argv = list(self.scp) + SSH_OPTS
         if host.port:
             argv += ["-P", str(host.port)]
         argv += ["-q", src, hostdir + "/"]
-        return self._exec(argv, max(60, self.timeout))[0]
+        rc, _, err = self._exec(argv, max(60, self.timeout))
+        if rc == 0:
+            return ""
+        first = (err or "").strip().splitlines()
+        return first[0][:120] if first else "scp exited %d" % rc
 
     def run_one(self, host, command, push=None, pull=None, cleanup=True):
         r = Result(host)
@@ -710,7 +729,7 @@ class Runner(object):
         rc, out, err = self._exec(self.ssh_argv(host, command), self.timeout)
         r.rc, r.stdout, r.stderr = rc, out, err
         if pull:
-            self.pull_files(host, pull, self.args.pull_dir)
+            r.pull_error = self.pull_files(host, pull, self.args.pull_dir)
         if push and cleanup:
             self._exec(self.ssh_argv(
                 host, "rm -rf %s" % shlex.quote(self.remote_dir)), 60)
@@ -876,6 +895,18 @@ def render_groups(groups, args, meta):
                            % (len(diff) - len(shown_d)))
         out.append("")
 
+    failed_pulls = [r for g in groups for r in g.results if r.pull_error]
+    if failed_pulls:
+        out.append("  PULL FAILED  %d host%s, so --pull brought nothing back "
+                   "from %s:"
+                   % (len(failed_pulls), "" if len(failed_pulls) == 1 else "s",
+                      "it" if len(failed_pulls) == 1 else "them"))
+        for r in failed_pulls[:5]:
+            out.append("    %-12s %s" % (r.host.name, r.pull_error[:120]))
+        if len(failed_pulls) > 5:
+            out.append("    ... and %d more" % (len(failed_pulls) - 5))
+        out.append("")
+
     out.extend(_hints(groups, args, meta))
     return "\n".join(out)
 
@@ -923,6 +954,12 @@ def _hints(groups, args, meta):
                 out.append("    * %s exited %d.  Read the error above before "
                            "trusting the groups."
                            % (" ".join(g.hosts[:4]), g.sample.rc))
+    pulls = [r for g in groups for r in g.results if r.pull_error]
+    if pulls:
+        out.append("    * --pull brought nothing back from %s.  The command "
+                   "still ran and its answer above is real; what is missing "
+                   "is the files."
+                   % " ".join(r.host.name for r in pulls[:4]))
     if len(out) == 1:
         out.append("    * Nothing needs attention.")
     out.append("")
@@ -1216,6 +1253,9 @@ def run_fleet(args, command, label=None):
     sys.stdout.write(render_groups(groups, args, meta) + "\n")
 
     failed = any(g.outcome != OK for g in groups)
+    # A pull that brought nothing back is a failed run of what was asked
+    # for, even where every host agreed about the command itself.
+    failed = failed or any(r.pull_error for r in results)
     diverged = len([g for g in groups if g.outcome == OK]) > 1
     if failed:
         return 3
