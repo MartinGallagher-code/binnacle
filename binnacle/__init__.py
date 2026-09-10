@@ -3,7 +3,7 @@
 """binnacle -- instruments for Linux boxes, fleets and the networks between.
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds ten:
+one holds eleven:
 
     why-slow    why is this box slow?
     agree       which hosts in this fleet disagree with the rest?
@@ -15,11 +15,12 @@ one holds ten:
     skew        does this box know what time it is?
     muster      who has which of these, and what is still outstanding?
     manifest    which servers are those, in the layout?
+    dredge      bring that file back from every host, kept apart
 
-An eleventh console script, `binnacle`, comes with them and is not one of
+A twelfth console script, `binnacle`, comes with them and is not one of
 them: it is the housing rather than an instrument.  It lists what is
 installed here with each tool's own version and prints every tool's
---help on one page.  TOOLS below stays the ten, because it is the map
+--help on one page.  TOOLS below stays the eleven, because it is the map
 of the instruments.
 
 Each is a complete standalone program with no imports from its siblings and
@@ -34,7 +35,7 @@ __version__ = VERSION
 
 __all__ = ["VERSION", "TOOLS"]
 
-#: The ten instruments, and what each answers.  The `binnacle` command
+#: The eleven instruments, and what each answers.  The `binnacle` command
 #: reads this for the order and the wording of its table, so a tool added
 #: to the package and not to this map still lists -- without a
 #: description, which is the visible tell that it was missed here.
@@ -49,4 +50,5 @@ TOOLS = {
     "skew": "does this box know what time it is?",
     "muster": "who has which of these, and what is still outstanding?",
     "manifest": "which servers are those, in the layout?",
+    "dredge": "bring that file back from every host, kept apart",
 }

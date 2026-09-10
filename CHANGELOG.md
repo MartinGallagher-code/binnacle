@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failing assertion in the test suite could lose its own reason.**
+  Nine cases across three suites end a hand-rolled check with `fail
+  "why"`, on the strength of a helper that was never defined. The case
+  still failed -- on 127, "command not found" -- but the sentence saying
+  what had gone wrong went with it, which is exactly the moment you need
+  it. `fail` is now a helper beside `_fail`.
+
+- **The `during` counter-reset case raced its own fixture.** It rewrote
+  the disk and network counters 1.2s into a 2s run and required a sample
+  to straddle that; on a loaded runner the rewrite slips past the last
+  sample and there is nothing to straddle. The reset now lands a second
+  into a four-second run, and the `/proc/net/dev` fixture is built whole
+  and moved into place rather than appended to under the sampler's nose.
+
+- **`logtriage --since -30m` was refused by the tool that recommends it.**
+  A value beginning with `-` looks like an option to argparse, so the
+  relative spelling every error message in this tool suggests was
+  rejected with "expected one argument" -- and `--since=-30m`, the form
+  that works, is not the one anybody types. `--since`, `--until` and
+  `--split-at` now glue a bare relative value to their option before
+  parsing. `dredge` carries the same fix, since it takes `--since` in
+  the same spellings.
+
 - **`during` called a quiet moment a change of bottleneck.** `SHIFTED`
   means the *kind* of limit moved -- CPU-bound early, I/O-bound late --
   and its advice is to benchmark the phases separately. The fact behind it
@@ -125,6 +148,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uncomment. Everything after the first `#` is now carried over verbatim.
 
 ### Added
+
+- **`dredge`, an eleventh instrument: bring that file back from every
+  host, kept apart.** Something is wrong on some of forty machines and
+  the evidence is in a file on each of them; collecting it by hand is
+  forty `scp` commands whose results all land on top of each other,
+  because every one of them is called `syslog`. `dredge` runs the copy
+  once, in parallel, and lands each host's files under that host's name.
+  It is the gathering half of what `agree` does with commands.
+
+  `--head N` / `--tail N` cut on the far side, so what crosses the
+  network is two hundred lines and not four gigabytes -- the difference
+  between a run that takes a second and one that saturates the link it
+  is meant to be diagnosing. `--since` filters by modification time,
+  also remotely, and goes over as an epoch second so the window means
+  the same thing on a box in another timezone. `--append` / `--prepend`
+  add what came back to a local copy rather than replacing it, with
+  `--mark` writing a line at the seam.
+
+  Nothing a remote host says is used as a local path: names are rebuilt
+  here from the path that was asked for, so a host answering with
+  `../../etc/cron.d/x` writes inside the collection directory or not at
+  all. A host list naming one host twice is refused rather than
+  collected twice into the same place, because the host name is the only
+  thing keeping one machine's files from another's.
+
+- **`binnacle copy TOOL` puts an instrument's file in your hand.** Every
+  tool here is one standalone file precisely so it can be carried to a
+  box that has never heard of this package -- and after `pip install`
+  that file is under a site-packages directory nobody has memorised.
+  `binnacle copy netmesh` writes `netmesh.py` here, executable, ready to
+  `scp`; `--all` brings the lot, `-d DIR` puts them somewhere else.
+
+  It lands under the name the package uses, which matters more than it
+  looks: `agree script why-slow` goes looking for `why_slow.py`, so a
+  copy renamed on the way out stops matching. It refuses to write over a
+  file already there whose contents differ, because what is most likely
+  sitting under that name is your own edited copy; `--force` says
+  otherwise, and a byte-identical file already there is reported and
+  left alone rather than counted as trouble.
 
 - **`manifest --explain` says what each selector named.** A count that is
   not the one you expected is the normal way this tool goes wrong, and

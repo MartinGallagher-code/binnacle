@@ -3,6 +3,7 @@
 # Sourced by every test_*.sh.  Provides:
 #   run_test NAME BODY      run one case in a subshell with a fresh temp dir
 #   assert_eq/contains/not_contains/status/file_exists/no_file/between
+#   fail MSG                fail a case with a reason, for what no assert_ covers
 #   install_fake_ssh        an ssh+scp pair that run "remote" commands locally
 #   fake_host NAME          create a sandbox root for one fake host
 #   gen_log FILE            a synthetic log with a known planted structure
@@ -92,6 +93,14 @@ finish() {
 # -- assertions -------------------------------------------------------------
 
 _fail() { printf 'assertion failed: %s\n' "$1" >&2; return 1; }
+
+# The same thing under the name a case reaches for when it is checking
+# something no assert_ covers -- nine cases across three suites called
+# `fail` on the strength of it existing.  It did not, so a real failure
+# came back as "fail: command not found" and the message saying what had
+# gone wrong was lost.  The case still failed, on 127; only the reason
+# for it did not survive.
+fail() { _fail "$1"; }
 
 assert_eq() {
     [ "$1" = "$2" ] || _fail "expected '$2', got '$1'"

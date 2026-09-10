@@ -8,7 +8,7 @@
 [![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds ten, for Linux boxes, the fleets they belong to, and the networks
+one holds eleven, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -23,6 +23,7 @@ between them.
 | `skew` | Does this box know what time it is? |
 | `muster` | Who has which of these, and what is still outstanding? |
 | `manifest` | Which servers are those, in the layout? |
+| `dredge` | Bring that file back from every host, kept apart |
 
 ```bash
 pip install binnacle
@@ -33,13 +34,20 @@ No dependencies. Python 3.6+. No agents, no daemons, no dotdirs, no root.
 One more command comes with them, and it is the one to run first:
 
 ```bash
-binnacle          # what is installed here, and what version each tool says it is
-binnacle help     # every tool's --help, on one page
+binnacle               # what is installed here, and what version each tool says it is
+binnacle help          # every tool's --help, on one page
+binnacle copy netmesh  # netmesh.py, here, ready to scp somewhere
 ```
 
-`binnacle` is the housing rather than a tenth instrument -- one name to
-remember instead of nine, and the only thing that will tell you a module
+`binnacle` is the housing rather than a twelfth instrument -- one name to
+remember instead of eleven, and the only thing that will tell you a module
 was left behind at an older version.
+
+Every tool is one standalone file, so getting one onto a box that has never
+heard of this package is a copy and nothing else. `binnacle copy` is how you
+get your hands on that file without going digging through site-packages: it
+writes it here under the name the package uses, executable, and refuses to
+write over an edited copy of your own.
 
 ## Diagnose, don't dump
 
@@ -92,7 +100,7 @@ agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --c
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The ten, briefly
+## The eleven, briefly
 
 ### why-slow
 
