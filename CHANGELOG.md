@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`dredge` lands one directory of distinctly-named files, not a rebuilt
+  tree.** Every collected file went to `collected/<host>/<the remote
+  path>`, so forty machines produced forty identical paths under forty
+  host directories -- which reads well and greps badly. The command you
+  actually want next is `grep -l oom *`, or `logtriage
+  dredge-*/web*syslog`, and both want one directory whose *names* tell
+  the files apart:
+
+  ```text
+  dredge-20260910-172845/web01~var~log~syslog
+  dredge-20260910-172845/web02~var~log~nginx~error.log
+  ```
+
+  `-d DIR` names the directory. Without it each run now gets one of its
+  own, stamped with the time, rather than every run landing in
+  `collected/` on top of the last: collecting the same path twice an hour
+  apart is the normal way to use this, and the second run quietly
+  replacing the first is not a result anybody wants to find later. Two
+  runs inside one second get `-2`, `-3`.
+
+  `--flat` is gone, since it selected what is now the only layout.
+
 ### Fixed
 
 - **`resolve` read `options ndots:0` as `ndots:1`.** Zero is not an

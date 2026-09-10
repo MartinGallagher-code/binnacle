@@ -34,28 +34,50 @@ t_a_file_comes_back_under_the_name_of_its_host() {
     dr logs/app.log -H web01,web02,web03 -d out --quiet
     assert_status $? 0
     for h in web01 web02 web03; do
-        assert_file_exists "out/$h/logs/app.log"
-        assert_eq "$(cat "out/$h/logs/app.log")" "hello from $h"
+        assert_file_exists "out/$h~logs~app.log"
+        assert_eq "$(cat "out/$h~logs~app.log")" "hello from $h"
     done
 }
 
-t_a_directory_comes_back_as_a_tree() {
+t_a_directory_comes_back_as_named_files() {
+    # A directory comes back as its files, in one directory, told apart
+    # by name. Rebuilding each host's tree locally reads well and greps
+    # badly: the next command is `grep -l oom *`, not a walk.
     seed
     cd "$TEST_TMPDIR"
     dr logs -H web01 -d out --quiet
-    assert_file_exists "out/web01/logs/app.log"
-    assert_file_exists "out/web01/logs/sub/other.log"
-    assert_eq "$(cat out/web01/logs/sub/other.log)" "second file on web01"
+    assert_no_file "out/web01"
+    assert_file_exists "out/web01~logs~app.log"
+    assert_file_exists "out/web01~logs~sub~other.log"
+    assert_eq "$(cat "out/web01~logs~sub~other.log")" "second file on web01"
 }
 
-t_flat_folds_the_path_into_the_name() {
-    # One directory, so the next step can be a glob rather than a walk.
+t_a_run_gets_a_directory_of_its_own() {
+    # Collecting the same path twice an hour apart is the normal way to
+    # use this, so without -d each run lands somewhere new rather than on
+    # top of the last one.
     seed
     cd "$TEST_TMPDIR"
-    dr logs -H web01,web02 -d out --flat --quiet
+    dr logs/app.log -H web01 --quiet
+    first="$(find . -maxdepth 1 -type d -name 'dredge-*' | head -1)"
+    if [ -z "$first" ]; then
+        _fail "no dredge-<stamp> directory was made"
+    fi
+    assert_file_exists "$first/web01~logs~app.log"
+    dr logs/app.log -H web01 --quiet
+    n="$(find . -maxdepth 1 -type d -name 'dredge-*' | wc -l | tr -d ' ')"
+    assert_eq "$n" "2"
+}
+
+t_the_name_carries_the_host_and_the_path() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs -H web01,web02 -d out --quiet
     assert_file_exists "out/web01~logs~app.log"
     assert_file_exists "out/web02~logs~sub~other.log"
     assert_eq "$(cat "out/web01~logs~app.log")" "hello from web01"
+    # One directory: no host subdirectory, no rebuilt tree.
+    assert_eq "$(find out -type d | wc -l | tr -d ' ')" "1"
 }
 
 t_two_hosts_of_one_name_are_refused() {
@@ -85,7 +107,7 @@ with open(sys.argv[1], 'w') as fh:
         fh.write('line %d\n' % i)" "$FAKE_ROOT/web01/logs/big.log"
     cd "$TEST_TMPDIR"
     dr logs/big.log -H web01 -d out --tail 3 --quiet
-    assert_eq "$(cat out/web01/logs/big.log)" \
+    assert_eq "$(cat "out/web01~logs~big.log")" \
               "$(printf 'line 4998\nline 4999\nline 5000')"
 }
 
@@ -96,7 +118,7 @@ t_head_brings_back_only_the_start() {
     printf 'one\ntwo\nthree\nfour\n' > "$FAKE_ROOT/web01/logs/a.log"
     cd "$TEST_TMPDIR"
     dr logs/a.log -H web01 -d out --head 2 --quiet
-    assert_eq "$(cat out/web01/logs/a.log)" "$(printf 'one\ntwo')"
+    assert_eq "$(cat "out/web01~logs~a.log")" "$(printf 'one\ntwo')"
 }
 
 t_head_and_tail_are_opposite_ends() {
@@ -121,10 +143,10 @@ open(sys.argv[1], 'wb').write(b'===dredge FILE\n\x00\x01\x02binary\xff\n')" \
         "$FAKE_ROOT/web01/logs/odd.log"
     cd "$TEST_TMPDIR"
     dr logs/odd.log -H web01 -d out --tail 5 --quiet
-    assert_file_exists "out/web01/logs/odd.log"
+    assert_file_exists "out/web01~logs~odd.log"
     got="$("$PY" -c "
 import sys; sys.stdout.write(repr(open(sys.argv[1],'rb').read()))" \
-        out/web01/logs/odd.log)"
+        "out/web01~logs~odd.log")"
     assert_contains "$got" "binary"
     assert_contains "$got" "===dredge FILE"
 }
@@ -140,8 +162,8 @@ t_since_selects_by_modification_time() {
     touch -d "2001-01-01 00:00:00" "$FAKE_ROOT/web01/logs/old.log"
     cd "$TEST_TMPDIR"
     dr logs -H web01 -d out --since -1h --quiet
-    assert_file_exists "out/web01/logs/new.log"
-    assert_no_file "out/web01/logs/old.log"
+    assert_file_exists "out/web01~logs~new.log"
+    assert_no_file "out/web01~logs~old.log"
 }
 
 t_the_relative_form_of_since_is_accepted_unglued() {
@@ -178,7 +200,7 @@ t_append_adds_to_what_is_already_here() {
     cd "$TEST_TMPDIR"
     dr logs/app.log -H web01 -d out --quiet
     dr logs/app.log -H web01 -d out --append --quiet
-    assert_eq "$(cat out/web01/logs/app.log)" \
+    assert_eq "$(cat "out/web01~logs~app.log")" \
               "$(printf 'hello from web01\nhello from web01')"
 }
 
@@ -188,7 +210,7 @@ t_prepend_puts_it_at_the_other_end() {
     dr logs/app.log -H web01 -d out --quiet
     printf 'second run\n' > "$FAKE_ROOT/web01/logs/app.log"
     dr logs/app.log -H web01 -d out --prepend --quiet
-    assert_eq "$(cat out/web01/logs/app.log)" \
+    assert_eq "$(cat "out/web01~logs~app.log")" \
               "$(printf 'second run\nhello from web01')"
 }
 
@@ -197,8 +219,8 @@ t_a_mark_shows_where_old_meets_new() {
     cd "$TEST_TMPDIR"
     dr logs/app.log -H web01 -d out --quiet
     dr logs/app.log -H web01 -d out --append --mark --quiet
-    assert_contains "$(cat out/web01/logs/app.log)" "web01"
-    assert_contains "$(cat out/web01/logs/app.log)" "====="
+    assert_contains "$(cat "out/web01~logs~app.log")" "web01"
+    assert_contains "$(cat "out/web01~logs~app.log")" "====="
 }
 
 t_a_mark_without_a_seam_is_refused() {
@@ -216,7 +238,7 @@ t_replacing_is_the_default() {
     cd "$TEST_TMPDIR"
     dr logs/app.log -H web01 -d out --quiet
     dr logs/app.log -H web01 -d out --quiet
-    assert_eq "$(cat out/web01/logs/app.log)" "hello from web01"
+    assert_eq "$(cat "out/web01~logs~app.log")" "hello from web01"
 }
 
 # --- what went wrong -------------------------------------------------------
@@ -230,7 +252,7 @@ t_an_unreachable_host_is_named_and_the_rest_still_land() {
     set -e
     assert_status $rc 1
     assert_contains "$out" "web09"
-    assert_file_exists "out/web01/logs/app.log"
+    assert_file_exists "out/web01~logs~app.log"
 }
 
 t_a_missing_path_says_so() {
@@ -257,8 +279,8 @@ import sys; open(sys.argv[1],'wb').write(b'x' * 20000)" \
     set -e
     assert_contains "$out" "OVERSIZE"
     assert_contains "$out" "big.log"
-    assert_file_exists "out/web01/logs/small.log"
-    assert_no_file "out/web01/logs/big.log"
+    assert_file_exists "out/web01~logs~small.log"
+    assert_no_file "out/web01~logs~big.log"
 }
 
 t_nothing_a_host_says_becomes_a_local_path() {
@@ -288,7 +310,7 @@ t_csv_carries_a_row_per_file() {
     dr logs -H web01 -d out --csv c.csv --quiet
     head="$(head -1 c.csv)"
     assert_eq "$head" "host,remote_path,local_path,bytes,outcome"
-    assert_contains "$(cat c.csv)" "web01,logs,out/web01/logs/app.log"
+    assert_contains "$(cat c.csv)" "web01,logs,out/web01~logs~app.log"
 }
 
 t_a_dry_run_contacts_nothing() {
@@ -362,8 +384,8 @@ t_a_symlinked_path_is_the_file_it_points_at() {
     out="$(dr current.log -H web01 -d out 2>&1)"
     assert_status $? 0
     assert_not_contains "$out" "EMPTY"
-    assert_file_exists "out/web01/current.log"
-    assert_eq "$(cat out/web01/current.log)" "hello from web01"
+    assert_file_exists "out/web01~current.log"
+    assert_eq "$(cat "out/web01~current.log")" "hello from web01"
 }
 
 t_a_link_inside_a_tree_is_still_not_collected() {
@@ -374,8 +396,8 @@ t_a_link_inside_a_tree_is_still_not_collected() {
     cd "$TEST_TMPDIR"
     ln -s ../app.log "$FAKE_ROOT/web01/logs/sub/link.log"
     dr logs -H web01 -d out --quiet
-    assert_file_exists "out/web01/logs/app.log"
-    assert_no_file "out/web01/logs/sub/link.log"
+    assert_file_exists "out/web01~logs~app.log"
+    assert_no_file "out/web01~logs~sub~link.log"
 }
 
 t_a_local_write_failure_is_one_hosts_failure() {
@@ -386,7 +408,7 @@ t_a_local_write_failure_is_one_hosts_failure() {
     seed
     cd "$TEST_TMPDIR"
     # A directory where web01's file has to land, and nothing in web02's way.
-    mkdir -p "out/web01/logs/app.log"
+    mkdir -p "out/web01~logs~app.log"
     set +e
     out="$(dr logs/app.log -H web01,web02 -d out 2>&1)"; rc=$?
     set -e
@@ -394,21 +416,20 @@ t_a_local_write_failure_is_one_hosts_failure() {
     assert_contains "$out" "FAILED"
     assert_contains "$out" "cannot write"
     # The other host still landed, and the run still reported.
-    assert_file_exists "out/web02/logs/app.log"
+    assert_file_exists "out/web02~logs~app.log"
     assert_contains "$out" "1 of 2 hosts"
 }
 
 t_two_paths_folding_onto_one_name_are_not_silently_merged() {
-    # Only --flat can do this: `a~b/c` and `a/b/c` both fold to `a~b~c`,
-    # and the second replacing the first looks exactly like a successful
-    # collection.
+    # `a~b/c` and `a/b/c` both fold to `a~b~c`, and the second replacing
+    # the first looks exactly like a successful collection.
     seed
     cd "$TEST_TMPDIR"
     mkdir -p "$FAKE_ROOT/web01/t/a~b" "$FAKE_ROOT/web01/t/a/b"
     printf 'first\n' > "$FAKE_ROOT/web01/t/a~b/c"
     printf 'second\n' > "$FAKE_ROOT/web01/t/a/b/c"
     set +e
-    out="$(dr t -H web01 -d out --flat 2>&1)"; rc=$?
+    out="$(dr t -H web01 -d out 2>&1)"; rc=$?
     set -e
     assert_status $rc 1
     assert_contains "$out" "COLLISION"
@@ -498,8 +519,9 @@ t_ceilings_that_cannot_mean_anything_are_refused() {
 
 echo "dredge"
 run_test "a file comes back under its host"    t_a_file_comes_back_under_the_name_of_its_host
-run_test "a directory comes back as a tree"    t_a_directory_comes_back_as_a_tree
-run_test "flat folds the path into the name"   t_flat_folds_the_path_into_the_name
+run_test "a directory comes back as names"     t_a_directory_comes_back_as_named_files
+run_test "a run gets a directory of its own"   t_a_run_gets_a_directory_of_its_own
+run_test "the name carries host and path"      t_the_name_carries_the_host_and_the_path
 run_test "two hosts of one name are refused"   t_two_hosts_of_one_name_are_refused
 run_test "tail brings back only the end"       t_tail_brings_back_only_the_end
 run_test "head brings back only the start"     t_head_brings_back_only_the_start

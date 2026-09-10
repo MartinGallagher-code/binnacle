@@ -7,6 +7,7 @@ dredge /var/log/syslog --hosts hosts.txt          # one file from every host
 dredge /var/log/syslog --tail 200 -H 'web[01-40]' # only the last 200 lines
 dredge /etc/nginx --hosts hosts.txt               # a whole directory each
 dredge /var/log/app.log --since -1h --append      # only what changed, added on
+dredge /var/log/syslog -d today --hosts hosts.txt # into a directory you name
 ```
 
 ## The problem it solves
@@ -25,27 +26,45 @@ back from everywhere and keeps them apart.
 
 ## Names that stay apart
 
-Every collected file lands under the name of the host it came from, with the
-remote directory structure kept:
+One directory per run, and everything in it is told apart by its **name**
+rather than by where it sits:
 
 ```text
-collected/web01/var/log/syslog
-collected/web02/var/log/syslog
-collected/web02/var/log/nginx/error.log
+dredge-20260910-172845/web01~var~log~syslog
+dredge-20260910-172845/web02~var~log~syslog
+dredge-20260910-172845/web02~var~log~nginx~error.log
 ```
 
-`--flat` puts everything in one directory instead, folding the path into the
-name — which is what you want when the next step is a glob rather than a walk:
+Rebuilding each host's directory tree locally reads well and greps badly. The
+command you actually want next is `grep -l oom *`, or `logtriage
+dredge-*/web*syslog`, and both of those want one directory of
+distinctly-named files — not forty identical paths under forty host
+directories.
 
-```text
-collected/web01~var~log~syslog
-collected/web02~var~log~syslog
+### The directory
+
+`-d DIR` names it yourself. Without it, every run gets one of its own,
+stamped with the time:
+
+```bash
+dredge /var/log/syslog --hosts hosts.txt      # -> dredge-20260910-172845/
+dredge /var/log/syslog -d before-the-restart  # -> before-the-restart/
 ```
+
+Collecting the same path twice an hour apart is the normal way to use this,
+and the second run quietly replacing the first is not a result anybody wants
+to find later. Two runs inside the same second get `-2`, `-3` rather than
+sharing.
 
 The host name is the only thing keeping one machine's files from another's, so
 a list naming one host twice is **refused** rather than collected twice into
 the same place — the second would overwrite the first silently, and only for
 the files they had in common.
+
+Two remote paths from one host can still want the same local name — `a~b/c`
+and `a/b/c` both fold to `a~b~c`. The second is refused and named rather than
+written over the first, because a file quietly replacing another looks exactly
+like a successful collection.
 
 Nothing a remote host says is used as a local path. Names are rebuilt here
 from the path you asked for, so a host answering with `../../etc/cron.d/x`
@@ -160,15 +179,9 @@ a host that goes quiet halfway through is one row in the report rather than a
 run that never returns. Each host's ssh gets a session of its own, so ending
 one takes anything the remote command left holding the connection with it.
 
-Under `--flat` two remote paths can want one local name — `a~b/c` and `a/b/c`
-both fold to `a~b~c`. The second is **refused rather than written over**,
-because a file quietly replacing another looks exactly like a successful
-collection:
-
 ```text
   COLLISION 1 file folded onto a name already taken and was left behind:
             web03        ./a/b/c
-            --flat folds / into ~; drop it to keep the tree and the names apart.
 ```
 
 ## Why this pulls rather than being pushed
@@ -199,13 +212,13 @@ the connection already open.
 
 ```text
 dredge -- /var/log/syslog   [tail 200]
-        38 files from 38 of 40 hosts, 1.2MB in 2.4s -> collected/
+        38 files from 38 of 40 hosts, 1.2MB in 2.4s -> dredge-20260910-172845/
 
   UNREACHABLE db07: connect to host db07 port 22: Connection timed out
   MISSING     web31: no such path
 
-  collected/web01/var/log/syslog
-  collected/web02/var/log/syslog
+  dredge-20260910-172845/web01~var~log~syslog
+  dredge-20260910-172845/web02~var~log~syslog
   ... and 36 more
 ```
 
@@ -220,8 +233,7 @@ back.
 |---|---|
 | `-H, --host TOKEN` | hosts, repeatable; ranges expand (`web[01-40]`) |
 | `--hosts FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
-| `-d, --dir DIR` | where collected files land (default `collected`) |
-| `--flat` | one directory, the host in each name |
+| `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
 | `--head N` / `--tail N` | only that many lines, cut on the far side |
 | `--since T` | only files modified since T |
 | `--append` / `--prepend` | add to what is here rather than replacing it |
