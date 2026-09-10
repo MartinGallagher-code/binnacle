@@ -12,8 +12,7 @@ Usage: dredge /var/log/syslog --hosts hosts.txt      one file from every host
 Options:
   -H, --host TOKEN    hosts, repeatable; ranges expand (`web[01-40]`)
       --hosts FILE    a server list, one per line -- reachable's output works
-  -d, --dir DIR       where collected files land          (default: collected)
-      --flat          one directory, the host in each name
+  -d, --dir DIR       where collected files land   (default: dredge-<stamp>)
       --head N        only the first N lines of each file
       --tail N        only the last N lines of each file
       --since T       only files modified since T: -30m, 14:20, an ISO stamp
@@ -60,15 +59,23 @@ Only the part you need, and only if it changed
   before trusting a tight `--since` window.
 
 Names that stay apart
-  Every collected file lands under the name of the host it came from:
+  One directory per run, and everything in it is told apart by its *name*
+  rather than by where it sits:
 
-      collected/web01/var/log/syslog
-      collected/web02/var/log/syslog
+      dredge-20260910-172845/web01~var~log~syslog
+      dredge-20260910-172845/web02~var~log~syslog
+      dredge-20260910-172845/web02~var~log~nginx~error.log
 
-  The remote directory structure is kept, so a whole tree comes back as a
-  tree.  `--flat` puts everything in one directory instead, with the path
-  folded into the name -- `collected/web01~var~log~syslog` -- which is what
-  you want when the next step is `grep` or a glob rather than a walk.
+  Rebuilding each host's directory tree locally reads well and greps
+  badly.  The command you actually want next is `grep -l oom *` or
+  `logtriage dredge-*/web*syslog`, and both of those want one directory
+  of distinctly-named files, not forty identical paths under forty host
+  directories.
+
+  `-d DIR` names the directory yourself.  Without it every run gets one
+  of its own, stamped with the time: collecting the same path twice an
+  hour apart is the normal way to use this, and the second run quietly
+  replacing the first is not a result anybody wants to find later.
 
   Host names are what make these unique, so a list naming one host twice
   is refused rather than quietly collecting it twice into the same place.
@@ -138,7 +145,6 @@ from datetime import datetime
 VERSION = "0.6.0"
 PROG = os.path.basename(sys.argv[0]) or "dredge.py"
 
-DEFAULT_DIR = "collected"
 DEFAULT_JOBS = 20
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024
@@ -154,11 +160,32 @@ OK, MISSING, FAILED, TIMEOUT, UNREACHABLE = (
 # canonical copy: binnacle/agree.py RANGE_RE.
 RANGE_RE = re.compile(r"\[([^\]]+)\]")
 
-# The character that stands in for a path separator under --flat.  A
-# hostname cannot contain it and a path rarely does, which is what makes
+# The character that stands in for a path separator in a collected name.
+# A hostname cannot contain it and a path rarely does, which is what makes
 # the folded name readable; where two remote paths do fold onto one local
 # name the collision is detected rather than silently overwritten.
 FLAT_SEP = "~"
+
+
+def default_dir():
+    """A directory of this run's own, when the caller did not name one.
+
+    Every run lands somewhere new rather than on top of the last one:
+    collecting the same path twice an hour apart is the normal way to
+    use this, and the second run silently replacing the first is not a
+    result anybody wants to discover later.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = "dredge-%s" % stamp
+    if not os.path.exists(base):
+        return base
+    # Two runs inside one second. Rare, and cheaper to number than to
+    # think about.
+    for n in range(2, 100):
+        candidate = "%s-%d" % (base, n)
+        if not os.path.exists(candidate):
+            return candidate
+    return base
 
 
 # canonical copy: binnacle/why_slow.py.  Duplicated rather than imported
@@ -588,14 +615,21 @@ def _clean_relpath(name):
 
 
 def local_path(args, host, relpath):
-    """Where a file from HOST lands, and it lands under HOST's name."""
+    """Where a file from HOST lands: one directory, the name says which.
+
+    Everything from a run goes in one directory and is told apart by its
+    *name* rather than by where it sits.  Rebuilding each host's
+    directory tree locally reads well and greps badly: the interesting
+    command afterwards is `grep -l something *` or `logtriage
+    dredge-*/web*syslog`, and both of those want one directory of
+    distinctly-named files rather than forty identical paths under forty
+    host directories.
+    """
     rel = _clean_relpath(relpath)
     if not rel:
         rel = "unnamed"
-    if args.flat:
-        return os.path.join(args.dir,
-                            host.name + FLAT_SEP + rel.replace("/", FLAT_SEP))
-    return os.path.join(args.dir, host.name, *rel.split("/"))
+    return os.path.join(args.dir,
+                        host.name + FLAT_SEP + rel.replace("/", FLAT_SEP))
 
 
 # ---------------------------------------------------------------------------
@@ -628,11 +662,11 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
     the pipeline, usually -- never sees half a file, and a run interrupted
     halfway leaves what was already there intact.
 
-    Two files from one host can want the same local name under --flat,
-    where `a~b/c` and `a/b/c` both fold to `a~b~c`.  Distinct remote paths
-    cannot collide any other way, and the second silently replacing the
-    first is the one outcome worth refusing outright: it looks exactly
-    like a successful collection.
+    Two files from one host can want the same local name, where `a~b/c`
+    and `a/b/c` both fold to `a~b~c`.  Distinct remote paths cannot
+    collide any other way, and the second silently replacing the first
+    is the one outcome worth refusing outright: it looks exactly like a
+    successful collection.
     """
     if any(p == path for _h, p, _n in taken):
         if collisions is not None:
@@ -1037,8 +1071,10 @@ def render(results, args, elapsed):
             out.append("            %-12s %s" % (host.name, remote))
         if len(clashed) > 5:
             out.append("            ... and %d more" % (len(clashed) - 5))
-        out.append("            --flat folds / into %s; drop it to keep the "
-                   "tree and the names apart." % FLAT_SEP)
+        out.append("            A path already containing %s folds onto the "
+                   "same name as one with a /" % FLAT_SEP)
+        out.append("            there.  Collect them in separate runs, or "
+                   "name them apart on the far side.")
     skipped = [(r.host, s) for r in results for s in r.skipped]
     if skipped:
         out.append("  OVERSIZE  %d file%s larger than --max-bytes (%s), left "
@@ -1108,8 +1144,7 @@ def build_parser():
                    help="the file or directory to bring back from each host")
     p.add_argument("-H", "--host", dest="H", action="append", metavar="TOKEN")
     p.add_argument("--hosts", action="append", metavar="FILE")
-    p.add_argument("-d", "--dir", default=_env("DIR", DEFAULT_DIR))
-    p.add_argument("--flat", action="store_true")
+    p.add_argument("-d", "--dir", default=_env("DIR"))
     p.add_argument("--head", type=int, metavar="N")
     p.add_argument("--tail", type=int, metavar="N")
     p.add_argument("--since", metavar="T")
@@ -1186,6 +1221,10 @@ def main(argv=None):
     if args.mark and not (args.append or args.prepend):
         die("--mark writes a line where old meets new, so it needs "
             "--append or --prepend")
+    # A run of its own unless the caller named one, so today's collection
+    # never lands on top of yesterday's.
+    if not args.dir:
+        args.dir = default_dir()
     args.since_epoch = parse_when(args.since) if args.since else None
     # Drawn fresh per run and never from the payload: a frame the far side
     # could guess is a frame the far side could forge.
