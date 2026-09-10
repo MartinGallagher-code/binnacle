@@ -179,14 +179,42 @@ while [ $# -gt 0 ]; do
   esac
 done
 n=${#args[@]}; dest="${args[$((n-1))]}"; srcs=("${args[@]:0:$((n-1))}")
-# Real scp splits the destination on the last colon, so an IPv6 literal
-# has to arrive bracketed; strip the brackets the way scp does.
-if [[ "$dest" == *"["*"]:"* ]]; then
-  host="${dest#*[}"; host="${host%%]*}"; path="${dest#*]:}"
-else
-  host="${dest%%:*}"; path="${dest#*:}"
+
+# Which way round is this? A colon in the destination means a push to a
+# host; a colon in the first source and none in the destination means a
+# pull back from one. Real scp decides the same way, and --pull is the
+# whole reason this shim has to know.
+split_target() {
+  # $1 -> sets $host and $path. An IPv6 literal arrives bracketed.
+  if [[ "$1" == *"["*"]:"* ]]; then
+    host="${1#*[}"; host="${host%%]*}"; path="${1#*]:}"
+  else
+    host="${1%%:*}"; path="${1#*:}"
+  fi
+  host="${host#*@}"
+}
+
+if [[ "$dest" != *:* ]] && [[ "${srcs[0]}" == *:* ]]; then
+  split_target "${srcs[0]}"
+  printf 'scp %s %s (pull)\n' "$host" "$path" >> "$FAKE_SSH_LOG"
+  [ -f "$FAKE_ROOT/$host/.unreachable" ] && exit 1
+  [ -d "$FAKE_ROOT/$host" ] || exit 1
+  # The remote side expands the glob, so expand it in that host's root.
+  shopt -s nullglob
+  # shellcheck disable=SC2206  # deliberate: $path is a remote glob
+  matches=($FAKE_ROOT/$host/$path)
+  shopt -u nullglob
+  # scp fails when the source matches nothing, and says so.
+  if [ "${#matches[@]}" -eq 0 ]; then
+    echo "scp: $path: No such file or directory" >&2
+    exit 1
+  fi
+  mkdir -p "$dest" 2>/dev/null || { echo "scp: $dest: not a directory" >&2; exit 1; }
+  cp -r "${matches[@]}" "$dest/" 2>/dev/null || exit 1
+  exit 0
 fi
-host="${host#*@}"
+
+split_target "$dest"
 printf 'scp %s %s\n' "$host" "$path" >> "$FAKE_SSH_LOG"
 [ -f "$FAKE_ROOT/$host/.unreachable" ] && exit 1
 # Match real scp: a destination ending in / (or naming an existing
@@ -447,6 +475,11 @@ def stamp(t):
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("127.0.0.1", port))
+# Say so, rather than leaving the caller to find out by trying to bind
+# the port itself: that test can win the race and take the port this
+# responder is about to want.
+with open(sys.argv[3], "w") as fh:
+    fh.write("ready\n")
 while True:
     try:
         data, peer = sock.recvfrom(512)
@@ -475,25 +508,23 @@ while True:
     except OSError:
         pass
 EOF
-    "$PY" "$TEST_TMPDIR/ntpd.py" "$port" "$cfg" &
+    local ready="$TEST_TMPDIR/ntpd.$port.ready"
+    rm -f "$ready"
+    "$PY" "$TEST_TMPDIR/ntpd.py" "$port" "$cfg" "$ready" &
     echo $! >> "$TEST_TMPDIR/ntp.pid"
-    # Wait for the socket rather than sleeping a guessed interval.  A
-    # dropping responder never answers, so its readiness is the bind
-    # itself: the port stops being free.
+    # Wait for the responder to say it has the socket, rather than trying
+    # to bind the port to find out. That test could win: a UDP port takes
+    # one owner, so a checker that binds it first -- for the instant
+    # before it closes -- is a checker that can kill the responder it is
+    # waiting for, and then wait out its whole loop for a port nobody
+    # will ever hold. It also proved less than it looked: bound is not
+    # answering, and every use here cares about the answer.
     local i=0
-    while [ $i -lt 50 ]; do
-        if ! "$PY" - "$port" <<'EOF'
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-try:
-    s.bind(("127.0.0.1", int(sys.argv[1])))
-except OSError:
-    sys.exit(1)   # taken: the responder has it
-s.close()
-EOF
-        then
+    while [ $i -lt 100 ]; do
+        if [ -f "$ready" ]; then
             return 0
         fi
+        sleep 0.05
         i=$((i + 1))
     done
     echo "fake ntp on port $port never came up" >&2

@@ -307,6 +307,195 @@ t_version_matches_the_house_format() {
     assert_contains "$out" "GPL-3.0-or-later"
 }
 
+
+# --- ceilings, stalls and names that clash ---------------------------------
+
+t_max_files_stops_without_calling_it_a_failure() {
+    # Stopping on purpose is not the far side failing. Closing the stream
+    # early kills it with SIGPIPE, and reading that status as the outcome
+    # turned a deliberate partial collection into FAILED, with the host
+    # counted as one that did not answer.
+    seed
+    cd "$TEST_TMPDIR"
+    # Big enough that tar is still writing when we stop reading: eight
+    # tiny files fit in the pipe buffer and tar exits cleanly before the
+    # ceiling is even reached, which exercises none of this.
+    mkdir -p "$FAKE_ROOT/web01/many"
+    for i in 1 2 3 4 5 6 7 8; do
+        head -c 100000 /dev/zero | tr '\0' "$i" > "$FAKE_ROOT/web01/many/f$i.log"
+    done
+    set +e
+    out="$(dr many -H web01 -d out --max-files 3 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "3 files from 1 of 1 host"
+    assert_contains "$out" "TRUNCATED"
+    assert_not_contains "$out" "FAILED"
+    assert_eq "$(find out -type f | wc -l | tr -d ' ')" "3"
+}
+
+t_max_files_is_not_a_failure_on_a_slice_either() {
+    # The framed transport stops the same way and used to report the
+    # xargs death -- "terminated by signal 13" -- as the host's outcome.
+    seed
+    cd "$TEST_TMPDIR"
+    mkdir -p "$FAKE_ROOT/web01/many"
+    for i in 1 2 3 4 5 6 7 8; do
+        printf 'file %s\n' "$i" > "$FAKE_ROOT/web01/many/f$i.log"
+    done
+    set +e
+    out="$(dr many -H web01 -d out --max-files 3 --tail 1 2>&1)"
+    set -e
+    assert_contains "$out" "TRUNCATED"
+    assert_not_contains "$out" "FAILED"
+    assert_eq "$(find out -type f | wc -l | tr -d ' ')" "3"
+}
+
+t_a_symlinked_path_is_the_file_it_points_at() {
+    # `[ -e ]` follows a symlink, so the path passed the existence check
+    # and then matched no -type f: the host was reported as having
+    # nothing to send for a file that is plainly there. /var/log/current
+    # and friends are symlinks on plenty of boxes.
+    seed
+    cd "$TEST_TMPDIR"
+    ln -s logs/app.log "$FAKE_ROOT/web01/current.log"
+    out="$(dr current.log -H web01 -d out 2>&1)"
+    assert_status $? 0
+    assert_not_contains "$out" "EMPTY"
+    assert_file_exists "out/web01/current.log"
+    assert_eq "$(cat out/web01/current.log)" "hello from web01"
+}
+
+t_a_link_inside_a_tree_is_still_not_collected() {
+    # -H follows only what was named on the command line. A link inside
+    # a collected tree is not evidence, and recreating one here is how a
+    # collection directory grows a link out of itself.
+    seed
+    cd "$TEST_TMPDIR"
+    ln -s ../app.log "$FAKE_ROOT/web01/logs/sub/link.log"
+    dr logs -H web01 -d out --quiet
+    assert_file_exists "out/web01/logs/app.log"
+    assert_no_file "out/web01/logs/sub/link.log"
+}
+
+t_a_local_write_failure_is_one_hosts_failure() {
+    # It happens in a worker thread, where a SystemExit does not end the
+    # process it was raised in: it travelled up through the pool and
+    # ended the whole run with a usage exit code, no report at all, and
+    # every other host's collection thrown away.
+    seed
+    cd "$TEST_TMPDIR"
+    # A directory where web01's file has to land, and nothing in web02's way.
+    mkdir -p "out/web01/logs/app.log"
+    set +e
+    out="$(dr logs/app.log -H web01,web02 -d out 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "FAILED"
+    assert_contains "$out" "cannot write"
+    # The other host still landed, and the run still reported.
+    assert_file_exists "out/web02/logs/app.log"
+    assert_contains "$out" "1 of 2 hosts"
+}
+
+t_two_paths_folding_onto_one_name_are_not_silently_merged() {
+    # Only --flat can do this: `a~b/c` and `a/b/c` both fold to `a~b~c`,
+    # and the second replacing the first looks exactly like a successful
+    # collection.
+    seed
+    cd "$TEST_TMPDIR"
+    mkdir -p "$FAKE_ROOT/web01/t/a~b" "$FAKE_ROOT/web01/t/a/b"
+    printf 'first\n' > "$FAKE_ROOT/web01/t/a~b/c"
+    printf 'second\n' > "$FAKE_ROOT/web01/t/a/b/c"
+    set +e
+    out="$(dr t -H web01 -d out --flat 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "COLLISION"
+    assert_eq "$(find out -type f | wc -l | tr -d ' ')" "1"
+}
+
+# A fake ssh that answers with PAYLOAD and then goes quiet for ever,
+# without ever closing the connection.  $1 is what to send first.
+stall_ssh() {
+    cat > "$FAKE_BIN/ssh-stall" <<STALL
+#!/bin/bash
+printf '%s' '$1'
+sleep 120
+STALL
+    chmod +x "$FAKE_BIN/ssh-stall"
+}
+
+t_a_transfer_that_stalls_mid_stream_is_bounded() {
+    # The wait on the child only started once the stream had been read to
+    # its end, so a far side that goes quiet mid-transfer -- the failure a
+    # saturated link produces -- was bounded by nothing at all and the run
+    # hung on that host for ever. Half a frame and then silence is what
+    # that looks like from here.
+    seed
+    cd "$TEST_TMPDIR"
+    stall_ssh "half a line and then nothing"
+    start="$(date +%s)"
+    set +e
+    out="$(timeout 40 "$PY" "$DR" logs -H web01 -d out --tail 1 \
+        --ssh "$FAKE_BIN/ssh-stall" --timeout 3 2>&1)"
+    rc=$?
+    set -e
+    took=$(( $(date +%s) - start ))
+    assert_status $rc 1
+    assert_contains "$out" "TIMEOUT"
+    if [ "$took" -gt 30 ]; then
+        _fail "the timeout did not bound the transfer: took ${took}s"
+    fi
+}
+
+t_something_still_holding_the_pipe_does_not_hang_the_run() {
+    # Ending the transfer has to end the whole session. A remote command
+    # that leaves something behind holding the connection keeps the pipe
+    # open, so the thread draining stderr never sees EOF -- and closing
+    # that stream under it takes the lock that thread is holding, which
+    # is a deadlock the join's own timeout was there to prevent.
+    seed
+    cd "$TEST_TMPDIR"
+    cat > "$FAKE_BIN/ssh-linger" <<'LINGER'
+#!/bin/bash
+# A child in a session of its own -- what a remote command that
+# daemonises leaves behind -- so ending ours does not end it, and it
+# goes on holding both pipes open.
+setsid sleep 120 &
+head -c 512 /dev/zero
+sleep 120
+LINGER
+    chmod +x "$FAKE_BIN/ssh-linger"
+    start="$(date +%s)"
+    set +e
+    out="$(timeout 40 "$PY" "$DR" logs -H web01 -d out \
+        --ssh "$FAKE_BIN/ssh-linger" --timeout 3 2>&1)"
+    rc=$?
+    set -e
+    took=$(( $(date +%s) - start ))
+    assert_status $rc 1
+    assert_contains "$out" "TIMEOUT"
+    if [ "$took" -gt 30 ]; then
+        _fail "the run did not let go of the host: took ${took}s"
+    fi
+}
+
+t_ceilings_that_cannot_mean_anything_are_refused() {
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr logs -H web01 --max-bytes -1 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--max-bytes"
+    set +e
+    out="$(dr logs -H web01 --timeout 0 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--timeout"
+}
+
 echo "dredge"
 run_test "a file comes back under its host"    t_a_file_comes_back_under_the_name_of_its_host
 run_test "a directory comes back as a tree"    t_a_directory_comes_back_as_a_tree
@@ -331,4 +520,13 @@ run_test "no remote name becomes a path"       t_nothing_a_host_says_becomes_a_l
 run_test "csv carries a row per file"          t_csv_carries_a_row_per_file
 run_test "a dry run contacts nothing"          t_a_dry_run_contacts_nothing
 run_test "--version matches the house format"  t_version_matches_the_house_format
+run_test "--max-files is not a failure"        t_max_files_stops_without_calling_it_a_failure
+run_test "nor on a slice"                      t_max_files_is_not_a_failure_on_a_slice_either
+run_test "a symlinked path is followed"        t_a_symlinked_path_is_the_file_it_points_at
+run_test "a link inside a tree is not"         t_a_link_inside_a_tree_is_still_not_collected
+run_test "a write failure is one host's"       t_a_local_write_failure_is_one_hosts_failure
+run_test "two paths on one name are caught"    t_two_paths_folding_onto_one_name_are_not_silently_merged
+run_test "a stalled transfer is bounded"       t_a_transfer_that_stalls_mid_stream_is_bounded
+run_test "a lingering pipe is let go of"       t_something_still_holding_the_pipe_does_not_hang_the_run
+run_test "impossible ceilings are refused"     t_ceilings_that_cannot_mean_anything_are_refused
 finish

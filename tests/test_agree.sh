@@ -458,6 +458,65 @@ t_a_port_outside_the_range_is_refused() {
     assert_contains "$out" "2222"
 }
 
+
+t_a_pull_that_brings_nothing_back_is_reported() {
+    # --pull exists to bring the files back. Its exit code was thrown
+    # away, so a glob that matched nothing, an scp that failed, or a
+    # pull-dir that could not be made all looked exactly like success:
+    # the report said the fleet agreed, and the directory was empty.
+    install_fake_ssh
+    fake_host web01
+    fake_host web02
+    mkdir -p "$FAKE_ROOT/web02/var/tmp/agree"
+    printf 'the answer\n' > "$FAKE_ROOT/web02/var/tmp/agree/out.csv"
+    set +e
+    out="$(ag -H web01,web02 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
+        --quiet -- echo hi 2>&1)"
+    rc=$?
+    set -e
+    # web02 had the file; web01 did not, and that is the finding.
+    assert_contains "$out" "PULL FAILED"
+    assert_contains "$out" "web01"
+    assert_status $rc 3
+    assert_file_exists "$TEST_TMPDIR/got/web02/out.csv"
+}
+
+t_a_pull_that_works_is_not_a_finding() {
+    install_fake_ssh
+    for h in web01 web02; do
+        fake_host "$h"
+        mkdir -p "$FAKE_ROOT/$h/var/tmp/agree"
+        printf 'the answer\n' > "$FAKE_ROOT/$h/var/tmp/agree/out.csv"
+    done
+    out="$(ag -H web01,web02 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
+        --quiet -- echo hi 2>&1)"
+    assert_status $? 0
+    assert_not_contains "$out" "PULL FAILED"
+    assert_file_exists "$TEST_TMPDIR/got/web01/out.csv"
+    assert_file_exists "$TEST_TMPDIR/got/web02/out.csv"
+}
+
+t_an_unmakeable_pull_dir_does_not_end_the_run() {
+    # os.makedirs happens in a worker thread, where an OSError travels up
+    # through the pool and replaces the whole report with a traceback --
+    # over one host's directory.
+    install_fake_ssh
+    fake_host web01
+    mkdir -p "$FAKE_ROOT/web01/var/tmp/agree"
+    printf 'the answer\n' > "$FAKE_ROOT/web01/var/tmp/agree/out.csv"
+    # A regular file where the per-host directory has to go.
+    mkdir -p "$TEST_TMPDIR/got"
+    printf 'in the way\n' > "$TEST_TMPDIR/got/web01"
+    set +e
+    out="$(ag -H web01 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
+        --quiet -- echo hi 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 3
+    assert_contains "$out" "PULL FAILED"
+    assert_not_contains "$out" "Traceback"
+}
+
 echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
@@ -488,4 +547,7 @@ run_test "mixed versions merge by column name" t_mixed_tool_versions_merge_by_co
 run_test "junk output is not a column"        t_a_host_printing_junk_does_not_become_a_column
 run_test "bad arguments are refused up front"  t_a_bad_argument_is_refused_before_the_fan_out
 run_test "a port outside the range is refused" t_a_port_outside_the_range_is_refused
+run_test "a pull that brings nothing is named" t_a_pull_that_brings_nothing_back_is_reported
+run_test "a pull that works is not a finding" t_a_pull_that_works_is_not_a_finding
+run_test "an unmakeable pull dir is survived" t_an_unmakeable_pull_dir_does_not_end_the_run
 finish
