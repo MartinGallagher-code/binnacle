@@ -20,7 +20,7 @@ Options:
       --append        add what came back to the end of what is already here
       --prepend       add it to the beginning instead
       --mark          write a marker line where old meets new
-      --max-bytes N   skip a file larger than this          (default 100M)
+      --max-bytes N   skip a file larger than this  (default 100M, 0 none)
       --max-files N   stop after this many files per host   (default 500)
   -j, --jobs N        hosts contacted at once               (DREDGE_JOBS, 20)
       --timeout S     ssh timeout per host                  (DREDGE_TIMEOUT)
@@ -103,9 +103,16 @@ How it goes over the wire
   rebuilt here from the path you asked for, so a host that answers with
   `../../etc/cron.d/x` writes nothing outside the collection directory.
 
+  `--timeout` bounds the whole transfer rather than just the connection:
+  a host that goes quiet halfway through is one row in the report and
+  not a run that never returns.  Each ssh gets a session of its own, so
+  ending one takes with it anything the remote command left behind
+  holding the connection open.
+
 Exit status
-  0   every host answered and something came back
-  1   a host failed, a path was missing, or nothing was collected
+  0   every host answered and everything asked for came back
+  1   a host failed, a path was missing, a ceiling was hit, a name
+      collided, or nothing was collected
   2   usage error
 """
 
@@ -118,6 +125,7 @@ import os
 import random
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -493,8 +501,16 @@ if [ ! -e "$rel" ]; then echo "dredge: no such path: $p" >&2; exit 4; fi
 
 
 def _find_expr(args, since_epoch):
-    """The selection, shared by both transports."""
-    bits = ['find "$rel" -type f']
+    """The selection, shared by both transports.
+
+    `-H` follows a symlink named on the command line and nothing else,
+    which is the distinction that matters here: `dredge /var/log/current`
+    means the file that name points at, while a link *inside* a tree
+    being collected is not evidence and is left alone.  Without it a
+    symlinked path passes the `[ -e ]` check, matches no `-type f`, and
+    the host is reported as having nothing to send.
+    """
+    bits = ['find -H "$rel" -type f']
     if since_epoch is not None:
         # An epoch second rather than a wall-clock string: the window is
         # decided by the clock here, so a host in another timezone selects
@@ -510,7 +526,7 @@ def _oversize_report(args):
     """Name what was left behind, without carrying it."""
     if not args.max_bytes:
         return ""
-    return ('find "$rel" -type f -size +%dc '
+    return ('find -H "$rel" -type f -size +%dc '
             '-printf "dredge-skip: %%s %%p\\n" >&2 2>/dev/null\n'
             % int(args.max_bytes))
 
@@ -518,8 +534,8 @@ def _oversize_report(args):
 def remote_tar_command(args, since_epoch):
     return (_PREAMBLE % {"path": shlex.quote(args.path)}
             + _oversize_report(args)
-            + '%s -print0 2>/dev/null | tar --null -T - -cf - 2>/dev/null\n'
-            % _find_expr(args, since_epoch))
+            + '%s -print0 2>/dev/null | tar -h --null -T - -cf - '
+              '2>/dev/null\n' % _find_expr(args, since_epoch))
 
 
 def remote_slice_command(args, since_epoch, mark):
@@ -586,6 +602,18 @@ def local_path(args, host, relpath):
 # Writing what came back
 # ---------------------------------------------------------------------------
 
+class LocalWriteError(Exception):
+    """A file came back and could not be landed here.
+
+    Raised rather than passed to die(), because this happens inside a
+    worker thread: a SystemExit there does not end the process where it
+    was raised, it travels up through the pool and ends the whole run
+    with a usage exit code, throwing away every other host's collection
+    and printing no report at all.  One unwritable path is one host's
+    failure and belongs in that host's row.
+    """
+
+
 def _marker(host):
     """The seam between what was here and what just arrived."""
     return ("\n===== %s %s %s =====\n"
@@ -593,27 +621,38 @@ def _marker(host):
                time.strftime("%Y-%m-%dT%H:%M:%S"))).encode("utf-8")
 
 
-def write_file(args, host, path, data, taken):
+def write_file(args, host, path, data, taken, collisions=None, remote=""):
     """Land DATA at PATH, replacing, appending or prepending.
 
     Written whole and renamed into place, so a reader -- the next tool in
     the pipeline, usually -- never sees half a file, and a run interrupted
     halfway leaves what was already there intact.
+
+    Two files from one host can want the same local name under --flat,
+    where `a~b/c` and `a/b/c` both fold to `a~b~c`.  Distinct remote paths
+    cannot collide any other way, and the second silently replacing the
+    first is the one outcome worth refusing outright: it looks exactly
+    like a successful collection.
     """
+    if any(p == path for _h, p, _n in taken):
+        if collisions is not None:
+            collisions.append(remote or path)
+        return
     d = os.path.dirname(path)
     if d:
         try:
             os.makedirs(d)
-        except OSError:
+        except OSError as exc:
             if not os.path.isdir(d):
-                raise
+                raise LocalWriteError("cannot make %s: %s" % (d, exc))
     old = b""
     if (args.append or args.prepend) and os.path.exists(path):
         try:
             with io.open(path, "rb") as fh:
                 old = fh.read()
         except OSError as exc:
-            die("cannot read %s to add to it: %s" % (path, exc))
+            raise LocalWriteError("cannot read %s to add to it: %s"
+                                  % (path, exc))
     if old:
         seam = _marker(host) if args.mark else b""
         if args.append:
@@ -635,7 +674,7 @@ def write_file(args, host, path, data, taken):
             os.unlink(tmp)
         except OSError:
             pass
-        die("cannot write %s: %s" % (path, exc))
+        raise LocalWriteError("cannot write %s: %s" % (path, exc))
     taken.append((host, path, len(data)))
 
 
@@ -645,7 +684,7 @@ def write_file(args, host, path, data, taken):
 
 class Result(object):
     __slots__ = ("host", "outcome", "detail", "files", "bytes", "skipped",
-                 "duration")
+                 "collisions", "truncated", "duration")
 
     def __init__(self, host):
         self.host = host
@@ -654,6 +693,11 @@ class Result(object):
         self.files = []          # (local_path, bytes)
         self.bytes = 0
         self.skipped = []        # (size, remote_path) left behind
+        self.collisions = []     # remote paths that folded onto one name
+        # We stopped reading at --max-files.  The far side then died of a
+        # closed pipe, and its exit status describes that decision rather
+        # than a failure -- so it must not be read as one.
+        self.truncated = False
         self.duration = 0.0
 
 
@@ -699,9 +743,15 @@ def _run(args, host, command, consume):
     r = Result(host)
     t0 = time.monotonic()
     try:
+        # Its own session, so the watchdog below can end the whole of it.
+        # ssh on its own would be enough locally, but a remote command
+        # that leaves something behind holding the connection is exactly
+        # what a stalled transfer looks like, and killing one process out
+        # of a group leaves the pipe open and the read blocked.
+        # BatchMode=yes means nothing here wants a terminal.
         p = subprocess.Popen(ssh_argv(args, host, command),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             stdin=subprocess.DEVNULL)
+                             stdin=subprocess.DEVNULL, start_new_session=True)
     except OSError as exc:
         r.outcome, r.detail = FAILED, str(exc)
         return r
@@ -710,6 +760,36 @@ def _run(args, host, command, consume):
     t = threading.Thread(target=_drain, args=(p.stderr, errbuf))
     t.daemon = True
     t.start()
+
+    # --timeout has to bound the transfer, not just the wait after it.
+    # Waiting on the child only starts once consume() has read the stream
+    # to its end, so a far side that stalls mid-stream -- the interesting
+    # failure, and the one a saturated link produces -- was never bounded
+    # by anything but ssh's own ConnectTimeout, which is long past by
+    # then. A watchdog closes the transfer instead of the run hanging on
+    # one host for ever.
+    timed_out = []
+
+    def _end_it():
+        """SIGKILL the whole session, falling back to the one process."""
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+            return
+        except (OSError, AttributeError):
+            pass
+        try:
+            p.kill()
+        except OSError:
+            pass
+
+    def _watchdog():
+        timed_out.append(True)
+        _end_it()
+
+    alarm = threading.Timer(args.timeout, _watchdog)
+    alarm.daemon = True
+    alarm.start()
+
     consume_err = None
     try:
         consume(p.stdout, r)
@@ -718,8 +798,16 @@ def _run(args, host, command, consume):
         # far better than a parse error does. `no such path` arrives here
         # as an empty stream and as rc 4, and it is rc 4 that should be
         # reported.
-        consume_err = "%s: %s" % (type(exc).__name__, exc)
+        # A local write failure already says what it is; anything else
+        # needs its type to be readable at all.
+        consume_err = (str(exc) if isinstance(exc, LocalWriteError)
+                       else "%s: %s" % (type(exc).__name__, exc))
     finally:
+        alarm.cancel()
+        if r.truncated:
+            # Nothing more is wanted from it, so end it here rather than
+            # waiting for the far side to notice the pipe has closed.
+            _end_it()
         try:
             p.stdout.close()
         except OSError:
@@ -727,23 +815,40 @@ def _run(args, host, command, consume):
         try:
             rc = p.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            p.kill()
+            _end_it()
             rc = p.wait()
-            r.outcome, r.detail = TIMEOUT, "timed out after %ss" % args.timeout
+            timed_out.append(True)
         t.join(timeout=5)
-        try:
-            p.stderr.close()
-        except OSError:
-            pass
+        # Only if that join actually finished. Closing a stream another
+        # thread is still blocked reading takes the same lock it holds,
+        # so this waits for a read that is not coming and the whole run
+        # hangs on one host -- the timeout on the join being there
+        # precisely because the read might not come.
+        if not t.is_alive():
+            try:
+                p.stderr.close()
+            except OSError:
+                pass
     err = (errbuf[0] if errbuf else b"").decode("utf-8", "replace")
     r.skipped, other = _parse_stderr(err)
     r.duration = time.monotonic() - t0
     if r.outcome != OK:
         return r
-    if rc is None:
-        r.outcome, r.detail = FAILED, "ssh did not report an exit status"
+    if timed_out:
+        r.outcome, r.detail = TIMEOUT, "timed out after %ss" % args.timeout
+    elif r.truncated:
+        # Stopped on purpose. The detail already says --max-files, and
+        # the far side's status is the SIGPIPE we caused.
+        pass
     elif rc == 4:
         r.outcome, r.detail = MISSING, "no such path"
+    elif consume_err:
+        # Before the generic rc check: closing the stream mid-transfer
+        # kills the far side too, so its exit status would otherwise
+        # report our own error back to us as `exit 141`.
+        r.outcome, r.detail = FAILED, consume_err
+    elif rc is None:
+        r.outcome, r.detail = FAILED, "ssh did not report an exit status"
     elif rc == 255:
         low = " ".join(other).lower()
         r.outcome = UNREACHABLE if (
@@ -754,8 +859,6 @@ def _run(args, host, command, consume):
     elif rc != 0:
         r.outcome = FAILED
         r.detail = other[0][:120] if other else "exit %d" % rc
-    elif consume_err:
-        r.outcome, r.detail = FAILED, consume_err
     return r
 
 
@@ -776,6 +879,7 @@ def collect_tar(args, host):
         try:
             for member in tar:
                 if len(taken) >= args.max_files:
+                    r.truncated = True
                     r.detail = ("stopped at --max-files %d" % args.max_files)
                     break
                 if member.isdir():
@@ -789,7 +893,7 @@ def collect_tar(args, host):
                 if fh is None:
                     continue
                 write_file(args, host, local_path(args, host, member.name),
-                           fh.read(), taken)
+                           fh.read(), taken, r.collisions, member.name)
         finally:
             try:
                 tar.close()
@@ -822,10 +926,11 @@ def collect_slices(args, host):
                         r.detail = "undecodable payload for %s" % path
                         data = None
                     if data is not None:
-                        write_file(args, host,
-                                   local_path(args, host, path), data, taken)
+                        write_file(args, host, local_path(args, host, path),
+                                   data, taken, r.collisions, path)
                 state, path, chunks = None, None, []
                 if len(taken) >= args.max_files:
+                    r.truncated = True
                     r.detail = "stopped at --max-files %d" % args.max_files
                     break
             elif state == "path":
@@ -912,6 +1017,28 @@ def render(results, args, elapsed):
     for r in bad:
         out.append("  %-9s %s: %s" % (r.outcome.upper(), r.host.name,
                                       r.detail or "?"))
+    cut = [r for r in results if r.truncated]
+    if cut:
+        names = " ".join(r.host.name for r in cut[:6])
+        more = "" if len(cut) <= 6 else " (+%d)" % (len(cut) - 6)
+        out.append("  TRUNCATED %d host%s hit --max-files %d and there was "
+                   "more: %s%s"
+                   % (len(cut), "" if len(cut) == 1 else "s", args.max_files,
+                      names, more))
+        out.append("            raise it, or narrow what you asked for with "
+                   "--since.")
+    clashed = [(r.host, c) for r in results for c in r.collisions]
+    if clashed:
+        out.append("  COLLISION %d file%s folded onto a name already taken "
+                   "and %s left behind:"
+                   % (len(clashed), "" if len(clashed) == 1 else "s",
+                      "was" if len(clashed) == 1 else "were"))
+        for host, remote in clashed[:5]:
+            out.append("            %-12s %s" % (host.name, remote))
+        if len(clashed) > 5:
+            out.append("            ... and %d more" % (len(clashed) - 5))
+        out.append("            --flat folds / into %s; drop it to keep the "
+                   "tree and the names apart." % FLAT_SEP)
     skipped = [(r.host, s) for r in results for s in r.skipped]
     if skipped:
         out.append("  OVERSIZE  %d file%s larger than --max-bytes (%s), left "
@@ -925,7 +1052,7 @@ def render(results, args, elapsed):
             out.append("            ... and %d more" % (len(skipped) - 5))
         out.append("            --tail N brings back the end of one without "
                    "the rest of it.")
-    if empty or bad or skipped:
+    if empty or bad or skipped or clashed or cut:
         out.append("")
 
     if good and not args.quiet:
@@ -1050,6 +1177,12 @@ def main(argv=None):
         die("--jobs wants at least 1, got %d" % args.jobs)
     if args.max_files < 1:
         die("--max-files wants at least 1, got %d" % args.max_files)
+    if args.max_bytes < 0:
+        die("--max-bytes cannot be negative, got %d (0 means no ceiling)"
+            % args.max_bytes)
+    if args.timeout <= 0:
+        die("--timeout wants a positive number of seconds, got %s"
+            % args.timeout)
     if args.mark and not (args.append or args.prepend):
         die("--mark writes a line where old meets new, so it needs "
             "--append or --prepend")
@@ -1082,7 +1215,11 @@ def main(argv=None):
         sys.stdout.write(render(results, args, elapsed))
 
     nfiles = sum(len(r.files) for r in results)
-    if any(r.outcome != OK for r in results) or not nfiles:
+    # A ceiling that was hit, or a name that was refused, means what came
+    # back is not what was asked for -- which is the definition of
+    # something worth seeing, and worth stopping a script over.
+    if any(r.outcome != OK or r.collisions or r.truncated
+           for r in results) or not nfiles:
         return 1
     return 0
 

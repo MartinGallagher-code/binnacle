@@ -8,6 +8,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`dredge` reported a path it had collected as a host with nothing to
+  send.** `find "$rel" -type f` does not follow a symlink, but the
+  existence check in front of it does -- so `dredge /var/log/current`,
+  where that name is a link, passed the check, matched nothing, and the
+  host came back under EMPTY for a file that is plainly there. The named
+  path is followed now (`find -H`, `tar -h`); a link *inside* a collected
+  tree still is not, because a link is not evidence and recreating one
+  here is how a collection directory grows a link out of itself.
+
+- **`dredge --max-files` turned a deliberate partial collection into a
+  failed host.** Stopping at the ceiling means closing the stream, which
+  kills the far side with SIGPIPE; that status was then read as the
+  host's outcome, so the report said `FAILED web01: exit 141` (or, on the
+  framed transport, `xargs: sh: terminated by signal 13`) and counted the
+  host among those that did not answer -- with the files sitting in the
+  collection directory all the while. Stopping on purpose is now its own
+  outcome, and the report says which hosts had more.
+
+- **One unwritable local path ended the whole `dredge` run.** The write
+  happens in a worker thread, where `die()`'s SystemExit does not end the
+  process it was raised in: it travelled up through the pool and ended
+  the run with exit 2, a usage error, printing no report and throwing
+  away every other host's collection. A file that cannot be landed is now
+  that host's failure and nothing else's.
+
+- **`dredge --timeout` bounded the connection but not the transfer.**
+  Waiting on the child only begins once the stream has been read to its
+  end, so a far side that goes quiet mid-transfer -- what a saturated
+  link produces, and the reason to have a timeout at all -- was bounded
+  by nothing, and the run hung on that host for ever. A watchdog now ends
+  the transfer at `--timeout`, and each host's ssh gets a session of its
+  own so ending it takes anything the remote command left holding the
+  connection with it.
+
+- **`dredge` could deadlock letting go of a host.** The thread draining
+  stderr is joined with a five-second timeout, precisely because the read
+  might not come back; the next line closed that stream anyway, taking
+  the lock the thread was still holding. Anything that outlived the
+  remote command and kept the pipe open -- a daemonising remote command,
+  say -- therefore hung the run at the exact point that timeout existed
+  to prevent. The stream is only closed if the join actually finished.
+
+- **`dredge --flat` could silently overwrite one file with another.**
+  Folding `/` into `~` maps `a~b/c` and `a/b/c` onto the same local name,
+  and the second landing on the first looks exactly like a successful
+  collection. The second is refused and named now -- which is what the
+  comment beside the separator already claimed happened.
+
+- **`dredge` accepted ceilings that cannot mean anything.**
+  `--max-bytes -1` reached `find` as `-size --0c`, and `--timeout 0` made
+  every host time out instantly. Both are refused up front now, and 0 is
+  documented as "no ceiling" for `--max-bytes`.
+
 - **A failing assertion in the test suite could lose its own reason.**
   Nine cases across three suites end a hand-rolled check with `fail
   "why"`, on the strength of a helper that was never defined. The case

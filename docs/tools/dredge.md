@@ -64,9 +64,14 @@ hundred lines and not four gigabytes. That is the difference between a run
 that takes a second and one that saturates the link it is meant to be
 diagnosing. `--head` is the same at the other end of the file.
 
-`--max-bytes` (100 MB by default) refuses to carry anything larger and names
-what it left behind, with its size, so a stray core dump in the directory you
-asked for does not become the whole run:
+The path you name is followed if it is a symlink — `dredge /var/log/current`
+means the file that name points at. Links *inside* a collected tree are not:
+a link is not evidence, and recreating one here is how a collection directory
+grows a link out of itself.
+
+`--max-bytes` (100 MB by default, `0` for no ceiling) refuses to carry
+anything larger and names what it left behind, with its size, so a stray core
+dump in the directory you asked for does not become the whole run:
 
 ```text
   OVERSIZE  1 file larger than --max-bytes (100.0MB), left where they are:
@@ -98,6 +103,14 @@ A host with nothing to send is reported rather than left blank:
 ```text
   EMPTY     3 hosts had nothing to send: web04 web18 web22
             nothing under /var/log changed since -1h there
+```
+
+`--max-files` (500 by default) is the other ceiling, per host. Hitting it is
+reported rather than silently truncating the collection:
+
+```text
+  TRUNCATED 1 host hit --max-files 500 and there was more: web12
+            raise it, or narrow what you asked for with --since.
 ```
 
 ## Collecting the same thing again
@@ -141,6 +154,22 @@ lines.
 
 `--dry-run` prints the remote command and contacts nothing, which is the way
 to see exactly what will run on your fleet before it does.
+
+`--timeout` (120s) bounds the whole transfer and not just the connection, so
+a host that goes quiet halfway through is one row in the report rather than a
+run that never returns. Each host's ssh gets a session of its own, so ending
+one takes anything the remote command left holding the connection with it.
+
+Under `--flat` two remote paths can want one local name — `a~b/c` and `a/b/c`
+both fold to `a~b~c`. The second is **refused rather than written over**,
+because a file quietly replacing another looks exactly like a successful
+collection:
+
+```text
+  COLLISION 1 file folded onto a name already taken and was left behind:
+            web03        ./a/b/c
+            --flat folds / into ~; drop it to keep the tree and the names apart.
+```
 
 ## Why this pulls rather than being pushed
 
@@ -197,7 +226,8 @@ back.
 | `--since T` | only files modified since T |
 | `--append` / `--prepend` | add to what is here rather than replacing it |
 | `--mark` | write a marker line where old meets new |
-| `--max-bytes N` / `--max-files N` | ceilings, per file and per host |
+| `--max-bytes N` / `--max-files N` | ceilings, per file and per host; hitting either is reported |
+| `--timeout S` | bounds the whole transfer per host (default 120s) |
 | `-j, --jobs N` | hosts contacted at once (default 20) |
 | `--csv [PATH]` | one row per file |
 | `--dry-run` | print the remote command and stop |
@@ -206,8 +236,8 @@ back.
 
 | Code | Meaning |
 |---|---|
-| `0` | every host answered and something came back |
-| `1` | a host failed, a path was missing, or nothing was collected |
+| `0` | every host answered and everything asked for came back |
+| `1` | a host failed, a path was missing, a ceiling was hit, a name collided, or nothing was collected |
 | `2` | usage error |
 
 Exit 1 on an empty collection is deliberate: a script that fans out to gather
