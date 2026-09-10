@@ -3,15 +3,16 @@
 **What is in this binnacle, and how to drive it.**
 
 A binnacle is the housing that holds the instruments. `binnacle` is the
-housing talking: it is not a ninth instrument, it is the index. It answers
-the two questions you have before you can use any of the others — *what is
-installed here*, and *how do I drive it* — without needing to already know
-the eight names.
+housing talking: it is not a twelfth instrument, it is the index. It answers
+the three questions you have before you can use any of the others — *what is
+installed here*, *how do I drive it*, and *where is the file* — without
+needing to already know the eleven names.
 
 ```bash
 binnacle                # the instruments installed here, and their versions
 binnacle help           # every instrument's --help, in one page
 binnacle help netmesh   # just that one
+binnacle copy netmesh   # netmesh.py, here, ready to scp somewhere
 ```
 
 ## What you get
@@ -29,8 +30,9 @@ binnacle 0.6.0 -- the housing, and what is in it
   skew       0.6.0  does this box know what time it is?
   muster     0.6.0  who has which of these, and what is still outstanding?
   manifest   0.6.0  which servers are those, in the layout?
+  dredge     0.6.0  bring that file back from every host, kept apart
 
-  10 instruments, all at 0.6.0.
+  11 instruments, all at 0.6.0.
 
   binnacle help        every instrument's --help, in one page
   binnacle help TOOL   just that one
@@ -38,7 +40,7 @@ binnacle 0.6.0 -- the housing, and what is in it
 
 `binnacle help` concatenates every tool's `--help`, verbs included, so one
 page is the whole manual for the package **as installed** rather than as
-documented somewhere else. It is around 1,400 lines; `binnacle help | less`
+documented somewhere else. It is around 2,200 lines; `binnacle help | less`
 is the intended reading, and a closed pipe is not an error.
 
 ## Why the version column is per-tool
@@ -70,6 +72,44 @@ A file that cannot be imported at all is reported the same way, as `BROKEN`,
 and the other nine still list — one unimportable file must not cost you the
 answer to *what is installed here*.
 
+## Getting a tool onto another machine
+
+Every instrument is a standalone file — standard library only, no imports
+from its siblings — because the way it usually gets used is copied onto a box
+that has never heard of this package. Doing that needs the *file*, and after
+`pip install` the file is under some site-packages directory nobody has
+memorised.
+
+```bash
+binnacle copy netmesh              # netmesh.py, here
+binnacle copy why-slow skew        # two of them
+binnacle copy --all -d ./tools     # the lot, somewhere else
+scp netmesh.py somehost:
+```
+
+The file lands under **the name the package uses**, executable. That matters
+more than it looks: `agree script why-slow` goes looking for `why_slow.py`,
+and a copy renamed on the way out stops matching. So `binnacle copy why-slow`
+writes `why_slow.py`, and either spelling — `why-slow`, `why_slow`,
+`why_slow.py` — asks for the same tool.
+
+It **refuses to overwrite** a file already sitting under that name if the
+contents differ, because the thing most likely to be there is your edited
+copy:
+
+```text
+  skew.py  ./skew.py  REFUSED
+           already here and different; --force overwrites
+```
+
+A file already there and byte-identical is reported as such and left alone,
+so running the command twice is not an error — the exit status is 0, and only
+a refusal or a failed write makes it 1.
+
+`binnacle copy --all` brings every instrument and not the housing: `binnacle`
+itself is the one file that reads its siblings (see below), so it is
+meaningless on its own and does not come along.
+
 ## It runs nothing
 
 Formatting a tool's help builds its argparse parser. It does not execute the
@@ -80,9 +120,12 @@ know nothing about.
 ## Options
 
 ```text
---paths     name the file each instrument was loaded from, in place of the
-            question it answers -- which install am I actually running?
---quiet     the table alone: no heading, no verdict, no hints
+--paths      name the file each instrument was loaded from, in place of the
+             question it answers -- which install am I actually running?
+--quiet      the table alone: no heading, no verdict, no hints
+-d, --dir    with copy, where the files land (default: here)
+--all        with copy, every installed instrument
+--force      with copy, overwrite a file already there
 ```
 
 `--paths` is the one to reach for when two installs shadow each other and
@@ -92,8 +135,8 @@ know nothing about.
 
 | Code | Meaning |
 |---|---|
-| `0` | every instrument loaded and agreed on a version |
-| `1` | an instrument could not be loaded, or a version disagrees |
+| `0` | every instrument loaded and agreed on a version; or, for `copy`, every named file is now here |
+| `1` | an instrument could not be loaded, or a version disagrees; or, for `copy`, a file could not be written or would have overwritten one |
 | `2` | usage error — an unknown verb, or a tool that is not installed |
 
 The non-zero cases are both *"this install is not self-consistent"*, which

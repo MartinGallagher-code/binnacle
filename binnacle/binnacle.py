@@ -7,18 +7,23 @@ Usage: binnacle                    the instruments installed here, and their ver
        binnacle list               the same table
        binnacle help               every instrument's --help, in one page
        binnacle help TOOL          just that one
+       binnacle copy TOOL...       put those instruments' files here, to copy on
+       binnacle copy --all         all of them
        binnacle --version          this command's own version
 
 Options:
       --paths         name the file each instrument was loaded from, in
                       place of the question it answers
       --quiet         the table alone: no heading, no verdict, no hints
+  -d, --dir DIR       with copy, where the files land (default: here)
+      --force         with copy, overwrite a file that is already there
 
 What it does
   A binnacle is the housing that holds the instruments; this is the
-  housing talking.  It answers the two questions you have before you can
-  use any of the others: **what is installed here**, and **how do I drive
-  it** -- without needing to already know the ten names.
+  housing talking.  It answers the three questions you have before you
+  can use any of the others: **what is installed here**, **how do I
+  drive it**, and **where is the file** -- without needing to already
+  know the eleven names.
 
   `binnacle` on its own prints one row per instrument: the command name,
   the version that instrument reports for *itself*, and the question it
@@ -40,14 +45,34 @@ Why the version column is per-tool and not one number
   So every instrument is asked separately, and a disagreement is a
   finding, printed and reflected in the exit status.
 
+Getting a tool onto another machine
+  Every instrument is a standalone file -- standard library only, no
+  imports from its siblings -- because the way it usually gets used is
+  copied onto a box that has never heard of this package.  Doing that
+  needs the file, and after `pip install` the file is somewhere under
+  site-packages that nobody has memorised.
+
+  `binnacle copy netmesh` puts `netmesh.py` in the current directory,
+  executable, ready for `scp netmesh.py somehost:`.  It keeps the file
+  name the package uses, because that is the name the rest of the
+  package expects: `agree script why-slow` looks for `why_slow.py`, and
+  a copy renamed on the way out stops matching.
+
+  It refuses to write over a file that is already there and differs,
+  because the thing most likely to be sitting under that name is your
+  edited copy.  `--force` says otherwise.  A file already there and
+  byte-identical is reported as such and left alone.
+
 What it does not do
   It runs nothing.  Building a parser to format its help does not execute
   any tool, touch the network, or read /proc.  This command reads the
   directory it lives in and nothing else.
 
 Exit status
-  0   every instrument loaded and agreed on a version
-  1   an instrument could not be loaded, or a version disagrees
+  0   every instrument loaded and agreed on a version; or, for copy,
+      every named file is now here
+  1   an instrument could not be loaded, or a version disagrees; or, for
+      copy, a file could not be written or would have overwritten one
   2   usage error -- an unknown verb, or a tool that is not installed
 """
 
@@ -63,7 +88,7 @@ PROG = os.path.basename(sys.argv[0]) or "binnacle.py"
 HERE = os.path.dirname(os.path.abspath(__file__))
 SELF = os.path.basename(os.path.abspath(__file__))
 
-VERBS = ("list", "help")
+VERBS = ("list", "help", "copy")
 
 # The rule separating one tool's help from the next, matching what
 # `agree help` and `netmesh help` already print between their verbs.
@@ -176,35 +201,44 @@ def registry():
     return tools if isinstance(tools, dict) else {}
 
 
-def discover():
-    """Every instrument beside this file, in the package's own order.
+def on_disk():
+    """[(name, path)] for every instrument beside this file, in order.
 
     Ordered by the registry first, so the table reads the way the README
     does; anything on disk the registry does not mention is appended
     rather than dropped, because a tool that ships without being
     registered is exactly the kind of drift worth seeing.
+
+    Nothing here is loaded.  `copy` needs the paths and not the
+    contents, and a sibling that fails to import should still be a file
+    you can take away and look at.
     """
     try:
         found = sorted(os.listdir(HERE))
     except OSError as exc:
         die("cannot read %s: %s" % (HERE, exc), 1)
 
-    on_disk = {}
+    paths = {}
     for filename in found:
         if not filename.endswith(".py"):
             continue
         if filename.startswith("_") or filename == SELF:
             continue
         name = filename[:-3].replace("_", "-")
-        on_disk[name] = os.path.join(HERE, filename)
+        paths[name] = os.path.join(HERE, filename)
 
     known = registry()
-    names = [n for n in known if n in on_disk]
-    names += [n for n in sorted(on_disk) if n not in known]
+    names = [n for n in known if n in paths]
+    names += [n for n in sorted(paths) if n not in known]
+    return [(n, paths[n]) for n in names]
 
+
+def discover():
+    """Every instrument beside this file, loaded, in the package's order."""
+    known = registry()
     tools = []
-    for name in names:
-        tool = Tool(name, on_disk[name])
+    for name, path in on_disk():
+        tool = Tool(name, path)
         tool.answers = known.get(name, "")
         try:
             tool.module = _load("_binnacle_tool_" + name.replace("-", "_"),
@@ -355,6 +389,113 @@ def status_of(tools):
 
 
 # ---------------------------------------------------------------------------
+# Taking a copy away
+# ---------------------------------------------------------------------------
+#
+# The whole point of the standalone-file rule is that an instrument can be
+# carried to a machine that has no Python packaging on it at all.  Carrying
+# it means having the file, and after a pip install the file is under some
+# site-packages directory nobody has memorised.  This is the shortest path
+# from "it is installed" to "it is in my hand".
+
+
+def normalise(token):
+    """What the user typed, as an instrument name.
+
+    `why-slow`, `why_slow` and `why_slow.py` are all the same tool: the
+    command is hyphenated, the file is underscored, and a person who has
+    just been reading `--paths` output will type either.
+    """
+    name = token.strip()
+    if name.endswith(".py"):
+        name = name[:-3]
+    return name.replace("_", "-").lower()
+
+
+def _same_bytes(src, dest):
+    try:
+        with open(src, "rb") as a, open(dest, "rb") as b:
+            return a.read() == b.read()
+    except OSError:
+        return False
+
+
+def copy_one(src, dest_dir, force=False):
+    """Put SRC in DEST_DIR under its own name.  -> (outcome, dest, note).
+
+    Outcomes: "wrote", "same" (already there, byte for byte), "exists"
+    (already there and different -- refused), "failed".
+    """
+    dest = os.path.join(dest_dir, os.path.basename(src))
+    if os.path.exists(dest) and not force:
+        if _same_bytes(src, dest):
+            return "same", dest, ""
+        return "exists", dest, "already here and different; --force overwrites"
+
+    # Through a temporary in the same directory, so an interrupted write
+    # never leaves a half-file sitting under the name of a tool.
+    tmp = dest + ".binnacle-tmp"
+    try:
+        with open(src, "rb") as fh:
+            data = fh.read()
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        # Executable: the file carries a #! line and the next thing that
+        # happens to it is usually `./netmesh.py` or an scp to somewhere
+        # it will be run.
+        try:
+            os.chmod(tmp, 0o755)
+        except OSError:
+            pass
+        os.replace(tmp, dest)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return "failed", dest, str(exc)
+    return "wrote", dest, ""
+
+
+def copy_tools(wanted, dest_dir, force=False, quiet=False):
+    """Copy the named instruments into DEST_DIR.  -> (report, status)."""
+    available = on_disk()
+    by_name = dict(available)
+
+    chosen = []
+    for token in wanted:
+        name = normalise(token)
+        if name not in by_name:
+            die("no such instrument: %s  (installed: %s)"
+                % (token, ", ".join(n for n, _ in available)))
+        if name not in [n for n, _ in chosen]:
+            chosen.append((name, by_name[name]))
+
+    out = []
+    results = []
+    width = max([len(os.path.basename(p)) for _, p in chosen] + [4])
+    for name, src in chosen:
+        outcome, dest, note = copy_one(src, dest_dir, force=force)
+        results.append(outcome)
+        label = {"wrote": "", "same": "  (already here, identical)",
+                 "exists": "  REFUSED", "failed": "  FAILED"}[outcome]
+        out.append("  %-*s  %s%s" % (width, os.path.basename(dest), dest, label))
+        if note:
+            out.append("  %-*s  %s" % (width, "", note))
+
+    if not quiet:
+        wrote = results.count("wrote")
+        if wrote:
+            out.append("")
+            out.append("  %d file%s here, executable.  scp them where they are"
+                       " needed;" % (wrote, "" if wrote == 1 else "s"))
+            out.append("  each runs on its own with nothing but python3.")
+
+    status = 1 if [r for r in results if r in ("exists", "failed")] else 0
+    return "\n".join(out) + "\n", status
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -371,11 +512,18 @@ def build_parser():
                        "There is no warranty, to the extent permitted by law."
                    ) % (PROG, VERSION))
     p.add_argument("verb", nargs="?", default="list", metavar="VERB",
-                   help="list (the default) or help")
-    p.add_argument("tool", nargs="?", metavar="TOOL",
-                   help="with help, the one instrument to describe")
+                   help="list (the default), help, or copy")
+    p.add_argument("tool", nargs="*", metavar="TOOL",
+                   help="with help, the one instrument to describe; "
+                        "with copy, the ones to put here")
     p.add_argument("--paths", action="store_true")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("-d", "--dir", default=".", metavar="DIR",
+                   help="with copy, where the files land (default: here)")
+    p.add_argument("--all", action="store_true",
+                   help="with copy, every installed instrument")
+    p.add_argument("--force", action="store_true",
+                   help="with copy, overwrite a file already there")
     return p
 
 
@@ -385,8 +533,27 @@ def main(argv=None):
 
     if args.verb not in VERBS:
         die("no such verb: %s  (try: %s)" % (args.verb, ", ".join(VERBS)))
-    if args.tool is not None and args.verb != "help":
-        die("%s takes no TOOL argument" % args.verb)
+    if args.tool and args.verb == "list":
+        die("list takes no TOOL argument")
+    if len(args.tool) > 1 and args.verb == "help":
+        die("help describes one instrument at a time")
+    for flag, verb in (("all", "copy"), ("force", "copy"), ("paths", "list")):
+        if getattr(args, flag) and args.verb != verb:
+            die("--%s belongs to %s, not %s" % (flag, verb, args.verb))
+
+    if args.verb == "copy":
+        if args.all and args.tool:
+            die("copy takes names or --all, not both")
+        if not args.all and not args.tool:
+            die("copy needs a TOOL, or --all  (installed: %s)"
+                % ", ".join(n for n, _ in on_disk()))
+        if not os.path.isdir(args.dir):
+            die("not a directory: %s" % args.dir)
+        wanted = [n for n, _ in on_disk()] if args.all else args.tool
+        report, status = copy_tools(wanted, args.dir, force=args.force,
+                                    quiet=args.quiet)
+        emit(report)
+        return status
 
     tools = discover()
     if not tools:
@@ -396,13 +563,12 @@ def main(argv=None):
         emit(render_list(tools, paths=args.paths, quiet=args.quiet))
         return status_of(tools)
 
-    if args.tool is not None:
-        wanted = args.tool[:-3] if args.tool.endswith(".py") else args.tool
-        wanted = wanted.replace("_", "-")
+    if args.tool:
+        wanted = normalise(args.tool[0])
         chosen = [t for t in tools if t.name == wanted]
         if not chosen:
             die("no such instrument: %s  (installed: %s)"
-                % (args.tool, ", ".join(t.name for t in tools)))
+                % (args.tool[0], ", ".join(t.name for t in tools)))
         emit(render_help(chosen))
         return 0 if chosen[0].loaded else 1
 

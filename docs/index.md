@@ -1,7 +1,7 @@
 # binnacle
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds ten, for Linux boxes, the fleets they belong to, and the networks
+one holds eleven, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 ```{toctree}
@@ -27,6 +27,7 @@ tools/during
 tools/skew
 tools/muster
 tools/manifest
+tools/dredge
 ```
 
 ```{toctree}
@@ -39,11 +40,12 @@ changelog
 publishing
 ```
 
-## The ten
+## The eleven
 
 Start with [`binnacle`](tools/binnacle.md), which is the housing rather than
-a tenth instrument: it lists what is installed here and prints every tool's
-help on one page, so there is one name to remember instead of nine.
+a twelfth instrument: it lists what is installed here, prints every tool's
+help on one page, and hands you any tool's file to carry elsewhere -- so
+there is one name to remember instead of eleven.
 
 | Tool | The question it answers |
 |---|---|
@@ -57,6 +59,7 @@ help on one page, so there is one name to remember instead of nine.
 | [`skew`](tools/skew.md) | Does this box know what time it is? |
 | [`muster`](tools/muster.md) | Who has which of these, and what is still outstanding? |
 | [`manifest`](tools/manifest.md) | Which servers are those, in the layout? |
+| [`dredge`](tools/dredge.md) | Bring that file back from every host, kept apart |
 
 ## Diagnose, don't dump
 

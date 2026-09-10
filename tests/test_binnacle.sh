@@ -22,24 +22,35 @@ pkg_version() {
     sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$BINNACLE_DIR/__init__.py" | head -1
 }
 
+# How many instruments sit beside binnacle.py, counted the way discover()
+# counts them: every .py in the package directory that is neither private
+# nor the housing itself.  Derived rather than written down, so adding a
+# twelfth tool does not turn four of these cases red.
+pkg_tool_count() {
+    ls "$BINNACLE_DIR"/*.py \
+        | sed 's#.*/##' \
+        | grep -v -e '^_' -e '^binnacle\.py$' \
+        | wc -l | tr -d ' '
+}
+
 t_lists_every_installed_tool() {
     out="$(bn)"
-    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest; do
+    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge; do
         assert_contains "$out" "$tool"
     done
 }
 
 t_names_a_version_for_each_tool() {
     # The point of the column: every instrument is asked separately, so
-    # the answer is per-file rather than one number printed ten times.
+    # the answer is per-file rather than one number printed once.
     v="$(pkg_version)"
     count="$(bn list --quiet | awk -v v="$v" '$2 == v {n++} END {print n+0}')"
-    assert_eq "$count" "10"
+    assert_eq "$count" "$(pkg_tool_count)"
 }
 
 t_says_when_they_all_agree() {
     out="$(bn)"
-    assert_contains "$out" "10 instruments, all at $(pkg_version)."
+    assert_contains "$out" "$(pkg_tool_count) instruments, all at $(pkg_version)."
     assert_not_contains "$out" "SKEW"
     assert_not_contains "$out" "BROKEN"
 }
@@ -188,7 +199,7 @@ t_an_unregistered_tool_still_shows_up() {
 
     out="$("$PY" "$bn_copy" 2>&1)"
     assert_contains "$out" "newtool"
-    assert_contains "$out" "11 instruments"
+    assert_contains "$out" "$(( $(pkg_tool_count) + 1 )) instruments"
 }
 
 t_private_files_are_not_instruments() {
@@ -218,7 +229,152 @@ t_quiet_is_the_table_alone() {
     out="$(bn list --quiet)"
     assert_not_contains "$out" "the housing"
     assert_not_contains "$out" "binnacle help"
-    assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "10"
+    assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "$(pkg_tool_count)"
+}
+
+
+# --- copy: getting a file out of site-packages and into your hand ----------
+
+# A directory to copy into, fresh per case.
+dest() {
+    d="$TEST_TMPDIR/dest.$1"
+    rm -rf "$d"; mkdir -p "$d"
+    printf '%s\n' "$d"
+}
+
+t_copy_puts_the_file_here() {
+    d="$(dest one)"
+    bn copy netmesh -d "$d" >/dev/null
+    assert_status $? 0
+    assert_file_exists "$d/netmesh.py"
+    # Byte for byte: this is the file that gets scp'd somewhere and run.
+    cmp -s "$BINNACLE_DIR/netmesh.py" "$d/netmesh.py"
+    assert_status $? 0
+}
+
+t_copy_keeps_the_package_file_name() {
+    # why-slow the command is why_slow.py the file, and `agree script
+    # why-slow` looks for the file.  A copy renamed on the way out stops
+    # matching, so the underscore spelling is what lands.
+    d="$(dest name)"
+    bn copy why-slow -d "$d" >/dev/null
+    assert_file_exists "$d/why_slow.py"
+    assert_no_file "$d/why-slow.py"
+}
+
+t_copy_takes_either_spelling() {
+    d="$(dest spell)"
+    bn copy why_slow.py -d "$d" >/dev/null
+    assert_file_exists "$d/why_slow.py"
+}
+
+t_copy_is_executable() {
+    d="$(dest exec)"
+    bn copy skew -d "$d" >/dev/null
+    if [ -x "$d/skew.py" ]; then :; else
+        _fail "copied file is not executable"
+    fi
+}
+
+t_copy_runs_where_it_lands() {
+    # The whole claim of the standalone-file rule, checked rather than
+    # asserted: the copy answers --version with nothing else beside it.
+    d="$(dest run)"
+    bn copy skew -d "$d" >/dev/null
+    out="$("$PY" "$d/skew.py" --version 2>&1)"
+    assert_contains "$out" "$(pkg_version)"
+}
+
+t_copy_all_brings_every_instrument() {
+    d="$(dest all)"
+    bn copy --all -d "$d" >/dev/null
+    assert_eq "$(ls "$d" | wc -l | tr -d ' ')" "$(pkg_tool_count)"
+    # The housing is not an instrument and does not come along.
+    assert_no_file "$d/binnacle.py"
+}
+
+t_copy_takes_several_at_once() {
+    d="$(dest many)"
+    bn copy skew muster -d "$d" >/dev/null
+    assert_file_exists "$d/skew.py"
+    assert_file_exists "$d/muster.py"
+}
+
+t_copy_refuses_to_overwrite_your_edit() {
+    d="$(dest over)"
+    printf 'my own edited copy\n' > "$d/skew.py"
+    set +e
+    out="$(bn copy skew -d "$d" 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "REFUSED"
+    assert_eq "$(cat "$d/skew.py")" "my own edited copy"
+}
+
+t_copy_force_overwrites() {
+    d="$(dest force)"
+    printf 'my own edited copy\n' > "$d/skew.py"
+    bn copy skew -d "$d" --force >/dev/null
+    assert_status $? 0
+    cmp -s "$BINNACLE_DIR/skew.py" "$d/skew.py"
+    assert_status $? 0
+}
+
+t_copy_of_the_same_file_is_not_a_failure() {
+    # Running it twice is the common case and must not read as trouble.
+    d="$(dest twice)"
+    bn copy skew -d "$d" >/dev/null
+    out="$(bn copy skew -d "$d" 2>&1)"
+    assert_status $? 0
+    assert_contains "$out" "identical"
+}
+
+t_copy_names_the_real_ones_when_wrong() {
+    set +e
+    out="$(bn copy nosuchtool 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "no such instrument"
+    assert_contains "$out" "netmesh"
+}
+
+t_copy_needs_something_to_copy() {
+    set +e
+    out="$(bn copy 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--all"
+}
+
+t_copy_refuses_names_and_all_together() {
+    set +e
+    out="$(bn copy skew --all 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "not both"
+}
+
+t_copy_refuses_a_directory_that_is_not_one() {
+    set +e
+    out="$(bn copy skew -d "$TEST_TMPDIR/nowhere" 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "not a directory"
+}
+
+t_copy_flags_belong_to_copy() {
+    # --force on a list is a typo worth naming rather than ignoring.
+    set +e
+    out="$(bn list --force 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "belongs to copy"
 }
 
 echo "binnacle"
@@ -243,5 +399,20 @@ run_test "an unregistered tool still shows"   t_an_unregistered_tool_still_shows
 run_test "private files are not instruments"  t_private_files_are_not_instruments
 run_test "it runs nothing to answer"          t_it_runs_nothing_to_answer
 run_test "a closed pipe is not an error"      t_a_closed_pipe_is_not_an_error
-run_test "--quiet is the table alone"         t_quiet_is_the_table_alone
+run_test "--quiet is the table alone"          t_quiet_is_the_table_alone
+run_test "copy puts the file here"            t_copy_puts_the_file_here
+run_test "copy keeps the package file name"   t_copy_keeps_the_package_file_name
+run_test "copy takes either spelling"         t_copy_takes_either_spelling
+run_test "copy is executable"                 t_copy_is_executable
+run_test "a copy runs where it lands"         t_copy_runs_where_it_lands
+run_test "copy --all brings every one"        t_copy_all_brings_every_instrument
+run_test "copy takes several at once"         t_copy_takes_several_at_once
+run_test "copy refuses to overwrite"          t_copy_refuses_to_overwrite_your_edit
+run_test "--force overwrites"                 t_copy_force_overwrites
+run_test "copying the same file is fine"      t_copy_of_the_same_file_is_not_a_failure
+run_test "copy names the real ones"           t_copy_names_the_real_ones_when_wrong
+run_test "copy needs something to copy"       t_copy_needs_something_to_copy
+run_test "copy refuses names and --all"       t_copy_refuses_names_and_all_together
+run_test "copy refuses a missing dir"         t_copy_refuses_a_directory_that_is_not_one
+run_test "copy's flags belong to copy"        t_copy_flags_belong_to_copy
 finish

@@ -1137,9 +1137,38 @@ def build_parser():
     return p
 
 
+# A relative time starts with '-', which argparse reads as the next option,
+# so `--since -30m` was refused -- by a tool whose own error message
+# recommends exactly that spelling. Gluing the pair back together here is
+# the smallest fix that keeps the documented form working, and it only
+# touches a value that looks like a relative time, so a genuine following
+# option is left alone.
+REL_TIME_RE = re.compile(r"^-\d+[smhd]$")
+
+
+def glue_relative_times(argv, options):
+    """`--since -30m` -> `--since=-30m`, for the options that take a time."""
+    out, i = [], 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in options and i + 1 < len(argv) \
+                and REL_TIME_RE.match(argv[i + 1]):
+            out.append("%s=%s" % (arg, argv[i + 1]))
+            i += 2
+            continue
+        out.append(arg)
+        i += 1
+    return out
+
+
+TIME_OPTIONS = ("--since", "--until", "--split-at")
+
+
 def main(argv=None):
     _stdio_safe()
-    args = build_parser().parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    args = build_parser().parse_args(glue_relative_times(argv, TIME_OPTIONS))
     args.weights = parse_weights(args.weights)
     args.min_severity_level = SEV_LEVELS[args.min_severity]
     if not args.ascii and os.environ.get("LANG", "") in ("C", "POSIX", ""):
