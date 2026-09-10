@@ -27,10 +27,14 @@ pkg_version() {
 # nor the housing itself.  Derived rather than written down, so adding a
 # twelfth tool does not turn four of these cases red.
 pkg_tool_count() {
-    ls "$BINNACLE_DIR"/*.py \
-        | sed 's#.*/##' \
-        | grep -v -e '^_' -e '^binnacle\.py$' \
-        | wc -l | tr -d ' '
+    n=0
+    for f in "$BINNACLE_DIR"/*.py; do
+        case "${f##*/}" in
+            _*|binnacle.py) continue ;;
+        esac
+        n=$((n + 1))
+    done
+    printf '%s\n' "$n"
 }
 
 t_lists_every_installed_tool() {
@@ -288,7 +292,8 @@ t_copy_runs_where_it_lands() {
 t_copy_all_brings_every_instrument() {
     d="$(dest all)"
     bn copy --all -d "$d" >/dev/null
-    assert_eq "$(ls "$d" | wc -l | tr -d ' ')" "$(pkg_tool_count)"
+    landed="$(find "$d" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+    assert_eq "$landed" "$(pkg_tool_count)"
     # The housing is not an instrument and does not come along.
     assert_no_file "$d/binnacle.py"
 }
