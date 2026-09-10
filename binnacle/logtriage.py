@@ -1171,6 +1171,15 @@ def main(argv=None):
     args = build_parser().parse_args(glue_relative_times(argv, TIME_OPTIONS))
     args.weights = parse_weights(args.weights)
     args.min_severity_level = SEV_LEVELS[args.min_severity]
+    # --split is a fraction of the log, so a value outside it puts the
+    # baseline boundary outside the log's own time range -- and nothing
+    # said so. `--split 2` printed "baseline: everything before 23:59:36"
+    # for a log ending at 13:59:48, making the whole file baseline: every
+    # NEW mark disappeared and the findings that matter quietly lost the
+    # score that comes with being new.
+    if not 0.0 < args.split < 1.0:
+        die("--split is a fraction of the log and wants to be between 0 "
+            "and 1, got %g" % args.split)
     if not args.ascii and os.environ.get("LANG", "") in ("C", "POSIX", ""):
         args.ascii = True
     masks = build_masks(args)

@@ -34,7 +34,9 @@ Options:
   --keep-remote       leave the pushed files behind instead of cleaning up
   --remote-dir DIR    where pushed files go           (AGREE_REMOTE_DIR)
   --first N           only the first N hosts -- the canary before the fleet
-  --limit N           refuse to run wider than N hosts without --yes
+  --limit N           refuse to run wider than N hosts without --yes; both
+                      of these want at least 1, because a guard that reads
+                      a zero as "not given" is a guard that is not there
   --dry-run           print the ssh command per host and stop
   --yes               proceed past the mutation guard
   --full              print each group's output instead of diffing it
@@ -92,7 +94,11 @@ Robustness properties
   * no password is ever read, passed or stored, and no key is distributed
   * the mutation guard is a typo guard, not security -- it is trivially
     bypassed with --yes and says so
-  * exit 0 unanimous, 1 divergence, 3 some host failed, 2 usage
+  * hosts left holding an empty answer by the normalizations are named,
+    and never counted as unanimous: a comparison of empty strings is a
+    comparison that did not happen
+  * exit 0 unanimous, 1 divergence (or nothing left to compare), 3 some
+    host failed, 2 usage
 """
 
 import argparse
@@ -418,7 +424,7 @@ def collect_hosts(args):
             continue
         seen.add(h.name)
         hosts.append(h)
-    if args.first:
+    if args.first is not None:
         hosts = hosts[:args.first]
     return hosts
 
@@ -559,7 +565,7 @@ def normalize(text, host, args):
 
 class Result(object):
     __slots__ = ("host", "outcome", "rc", "stdout", "stderr", "duration",
-                 "norm", "digest", "group", "pull_error")
+                 "norm", "digest", "group", "pull_error", "emptied")
 
     def __init__(self, host):
         self.host = host
@@ -571,6 +577,11 @@ class Result(object):
         self.norm = ""
         self.digest = ""
         self.group = None
+        # This host said something and the normalizations removed all of
+        # it.  Not the same as a host that printed nothing: that is an
+        # answer, and hosts agreeing on it agree.  This is the comparison
+        # being destroyed on the way to the comparison.
+        self.emptied = False
         # Why --pull brought nothing back from this host, if it did not.
         # Deliberately not part of the outcome: the command ran and its
         # answer is real, so folding a failed copy into it would move the
@@ -806,6 +817,7 @@ def group_results(results, args):
         if args.stderr_mode == "merge":
             base = base + r.stderr
         r.norm = normalize(base, r.host, args)
+        r.emptied = bool(base.strip()) and not r.norm.strip()
         # Group on outcome as well as content: two hosts with identical
         # stdout but different exit codes did not give the same answer, and
         # merging them hides that.
@@ -895,6 +907,20 @@ def render_groups(groups, args, meta):
                            % (len(diff) - len(shown_d)))
         out.append("")
 
+    emptied = [r for g in groups for r in g.results if r.emptied]
+    if emptied:
+        out.append("  NOTHING LEFT  %d host%s said something and the "
+                   "normalizations removed all of it."
+                   % (len(emptied), "" if len(emptied) == 1 else "s"))
+        out.append("    %s" % " ".join(r.host.name for r in emptied[:8]))
+        if len(emptied) > 8:
+            out.append("    ... and %d more" % (len(emptied) - 8))
+        out.append("    Those hosts are grouped on an empty answer, so they "
+                   "agree with each other")
+        out.append("    whatever they actually said.  Active: %s"
+                   % ", ".join(meta["norms"]))
+        out.append("")
+
     failed_pulls = [r for g in groups for r in g.results if r.pull_error]
     if failed_pulls:
         out.append("  PULL FAILED  %d host%s, so --pull brought nothing back "
@@ -917,7 +943,9 @@ def _hints(groups, args, meta):
     bad = [g for g in groups if g.outcome != OK]
     minorities = [g for g in ok_groups if not g.baseline]
 
-    if len(groups) == 1 and not bad:
+    gone = [r for g in groups for r in g.results if r.emptied]
+
+    if len(groups) == 1 and not bad and not gone:
         norms = meta["norms"]
         if any(n.startswith(("mask-numbers", "scrub")) for n in norms):
             out.append("    * Every host agrees -- but you masked numbers to "
@@ -954,6 +982,13 @@ def _hints(groups, args, meta):
                 out.append("    * %s exited %d.  Read the error above before "
                            "trusting the groups."
                            % (" ".join(g.hosts[:4]), g.sample.rc))
+    if gone:
+        out.append("    * %d host%s agree on nothing: what they said was "
+                   "normalized away, so what" % (len(gone),
+                                                 "" if len(gone) == 1 else "s"))
+        out.append("      this run compared was empty strings.  Loosen the "
+                   "filter that did it,")
+        out.append("      or drop it and read the output first.")
     pulls = [r for g in groups for r in g.results if r.pull_error]
     if pulls:
         out.append("    * --pull brought nothing back from %s.  The command "
@@ -1207,7 +1242,7 @@ def cmd_run(args):
 
 def run_fleet(args, command, label=None):
     hosts = collect_hosts(args)
-    if args.limit and len(hosts) > args.limit and not args.yes:
+    if args.limit is not None and len(hosts) > args.limit and not args.yes:
         die("refusing to run across %d hosts (--limit %d); pass --yes to "
             "proceed" % (len(hosts), args.limit))
     check_danger(command, args)
@@ -1257,6 +1292,11 @@ def run_fleet(args, command, label=None):
     # for, even where every host agreed about the command itself.
     failed = failed or any(r.pull_error for r in results)
     diverged = len([g for g in groups if g.outcome == OK]) > 1
+    # Hosts that agree because their answers were normalized away have not
+    # been compared, and "unanimous" is the one thing this must not say
+    # about them: 0 here would tell a script the fleet is consistent on
+    # the strength of a comparison that never happened.
+    diverged = diverged or any(r.emptied for r in results)
     if failed:
         return 3
     return 1 if diverged else 0
@@ -1363,6 +1403,32 @@ def build_parser():
 
 
 def apply_presets(args):
+    # Numbers that cannot mean what they say, refused before anything is
+    # contacted.  Two of these guard the fleet rather than the run, and
+    # both used to disable themselves on a zero: `if args.first` and
+    # `if args.limit` read 0 as "not given", so `--first 0` -- an unset
+    # variable in a script, usually -- ran the whole fleet instead of the
+    # canary, and `--limit 0` waved the fan-out through instead of
+    # refusing it.  A negative was quieter still: `--first -1` slices to
+    # hosts[:-1], which is every host but the last and looks like it
+    # worked.
+    # --field is 1-based, which makes `--field 0` an off-by-one that used
+    # to hand back an empty string for every line -- and a fleet that
+    # "agrees" on empty strings.  A negative --head or --tail is quieter
+    # still: --tail -1 slices to lines[1:], which drops the *first* line
+    # rather than keeping the last N.
+    for name, low in (("first", 1), ("limit", 1), ("jobs", 1),
+                      ("max_output", 1), ("field", 1), ("head", 1),
+                      ("tail", 1), ("max_diff_lines", 1), ("timeout", None)):
+        v = getattr(args, name, None)
+        if v is None:
+            continue
+        if low is None:
+            if v <= 0:
+                die("--timeout must be positive, got %s" % v)
+        elif v < low:
+            die("--%s wants at least %d, got %d"
+                % (name.replace("_", "-"), low, v))
     # A pattern that will not compile is refused here, naming the flag and
     # the reason, rather than surfacing as a traceback from inside the
     # per-host normalizer once the fan-out is already underway.

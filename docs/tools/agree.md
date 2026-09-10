@@ -124,6 +124,47 @@ group was produced with numbers masked:
       with --strict to check that is what you wanted.
 ```
 
+### Agreeing on nothing is not agreeing
+
+A normalization that removes every line leaves every host holding the same
+empty string — and hosts holding the same empty string group together. Three
+machines that genuinely differ:
+
+```text
+agree.py -- 3 hosts, 3 groups, 1 agree      [normalized: strip-ansi, trim]
+```
+
+become unanimous the moment a filter matches nothing on any of them:
+
+```text
+agree.py -- 3 hosts, 1 group, 3 agree       [normalized: strip-ansi, trim, grep]
+
+  GROUP 1     3 hosts  ok           d=e3b0c44298fc   <- baseline
+```
+
+That digest is the SHA-256 of the empty string, and `--grep` for a line that
+turns out to be absent everywhere is not a typo — it is the ordinary case
+where its absence is the finding.
+
+So a host whose output *was there* and was normalized away is named, and the
+run is never reported as unanimous:
+
+```text
+  NOTHING LEFT  3 hosts said something and the normalizations removed all of it.
+    web01 web02 web03
+    Those hosts are grouped on an empty answer, so they agree with each other
+    whatever they actually said.  Active: strip-ansi, trim, grep
+```
+
+A command that genuinely prints nothing on every host is a different thing —
+that is an answer, hosts agreeing on it agree, and the run stays exit 0 with
+nothing said about it.
+
+`--field` is 1-based, so `--field 0` was an off-by-one that returned an empty
+string for every line; a negative `--head` or `--tail` sliced from the wrong
+end (`--tail -1` drops the *first* line rather than keeping the last N). Both
+are refused rather than quietly emptying the comparison.
+
 ## Grouping
 
 The group key is `(outcome, digest-of-normalized-output)` — **not** the
@@ -258,7 +299,7 @@ walk path MTU, so the family reaches much further into it than a host list.
 | Code | Meaning |
 |---|---|
 | `0` | unanimous, everything succeeded |
-| `1` | divergence: more than one successful group |
+| `1` | divergence: more than one successful group, **or** nothing left to compare (see below) |
 | `3` | at least one host failed — outranks divergence |
 | `2` | usage error |
 

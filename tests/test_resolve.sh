@@ -358,6 +358,26 @@ t_the_budget_arithmetic_adds_up() {
     assert_not_contains "$out" "attempts:2 x 2 servers"
 }
 
+
+t_a_query_budget_of_zero_is_refused_not_answered() {
+    # A zero timeout is not a fast query, it is no query -- and every
+    # resolver then "failed to answer", so this tool announced that no
+    # resolver on the box was answering, CRITICAL, about a box whose DNS
+    # was fine. skew refuses the same two flags in the same words.
+    port="$(free_port)"
+    start_fake_dns "$port" '{}'
+    for pair in "--timeout 0" "--attempts 0" "--timeout -1"; do
+        set +e
+        # shellcheck disable=SC2086  # deliberate: a flag and its value
+        out="$(rs --server "127.0.0.1:$port" $pair example.com 2>&1)"
+        rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "must be positive"
+        assert_not_contains "$out" "no resolver"
+    done
+}
+
 echo "resolve"
 run_test "healthy dns says so"                 t_healthy_dns_says_so
 run_test "dead resolver outranks its slowness" t_dead_first_resolver_outranks_the_slowness_it_causes
@@ -386,4 +406,5 @@ run_test "an empty fact file is not health"    t_an_empty_fact_file_is_not_a_cle
 run_test "a mangled reply is an error"         t_a_mangled_reply_is_an_error_not_an_answer
 run_test "a server by name is refused"         t_a_server_by_name_is_refused_with_the_reason
 run_test "the budget arithmetic adds up"      t_the_budget_arithmetic_adds_up
+run_test "a zero query budget is refused"     t_a_query_budget_of_zero_is_refused_not_answered
 finish

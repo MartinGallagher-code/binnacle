@@ -8,6 +8,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`agree` called it unanimous when the normalizations had removed
+  every answer.** Hosts holding the same empty string group together, so
+  a filter that matches nothing collapses a fleet that genuinely differs
+  into one group -- digest `e3b0c44298fc`, which is the SHA-256 of the
+  empty string -- under the words *"Every host gave the same answer.
+  Nothing to chase here."* Three hosts that came back as three groups
+  became "3 hosts, 1 group, 3 agree" with one `--grep`, and `--grep` for
+  a line that turns out to be absent everywhere is not a typo: it is the
+  ordinary case where its absence is the finding.
+
+  This is the failure the tool exists to prevent, arrived at from the
+  other side -- its own docstring says a tool that moves on quietly
+  "lets you believe you checked them". A host whose output *was there*
+  and was normalized away is now named, never counted as unanimous, and
+  reflected in the exit status. A command that genuinely prints nothing
+  everywhere is untouched: that is an answer, and hosts agreeing on it
+  agree.
+
+  The arguments that could only ever produce it are refused too.
+  `--field` is 1-based, so `--field 0` was an off-by-one that returned an
+  empty string for every line; a negative `--head`/`--tail` sliced from
+  the wrong end, `--tail -1` dropping the *first* line rather than
+  keeping the last N.
+
+- **`agree`'s two fleet guards disabled themselves on a zero.** `--first`
+  is the canary you run before the fleet and `--limit` is the refusal
+  that stops a wide fan-out; both were written `if args.first` / `if
+  args.limit`, so a zero read as "not given". `--first 0` -- an unset
+  variable in a script, usually -- ran the *whole fleet* instead of one
+  host, and `--limit 0` waved the fan-out through instead of refusing
+  it. A negative was quieter still: `--first -1` slices to `hosts[:-1]`,
+  which is every host but the last and looks exactly like it worked.
+  Both now want at least 1 and say so, and the other numbers that cannot
+  mean anything (`--jobs 0`, `--max-output 0`, `--timeout 0`) are
+  refused with them.
+
+- **`resolve --timeout 0` manufactured a DNS outage.** A zero timeout is
+  not a fast query, it is no query -- so every resolver "failed to
+  answer" and the tool announced, CRITICAL, that *no resolver on this
+  box is answering. Every timeout you are chasing downstream starts
+  here*, about a box whose DNS was fine. `skew`, which is the same shape
+  of tool with the same two flags, has refused both since it was
+  written; `resolve` now carries the same check in the same words.
+
+- **`logtriage --split` accepted a fraction outside the log.** It is a
+  fraction of the log, and outside 0..1 it put the baseline boundary
+  outside the log's own time range -- printing a perfectly plausible
+  "baseline: everything before 23:59:36" for a log that ends at
+  13:59:48. The whole file then counted as baseline, so every `NEW` mark
+  disappeared and the findings that matter quietly lost the score that
+  comes with being new. It is refused now.
+
 - **`agree --pull` failed silently.** The whole point of `--pull` is to
   bring the files back, and `pull_files`'s exit status was discarded: a
   glob that matched nothing, an scp that failed, a `--pull-dir` that
