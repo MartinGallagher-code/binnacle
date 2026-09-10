@@ -1,0 +1,139 @@
+{
+  "facts": {
+    "budget.worst_s": null,
+    "hosts.readable": true,
+    "names.aaaa_stall": [],
+    "names.all": {
+      "www": {
+        "answers": {
+          "127.0.0.1:49304": []
+        },
+        "by_server": {
+          "127.0.0.1:49304": {
+            "A": {
+              "answers": [],
+              "error": null,
+              "ok": true,
+              "rcode": "NOERROR",
+              "rtt_ms": 0.22189599985722452,
+              "truncated": false
+            },
+            "AAAA": {
+              "answers": [],
+              "error": null,
+              "ok": true,
+              "rcode": "NOERROR",
+              "rtt_ms": 0.09928800045599928,
+              "truncated": false
+            }
+          }
+        },
+        "distinct": 0,
+        "hosts": null
+      }
+    },
+    "names.disagree": [],
+    "names.failed": [
+      "www"
+    ],
+    "names.hosts_shadow": [],
+    "names.partial": [],
+    "probe.attempts": 1,
+    "probe.names": [
+      "www"
+    ],
+    "probe.source": "--server",
+    "probe.timeout_s": 2.0,
+    "probe.types": [
+      "A",
+      "AAAA"
+    ],
+    "res.attempts": 2,
+    "res.duplicates": 0,
+    "res.nameserver_count": 1,
+    "res.nameservers": [
+      "127.0.0.1"
+    ],
+    "res.ndots": 1,
+    "res.options": [
+      "ndots:1"
+    ],
+    "res.path": "/tmp/sharedtools-test.fpl2Oj/rc.1",
+    "res.readable": true,
+    "res.rotate": false,
+    "res.search": [
+      "corp.example",
+      "lab.example"
+    ],
+    "res.single_request": false,
+    "res.stub": null,
+    "res.timeout": 5,
+    "res.upstreams": null,
+    "search.count": 2,
+    "search.wasted": 2,
+    "search.wasted_ms": 0.1435229996786802,
+    "srv.alive": [
+      "127.0.0.1:49304"
+    ],
+    "srv.all": {
+      "127.0.0.1:49304": {
+        "alive": true,
+        "error": null,
+        "names": {},
+        "rcode": "NOERROR",
+        "rtt_ms": 0.26746999992610654
+      }
+    },
+    "srv.count": 1,
+    "srv.dead": [],
+    "srv.fastest_ms": 0.26746999992610654,
+    "srv.first_dead": false,
+    "srv.list": [
+      "127.0.0.1:49304"
+    ],
+    "srv.slowest": "127.0.0.1:49304",
+    "srv.slowest_ms": 0.26746999992610654,
+    "stub.all": {
+      "www": {
+        "addrs": [],
+        "error": "[Errno -2] Name or service not known",
+        "ms": 5.727316000047722
+      }
+    },
+    "stub.slowest_ms": 5.727316000047722,
+    "sys.hostname": "vm",
+    "tcp.blocked": []
+  },
+  "findings": [
+    {
+      "detail": "www resolved on no server at all",
+      "fix": "Every resolver was asked and none had an answer, so this is the zone rather than this box: check the name is spelled as the application spells it, and that the record exists in the zone you think it does.",
+      "rule_id": "NAME_FAILS",
+      "severity": "CRITICAL",
+      "title": "a name does not resolve"
+    },
+    {
+      "detail": "2 wasted queries before the real one, costing 0ms",
+      "fix": "Each of those is a full round trip to a resolver, on every lookup of that name, and it is invisible in every trace that starts after the connection.  Use fully qualified names in configuration -- a trailing dot stops the search list dead -- or shorten `search` in /tmp/sharedtools-test.fpl2Oj/rc.1.  Kubernetes ships ndots:5, which turns every external name into five of these.",
+      "rule_id": "SEARCH_COST",
+      "severity": "INFO",
+      "title": "the search list costs"
+    }
+  ],
+  "meta": {
+    "host": "vm",
+    "tool": "resolve.py",
+    "ts": 1789060915,
+    "version": "0.6.0"
+  },
+  "skipped": [
+    {
+      "reason": "resolv.conf could not be read, or --server replaced the configured list",
+      "rule_id": "TIMEOUT_BUDGET"
+    },
+    {
+      "reason": "no local stub resolver in use",
+      "rule_id": "RESOLV_STUB"
+    }
+  ]
+}

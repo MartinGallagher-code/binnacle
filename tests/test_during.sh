@@ -306,11 +306,30 @@ t_the_series_written_out_reads_back_in() {
 }
 
 t_a_window_shorter_than_one_interval_says_so() {
+    # The warning is the finding here. It used to be the exit status too:
+    # `return child_status or 1` read a successful command's 0 as "no
+    # status at all", so a benchmark that got fast enough to finish
+    # inside one interval started failing the pipeline this is meant to
+    # prefix -- `during -- make bench && ./deploy` quietly stopped
+    # deploying, with nothing in the message saying why. This tool is a
+    # drop-in prefix or it is nothing: the command's status is the
+    # command's, sampled or not.
     set +e
     out="$(du_ --interval 5 -- sh -c 'exit 0' 2>&1)"; rc=$?
     set -e
     assert_contains "$out" "shorter than one"
-    assert_status $rc 1
+    assert_status $rc 0
+}
+
+t_a_short_window_still_reports_a_command_that_failed() {
+    # The other half of the same promise: nothing was sampled, and the
+    # command's own failure still comes through rather than being
+    # flattened to the generic 1.
+    set +e
+    out="$(du_ --interval 5 -- sh -c 'exit 7' 2>&1)"; rc=$?
+    set -e
+    assert_contains "$out" "shorter than one"
+    assert_status $rc 7
 }
 
 t_asking_for_neither_a_command_nor_a_window_is_a_usage_error() {
@@ -669,6 +688,7 @@ run_test "corrupt numbers are not measured"   t_corrupt_numbers_are_not_measurem
 run_test "a series with no hostname says ?"   t_a_series_without_a_hostname_says_so
 run_test "the series reads back in"            t_the_series_written_out_reads_back_in
 run_test "a too-short window says so"          t_a_window_shorter_than_one_interval_says_so
+run_test "a short window keeps the failure"    t_a_short_window_still_reports_a_command_that_failed
 run_test "neither command nor window errors"   t_asking_for_neither_a_command_nor_a_window_is_a_usage_error
 run_test "a foreign csv is refused"           t_a_foreign_csv_is_not_a_quiet_healthy_run
 run_test "softirq pinning is not an idle box"  t_a_box_pinned_in_softirq_is_not_an_idle_box

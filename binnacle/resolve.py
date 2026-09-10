@@ -727,8 +727,16 @@ def collect_facts(args, names):
         else None
     f["search.wasted"] = None
     f["search.wasted_ms"] = None
+    # `or 1` read a real `options ndots:0` as ndots:1 -- and 0 is not an
+    # absent setting, it is the standard fix for exactly the latency this
+    # tool is pointed at: try every name absolute first, never walk the
+    # search list. A box that had already solved the problem was told it
+    # still had it, and the measurement went out and sent the queries to
+    # prove it. None is the only absent value here; it means resolv.conf
+    # could not be read at all.
+    ndots = f["res.ndots"] if f["res.ndots"] is not None else 1
     unqualified = [n for n in names
-                   if n.count(".") < (f["res.ndots"] or 1)
+                   if n.count(".") < ndots
                    and not n.endswith(".")]
     if unqualified and live and f["res.search"] and not args.no_search:
         addr, port = live[0]

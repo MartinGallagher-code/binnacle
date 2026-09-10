@@ -378,6 +378,45 @@ t_a_query_budget_of_zero_is_refused_not_answered() {
     done
 }
 
+
+t_ndots_zero_is_a_setting_not_an_absent_one() {
+    # `options ndots:0` is the standard fix for search-list latency --
+    # try every name absolute, never walk the list -- and `or 1` read
+    # that 0 as "not set". So a box that had already solved the problem
+    # was told it still had it, and the measurement went out and sent
+    # the queries to prove it: search.wasted came back 2 on a resolver
+    # that would never have sent them.
+    port="$(free_port)"
+    start_fake_dns "$port" '{}'
+    printf 'nameserver 127.0.0.1\nsearch corp.example lab.example\noptions ndots:0\n' \
+        > "$TEST_TMPDIR/rc0"
+    set +e
+    rs --resolv-conf "$TEST_TMPDIR/rc0" --server "127.0.0.1:$port" \
+        --json "$TEST_TMPDIR/o0.json" www >/dev/null 2>&1
+    set -e
+    got="$("$PY" -c "
+import json, sys
+f = json.load(open(sys.argv[1]))
+f = f.get('facts', f)
+print('%s %s' % (f.get('res.ndots'), f.get('search.wasted')))" "$TEST_TMPDIR/o0.json")"
+    # ndots survives as 0, and nothing was counted as wasted.
+    assert_eq "$got" "0 None"
+
+    # ndots:1, the default, still measures the cost it always did.
+    printf 'nameserver 127.0.0.1\nsearch corp.example lab.example\noptions ndots:1\n' \
+        > "$TEST_TMPDIR/rc1"
+    set +e
+    rs --resolv-conf "$TEST_TMPDIR/rc1" --server "127.0.0.1:$port" \
+        --json "$TEST_TMPDIR/o1.json" www >/dev/null 2>&1
+    set -e
+    got="$("$PY" -c "
+import json, sys
+f = json.load(open(sys.argv[1]))
+f = f.get('facts', f)
+print('%s %s' % (f.get('res.ndots'), f.get('search.wasted')))" "$TEST_TMPDIR/o1.json")"
+    assert_eq "$got" "1 2"
+}
+
 echo "resolve"
 run_test "healthy dns says so"                 t_healthy_dns_says_so
 run_test "dead resolver outranks its slowness" t_dead_first_resolver_outranks_the_slowness_it_causes
@@ -407,4 +446,5 @@ run_test "a mangled reply is an error"         t_a_mangled_reply_is_an_error_not
 run_test "a server by name is refused"         t_a_server_by_name_is_refused_with_the_reason
 run_test "the budget arithmetic adds up"      t_the_budget_arithmetic_adds_up
 run_test "a zero query budget is refused"     t_a_query_budget_of_zero_is_refused_not_answered
+run_test "ndots:0 is a setting, not absent"   t_ndots_zero_is_a_setting_not_an_absent_one
 finish

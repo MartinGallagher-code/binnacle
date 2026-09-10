@@ -8,6 +8,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`resolve` read `options ndots:0` as `ndots:1`.** Zero is not an
+  absent setting there -- it is the standard fix for the exact latency
+  this tool is pointed at: try every name absolute first, never walk the
+  search list. `f["res.ndots"] or 1` turned it back into 1, so every
+  single-label name counted as unqualified, and `resolve` went out and
+  *sent* the search-list queries to measure a cost that box does not
+  pay. A machine that had already solved the problem was told it still
+  had it, on the strength of queries its own resolver would never send.
+  `None` -- resolv.conf unreadable -- is the only absent value, and is
+  the only one that now falls back to 1.
+
+- **`during` turned a fast benchmark's success into a failure.** When
+  the wrapped command finishes inside one sampling interval there is
+  nothing to report on, and the short-window path returned
+  `child_status or 1` -- which reads a successful command's `0` as "no
+  status at all". So `during -- make bench` exited 1 the moment the
+  benchmark got fast enough to finish in under a second, and
+  `during -- make bench && ./deploy` quietly stopped deploying with
+  nothing in the message saying why. This is the tool's headline promise
+  ("a drop-in prefix"), and the passthrough already worked for a command
+  that *failed*: only success was being swallowed. The warning stays --
+  it is the finding -- but the command's status is the command's,
+  sampled or not. A bare `--seconds` window with no command to speak for
+  still exits 1.
+
+  The suite asserted the old behaviour, so the case that locked it in is
+  corrected rather than added to, with a second case covering the other
+  half: a command that fails inside a short window keeps its own status
+  rather than being flattened to 1.
+
 - **`agree` called it unanimous when the normalizations had removed
   every answer.** Hosts holding the same empty string group together, so
   a filter that matches nothing collapses a fleet that genuinely differs

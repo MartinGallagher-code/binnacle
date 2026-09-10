@@ -2496,7 +2496,14 @@ def main(argv=None):
                          "shorter than one usable interval (--interval is "
                          "%.1fs).  Give the benchmark longer, or lower "
                          "--interval.\n" % (PROG, args.interval))
-        return child_status or 1
+        # `or 1` read a successful command's 0 as "no status at all", so a
+        # benchmark that got fast enough to finish inside one interval
+        # started failing the pipeline this is meant to prefix: `during --
+        # make bench && ./deploy` stopped deploying, and nothing in the
+        # message above says why. The warning is the finding; the wrapped
+        # command's own status is still its own status. With no command
+        # to speak for -- a bare --seconds window -- 1 is right.
+        return child_status if cmd else 1
 
     summary = analyse(samples, meta)
     if args.baseline:
