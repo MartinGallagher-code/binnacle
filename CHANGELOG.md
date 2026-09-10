@@ -32,6 +32,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`netmesh --interval 0` turned every agent in the fleet into a
+  disk-filling loop.** The agent's report loop advances
+  `next_report += self.interval` and falls back to `now + self.interval`,
+  so a zero leaves no wait in it at all and it writes a report row per
+  pass. Measured on loopback: a three-second run wrote **247,637 rows and
+  11.7 MB**, against 12 rows for `--interval 1`. `start` deploys that
+  agent to every host, and `collect` pulls the result back.
+
+- **`netmesh gen --pps 0` (or negative) wrote a mesh netmesh will not
+  read.** Every cell of the grid comes out empty, `gen` reports success
+  while printing the nonsense back -- "2 ordered pairs, -5 probes/s
+  each" -- and every later command then refuses the file it wrote, saying
+  "every cell is empty, so there is nothing to measure": true, and not
+  the cause. Both are checked now on the box where they were typed, which
+  is the argument the `CFG_NUMERIC` comment already makes about the mesh
+  config line; these are the two keys that comment's reasoning does not
+  cover, since neither is clamped where it is used.
+
+- **Five `netmesh` verbs printed a failure and exited 0 anyway.**
+  `fleet.each()` counts the hosts that failed and logs "FAILED on N/M
+  hosts", and `status`, `stop`, `clean`, `logs` and `doctor` each threw
+  that number away and returned a hardcoded 0. `doctor` is the sharpest:
+  it exists to answer "can this fleet be reached?", so
+  `netmesh doctor && netmesh start` ran against a fleet doctor had just
+  called broken. A `stop` that could not reach a host is worse than
+  cosmetic -- the agent is still running there, and a stale agent goes on
+  sending traffic into the next run's measurements. `run` and `check`
+  discarded their sub-commands' statuses the same way, and `collect`
+  returned a raw failure count that an exit status truncates to one byte:
+  256 failed hosts came back as 0.
+
 - **`resolve` read `options ndots:0` as `ndots:1`.** Zero is not an
   absent setting there -- it is the standard fix for the exact latency
   this tool is pointed at: try every name absolute first, never walk the

@@ -849,6 +849,115 @@ t_a_garbled_config_line_is_refused_here() {
     assert_contains "$out" "out of range"
 }
 
+
+t_a_verb_that_could_not_reach_a_host_says_so_in_its_status() {
+    # Every one of these already counted the failures and printed
+    # "FAILED on N/M hosts" -- and then returned a hardcoded 0, telling a
+    # script the opposite of what it had just printed. doctor is the
+    # sharpest: it exists to answer "can this fleet be reached?", so
+    # `netmesh doctor && netmesh start` ran against a fleet doctor had
+    # just called broken.
+    install_fake_ssh
+    fake_host h1
+    fake_host_unreachable h2
+    cd "$TEST_TMPDIR"
+    nm gen h1=h1 h2=h2 --mesh m.csv --pps 20 --no-pmtu >/dev/null
+
+    for verb in doctor status stop clean logs; do
+        set +e
+        out="$(nm "$verb" --mesh m.csv --ssh "$FAKE_BIN/ssh" \
+                 --scp "$FAKE_BIN/scp" --remote-dir nmdir 2>&1)"
+        rc=$?
+        set -e
+        assert_contains "$out" "FAILED"
+        if [ "$rc" -eq 0 ]; then
+            _fail "$verb printed FAILED and still exited 0"
+        fi
+    done
+}
+
+t_a_verb_that_reached_every_host_still_exits_zero() {
+    # The other half: a fleet that answers must not start failing.
+    install_fake_ssh
+    for h in h1 h2; do fake_host "$h"; done
+    cd "$TEST_TMPDIR"
+    nm gen h1=h1 h2=h2 --mesh m.csv --pps 20 --no-pmtu >/dev/null
+    for verb in status clean; do
+        set +e
+        out="$(nm "$verb" --mesh m.csv --ssh "$FAKE_BIN/ssh" \
+                 --scp "$FAKE_BIN/scp" --remote-dir nmdir 2>&1)"
+        rc=$?
+        set -e
+        assert_not_contains "$out" "FAILED"
+        assert_status $rc 0
+    done
+}
+
+
+t_numbers_that_cannot_mean_anything_are_refused() {
+    # Both of these reach the whole fleet, which is the argument the
+    # CFG_NUMERIC comment already makes about the mesh config line.
+    #
+    # --pps 0 or less: every cell comes out empty, gen still reports
+    # success ("2 ordered pairs, -5 probes/s each"), and every later
+    # command refuses the file it wrote, naming empty cells -- true, and
+    # not the cause.
+    #
+    # --interval 0: the agent's report loop has no wait left in it and
+    # writes a row per pass. A three-second run produced 247,637 rows and
+    # 11.7 MB, which start would have deployed to every host.
+    cd "$TEST_TMPDIR"
+    # --pps is gen's, and a bad one must not leave a mesh behind.
+    for bad in "0" "-5"; do
+        set +e
+        out="$(nm gen a=1.1.1.1 b=2.2.2.2 --mesh m.csv --pps "$bad" 2>&1)"
+        rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "--pps wants a positive number"
+        assert_no_file "m.csv"
+    done
+    nm gen a=127.0.0.1 b=127.0.0.1 --mesh m.csv --pps 20 --no-pmtu >/dev/null
+    assert_file_exists "m.csv"
+
+    # --interval is the agent's, and reaches every host via start.
+    for bad in "0" "-1"; do
+        set +e
+        out="$(nm agent --mesh m.csv --host a --dir d --interval "$bad" \
+                 --duration 1 2>&1)"
+        rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "--interval wants a positive number"
+    done
+
+    # A negative duration is not a short run, it is not a run.
+    set +e
+    out="$(nm agent --mesh m.csv --host a --dir d --interval 1 \
+             --duration -5 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--duration cannot be negative"
+}
+
+t_the_report_interval_bounds_what_the_agent_writes() {
+    # The measurement behind the case above: one agent, three seconds,
+    # loopback. A sane interval writes a handful of rows.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1 b=127.0.0.1 --mesh ok.csv --pps 20 --no-pmtu >/dev/null
+    nm agent --mesh ok.csv --host a --dir d1 --interval 1 --duration 3 \
+        >/dev/null 2>&1
+    rows="$(( $(wc -l < d1/report.csv) - 1 ))"
+    # Twelve on this machine; the bound that matters is "not thousands".
+    if [ "$rows" -gt 200 ]; then
+        _fail "a 3s run at --interval 1 wrote $rows report rows"
+    fi
+    if [ "$rows" -lt 1 ]; then
+        _fail "a 3s run at --interval 1 wrote nothing"
+    fi
+}
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -861,6 +970,10 @@ run_test "hostname mesh measures, not 100% loss" t_hostname_addresses_measure_no
 run_test "unresolvable peer is a note"         t_an_unresolvable_peer_is_a_note_not_silence
 run_test "dead peer leaves rtt blank not 0"    t_loss_columns_go_blank_not_zero_when_peer_dies
 run_test "fleet lifecycle through fake ssh"    t_fleet_lifecycle_through_fake_ssh
+run_test "an unreachable host reaches the rc"  t_a_verb_that_could_not_reach_a_host_says_so_in_its_status
+run_test "a reachable fleet still exits zero"  t_a_verb_that_reached_every_host_still_exits_zero
+run_test "impossible numbers are refused"      t_numbers_that_cannot_mean_anything_are_refused
+run_test "the report interval bounds output"   t_the_report_interval_bounds_what_the_agent_writes
 run_test "summarize runs from fixtures"        t_summarize_reads_fixtures_without_a_network
 run_test "clean run says so plainly"           t_clean_run_says_the_network_is_fine
 run_test "latency under load vs the baseline"   t_latency_under_load_is_reported_against_the_idle_baseline
