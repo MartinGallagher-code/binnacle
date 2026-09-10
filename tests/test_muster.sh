@@ -622,6 +622,42 @@ t_help_prints_every_verbs_flags() {
     done
 }
 
+t_release_by_name_does_not_steal_either() {
+    # The same guarantee as through a ticket. Without one there is nothing
+    # to prove the lease is ours, so the holder on the row decides --
+    # `--item` used to skip the check entirely and hand a live lease to
+    # the next worker without a word.
+    cd "$TEST_TMPDIR"
+    mu add 'web[01-02]' >/dev/null 2>&1
+    mu take 2 --as alice -o alice.txt >/dev/null 2>&1
+    set +e
+    out="$(mu release --item web01 --as bob 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "CONFLICT"
+    assert_contains "$out" "left alone"
+    assert_eq "$(mu list --state held | tail -n +2 | wc -l | tr -d ' ')" "2"
+    # ...and the holder itself can still put its own items back by name.
+    mu release --item web01 --as alice >/dev/null 2>&1
+    assert_eq "$(mu list --state held | tail -n +2 | wc -l | tr -d ' ')" "1"
+    # reset is the way past it, and still is.
+    mu reset --item web02 >/dev/null 2>&1
+    assert_eq "$(mu list --state held | tail -n +2 | wc -l | tr -d ' ')" "0"
+}
+
+t_a_refused_release_does_not_blame_the_lease_length() {
+    # "a longer --lease is nearly always the fix" is the answer for a
+    # done that arrived late. An item belonging to somebody else is not a
+    # lease that was too short.
+    cd "$TEST_TMPDIR"
+    mu add web01 >/dev/null 2>&1
+    mu take 1 --as alice -o alice.txt >/dev/null 2>&1
+    set +e
+    out="$(mu release --item web01 --as bob 2>&1)"
+    set -e
+    assert_not_contains "$out" "longer --lease"
+}
+
 echo "muster"
 run_test "no path argument may be the pool"  t_no_path_argument_may_be_the_pool
 run_test "a normal ticket path still works"  t_a_normal_ticket_path_still_works
@@ -656,6 +692,8 @@ run_test "finishing after the lease lapsed"   t_finishing_after_the_lease_lapsed
 run_test "late with nobody else is quieter"   t_finishing_late_with_nobody_else_holding_is_quieter
 run_test "done twice is a finding"            t_done_twice_is_a_finding_not_a_silent_no_op
 run_test "release gives items back"           t_release_gives_items_back_without_completing_them
+run_test "release by name does not steal" t_release_by_name_does_not_steal_either
+run_test "a refused release blames nothing" t_a_refused_release_does_not_blame_the_lease_length
 run_test "release does not steal"             t_release_does_not_take_an_item_from_its_holder
 run_test "reset undoes a completion"          t_reset_undoes_a_completion
 run_test "an unknown item is named"           t_an_unknown_item_is_named_not_ignored

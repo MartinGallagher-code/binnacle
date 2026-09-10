@@ -33,6 +33,24 @@ link data role=server role=tor scope=rack
 EOF
 }
 
+# A floor whose racks are not all spelled the same way: r01..r02 in the
+# hall and g01 in the GPU room.  `rack[1]` is both of them, which is the
+# forgiving id match reaching further than it looks -- the layout the
+# ambiguity report exists for.
+write_mixed_layout() {
+    cat > "$TEST_TMPDIR/mixed.dc" <<'EOF'
+dc SITE
+  room wr01
+    row A
+      rack r[01..02]
+        node u[01..04] role=server name={room}{rack}{id}
+  room gpu1 +gpu
+    row A
+      rack g01
+        node u[01..02] role=server name={room}{rack}{id}
+EOF
+}
+
 t_a_container_selector_means_everything_under_it() {
     # `rack[1-3]` is the servers in those racks, not the three rack
     # elements -- filtering those by role=server would leave nothing.
@@ -376,6 +394,77 @@ t_version_matches_the_house_format() {
     assert_contains "$out" "License: GPL-3.0-or-later"
 }
 
+t_a_bare_number_that_crosses_spellings_is_reported() {
+    # `rack[1]` is r01 and also g01, because a bare number ignores the
+    # letters.  Answering with the GPU room and saying nothing is how a
+    # fan-out reaches a rack nobody meant to touch.
+    write_mixed_layout
+    cd "$TEST_TMPDIR"
+    err="$(mf mixed.dc 'rack[1]' 2>&1 >/dev/null)"
+    assert_contains "$err" "more than one spelling"
+    assert_contains "$err" "g01"
+    assert_contains "$err" "r01"
+    # A report, not a refusal: the answer is still both.
+    assert_eq "$(mf mixed.dc 'rack[1]' --count 2>/dev/null)" "6"
+}
+
+t_naming_the_spelling_is_quiet_and_narrower() {
+    # The way out the report names: say the letters, or give a path.
+    write_mixed_layout
+    cd "$TEST_TMPDIR"
+    err="$(mf mixed.dc 'rack[r01]' 2>&1 >/dev/null)"
+    assert_not_contains "$err" "more than one spelling"
+    assert_eq "$(mf mixed.dc 'rack[r01]' --count 2>/dev/null)" "4"
+    assert_eq "$(mf mixed.dc wr01/A/r01 --count 2>/dev/null)" "4"
+}
+
+t_an_unambiguous_number_is_not_reported() {
+    # Every rack here is r01..r03, so `rack[1]` is exactly what it looks
+    # like -- the forgiveness working, and nothing to say about it.
+    write_layout
+    cd "$TEST_TMPDIR"
+    err="$(mf dc.dc 'rack[1]' 2>&1 >/dev/null)"
+    assert_not_contains "$err" "more than one spelling"
+}
+
+t_explain_shows_what_each_selector_named() {
+    # The count that surprises you, explained without a --csv and an awk.
+    write_mixed_layout
+    cd "$TEST_TMPDIR"
+    err="$(mf mixed.dc 'rack[1]' --explain --count 2>&1 >/dev/null)"
+    assert_contains "$err" "explain"
+    assert_contains "$err" "rack[1]"
+    # The elements it named, by path, and the servers left at the end.
+    assert_contains "$err" "SITE/wr01/A/r01"
+    assert_contains "$err" "SITE/gpu1/A/g01"
+    assert_contains "$err" "6 server(s)"
+}
+
+t_explain_is_stderr_only() {
+    # The data still pipes: an explanation on stdout would end up in
+    # somebody's host list.
+    write_mixed_layout
+    cd "$TEST_TMPDIR"
+    out="$(mf mixed.dc 'rack[r01]' --explain 2>/dev/null)"
+    assert_eq "$out" "$(printf 'wr01r01u01\nwr01r01u02\nwr01r01u03\nwr01r01u04')"
+    # ...and it is asked for outright, so --quiet does not silence it.
+    err="$(mf mixed.dc 'rack[r01]' --explain --quiet 2>&1 >/dev/null)"
+    assert_contains "$err" "explain"
+}
+
+t_explain_names_a_selector_that_matched_nothing() {
+    # Which of three selectors emptied the answer is the whole question
+    # when a fan-out comes back with no hosts.
+    write_mixed_layout
+    cd "$TEST_TMPDIR"
+    set +e
+    err="$(mf mixed.dc 'rack[r01]' '+gpu' --explain 2>&1 >/dev/null)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$err" "nothing carries that"
+    assert_contains "$err" "0 server(s)"
+}
+
 echo "manifest"
 run_test "a container means everything under" t_a_container_selector_means_everything_under_it
 run_test "selectors AND together"             t_selectors_and_together
@@ -410,5 +499,11 @@ run_test "a wide range answers the same"      t_a_big_range_gives_the_same_answe
 run_test "--sample prints a layout"           t_sample_prints_a_layout_to_start_from
 run_test "the sample parses as a layout"      t_the_sample_is_a_layout_this_tool_reads
 run_test "the sample is all that is printed"  t_the_sample_is_the_only_thing_printed
+run_test "a crossed spelling is reported"      t_a_bare_number_that_crosses_spellings_is_reported
+run_test "naming the spelling is quiet"       t_naming_the_spelling_is_quiet_and_narrower
+run_test "an unambiguous number is quiet"     t_an_unambiguous_number_is_not_reported
+run_test "--explain shows what was named"     t_explain_shows_what_each_selector_named
+run_test "--explain stays on stderr"          t_explain_is_stderr_only
+run_test "--explain names the empty step"     t_explain_names_a_selector_that_matched_nothing
 run_test "--version matches the house format" t_version_matches_the_house_format
 finish

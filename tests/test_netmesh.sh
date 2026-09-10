@@ -218,6 +218,13 @@ EOF
 t_loss_columns_go_blank_not_zero_when_peer_dies() {
     # A pair whose replies dried up must write no RTT at all: averaging a
     # blank in as zero would flatter the baseline.
+    #
+    # The port pair here is this test's alone, and every other agent test
+    # in this file has its own. An agent is bounded by --duration rather
+    # than killed, so one can outlive the test that started it; while two
+    # tests shared 5430/5431 this one intermittently got real replies from
+    # the other's agent on 5431 and failed, which reads as a flake and is
+    # a fixture collision.
     cd "$TEST_TMPDIR"
     nm gen a=127.0.0.1:5430 b=127.0.0.1:5431 --mesh m.csv --pps 40 \
         --no-pmtu >/dev/null
@@ -460,7 +467,7 @@ t_a_reply_ttl_is_recorded_for_every_bucket_not_just_one() {
     # its own socket, so reading the TTL off the main socket alone would
     # record it for one probe in N and call that the path.
     cd "$TEST_TMPDIR"
-    nm gen a=127.0.0.1:5450 b=127.0.0.1:5451 --mesh mt.csv --pps 40 \
+    nm gen a=127.0.0.1:5442 b=127.0.0.1:5443 --mesh mt.csv --pps 40 \
         --no-pmtu --flows 3 >/dev/null
     mkdir -p ta tb
     nm agent --mesh mt.csv --host a --dir ta --interval 2 --duration 4 \
@@ -633,7 +640,7 @@ t_flow_buckets_break_the_rate_down_they_do_not_multiply_it() {
     # flow spreading on must not put more traffic on the fabric being
     # measured.  The buckets are a breakdown of the same probes.
     cd "$TEST_TMPDIR"
-    nm gen a=127.0.0.1:5430 b=127.0.0.1:5431 --mesh mf.csv --pps 40 \
+    nm gen a=127.0.0.1:5440 b=127.0.0.1:5441 --mesh mf.csv --pps 40 \
         --no-pmtu --flows 4 >/dev/null
     assert_contains "$(cat mf.csv)" "flows=4"
     mkdir -p fa fb
@@ -742,6 +749,106 @@ t_without_flows_there_is_no_spread_section() {
 }
 
 
+# --- the default route ------------------------------------------------------
+
+# /proc/net/route holds one row per route; a default is destination and
+# mask both zero. Written as fixtures rather than read from the box, since
+# the runner's own routing table is not something a test can arrange.
+write_route() {
+    printf 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n' \
+        > "$TEST_TMPDIR/route"
+    for row in "$@"; do printf '%s\n' "$row" >> "$TEST_TMPDIR/route"; done
+}
+
+default_iface_of() {
+    "$PY" - "$NM" "$TEST_TMPDIR/route" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("nm", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.stdout.write(str(mod.default_iface(sys.argv[2])))
+EOF
+}
+
+t_a_downed_default_route_is_not_the_egress() {
+    # A decommissioned interface keeps its row. Taking the first zero
+    # destination named it, and the coalescing timer read off that card
+    # then belonged to a card carrying nothing.
+    write_route \
+        "eth1	00000000	0102A8C0	0002	0	0	0	00000000	0	0	0" \
+        "eth0	00000000	010200C0	0003	0	0	0	00000000	0	0	0"
+    assert_eq "$(default_iface_of)" "eth0"
+}
+
+t_the_lowest_metric_default_wins() {
+    # Two uplinks, both up: the kernel would use the lower metric, so the
+    # measurement has to be labelled with that one.
+    write_route \
+        "wlan0	00000000	010200C0	0003	0	0	600	00000000	0	0	0" \
+        "eth0	00000000	010200C0	0003	0	0	100	00000000	0	0	0"
+    assert_eq "$(default_iface_of)" "eth0"
+}
+
+t_a_point_to_point_default_still_counts() {
+    # `default dev tun0` carries no GATEWAY flag. Requiring one would
+    # report no egress on exactly the boxes worth naming.
+    write_route "tun0	00000000	00000000	0001	0	0	50	00000000	0	0	0"
+    assert_eq "$(default_iface_of)" "tun0"
+}
+
+t_a_zero_destination_that_is_not_a_default() {
+    # Destination zero with a non-zero mask is a route to 0.0.0.0/8, not
+    # the default route.
+    write_route "eth0	00000000	00000000	0001	0	0	0	000000FF	0	0	0"
+    assert_eq "$(default_iface_of)" "None"
+}
+
+t_a_port_outside_the_range_is_refused() {
+    # int() is happy with -5 and 99999, and the socket error that follows
+    # names the port without naming the mesh row it came from.
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(nm gen 'web01=10.0.0.1:99999' --mesh bad.tsv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+    set +e
+    out="$(nm gen 'web01=10.0.0.1:-5' --mesh bad.tsv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+    # ...and a real one still builds a mesh.
+    nm gen 'web01=10.0.0.1:2222' 'web02=10.0.0.2' --mesh ok.tsv >/dev/null 2>&1
+    assert_contains "$(cat ok.tsv)" "2222"
+}
+
+t_a_garbled_config_line_is_refused_here() {
+    # The `# key=value` line above the grid is the one thing the whole
+    # fleet shares. A typo in it used to reach every agent and kill each
+    # one with a traceback in its own log, leaving `status` to report a
+    # fleet that would not start -- so it is checked when the mesh is
+    # read, on the box of whoever edited it.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5490 b=127.0.0.1:5491 --mesh m.csv >/dev/null 2>&1
+    for bad in "size=big" "hops=xx" "port=abc"; do
+        key="${bad%%=*}"
+        sed "s/${key}=[^ ]*/${bad}/" m.csv > bad.csv
+        set +e
+        out="$(nm agent --mesh bad.csv --host a --dir . 2>&1)"; rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "is not a number"
+        assert_not_contains "$out" "Traceback"
+    done
+    # A port that cannot exist is caught the same way.
+    sed 's/port=[^ ]*/port=99999/' m.csv > big.csv
+    set +e
+    out="$(nm agent --mesh big.csv --host a --dir . 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+}
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -782,4 +889,10 @@ run_test "sick only under load differs"        t_a_sick_member_only_under_load_i
 run_test "without flows, no spread section"    t_without_flows_there_is_no_spread_section
 run_test "a peer on another address measures"  t_a_peer_answering_from_another_address_is_measured
 run_test "path mtu converges on that peer"     t_path_mtu_converges_to_a_peer_on_another_address
+run_test "a downed default is not egress"      t_a_downed_default_route_is_not_the_egress
+run_test "the lowest metric default wins"      t_the_lowest_metric_default_wins
+run_test "a point-to-point default counts"     t_a_point_to_point_default_still_counts
+run_test "zero dest with a mask is not it"     t_a_zero_destination_that_is_not_a_default
+run_test "a bad port is refused"               t_a_port_outside_the_range_is_refused
+run_test "a garbled config line is refused"    t_a_garbled_config_line_is_refused_here
 finish

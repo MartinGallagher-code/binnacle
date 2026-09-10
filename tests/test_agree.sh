@@ -444,6 +444,20 @@ t_mask_times_covers_the_machine_readable_one() {
     assert_contains "$plain" "9876543210"
 }
 
+t_a_port_outside_the_range_is_refused() {
+    # The address is validated here rather than left to fail later as a
+    # connection error naming the wrong cause, and a port of 0 or 70000 is
+    # no more a port than "2001:db8::1::2" is an address.
+    set +e
+    out="$("$PY" "$AG" hosts -H 'web01=10.0.0.1:99999' 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+    # ...and a real one still parses.
+    out="$("$PY" "$AG" hosts -H 'web01=10.0.0.1:2222')"
+    assert_contains "$out" "2222"
+}
+
 echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
@@ -473,4 +487,5 @@ run_test "a flooding host is killed, not grouped" t_a_flooding_host_is_killed_no
 run_test "mixed versions merge by column name" t_mixed_tool_versions_merge_by_column_name
 run_test "junk output is not a column"        t_a_host_printing_junk_does_not_become_a_column
 run_test "bad arguments are refused up front"  t_a_bad_argument_is_refused_before_the_fan_out
+run_test "a port outside the range is refused" t_a_port_outside_the_range_is_refused
 finish

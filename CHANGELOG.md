@@ -6,7 +6,145 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`during` called a quiet moment a change of bottleneck.** `SHIFTED`
+  means the *kind* of limit moved -- CPU-bound early, I/O-bound late --
+  and its advice is to benchmark the phases separately. The fact behind it
+  counted *stretches* of non-idle samples rather than distinct limits, so
+  one sample dipping under every threshold in the middle of a CPU-bound
+  run read as cpu -> free -> cpu, and the finding fired one line below a
+  verdict that named a single bottleneck. It now counts distinct limits.
+
+- **`netmesh` let a typo in the mesh config line reach the whole fleet.**
+  The `# key=value` line above the grid is the one thing every host
+  shares, and its numbers were cast where they were used -- `int()` inside
+  `Agent.__init__`, which runs on each host after netmesh copies itself
+  there. `size=big` therefore killed every agent with a traceback in its
+  own log, leaving `status` to report a fleet that simply would not start,
+  while every other malformed thing in that file gets a clean refusal.
+  The numeric keys are now checked once when the mesh is read, on the box
+  of whoever edited it, and `port` is range-checked like the host tokens.
+
+- **`logtriage` applied `--since`/`--until` to some records and not
+  others, silently.** A window can only be applied to a record that
+  carries a time; untimestamped ones are kept, because dropping them would
+  lose the stack traces and the dmesg tail that are the reason to run this
+  at all. Kept silently, they outranked the records the window did apply
+  to -- top of the report, marked `NEW` against a baseline they were never
+  in, under a header claiming a one-second span. The report now says how
+  many records the window could not be applied to. It only said anything
+  before when *every* record lacked a timestamp.
+
+- **Two netmesh tests shared a port pair with a test that needs it
+  silent.** An agent is bounded by `--duration` rather than killed, so it
+  can outlive the test that started it. `t_loss_columns_go_blank...`
+  asserts that nothing answers on 5431 while the flow-bucket test ran a
+  live agent on the same port, and the reply-TTL test shared 5450 with the
+  unresolvable-peer test. Both read as flakes and were fixture
+  collisions; every agent test now has its own pair.
+
+- **`agree`, `reachable` and `netmesh` accepted a port that cannot
+  exist.** All three validate the address in a host token rather than
+  letting a bad one fail later as a connection error naming the wrong
+  cause -- but the port was only checked for being digits, so
+  `web01=10.0.0.1:99999` went through, and netmesh's `int()` took `-5` as
+  well. It matters most in `reachable`, which rewrites the file it is
+  given on the strength of the probe: every entry carrying that port would
+  have been commented out for a reason that was never on the network. All
+  three now refuse anything outside 1-65535.
+
+- **`logtriage` split one message into several templates over an
+  address.** Two lines that differ only in an IPv6 address have to reach
+  the same template -- that is the whole job -- but the pattern could only
+  start at a `::`, so `2001:db8::1` masked as `<NUM>:db8<IP6>` with its
+  leading group falling through to the number mask. The same pattern also
+  matched `12:34:56`, turning a duration the time masks had missed into an
+  address. It now covers the textual forms from RFC 4291, zone included.
+
+- **`logtriage` masked a MAC address as a timestamp.** The time masks ran
+  ahead of the MAC and IPv6 masks, and `clock` is `\d{2}:\d{2}:\d{2}` --
+  which the first three octets of a MAC very often look like, 08:00:27
+  being VirtualBox's own prefix. `08:00:27:aa:bb:cc` templated as
+  `<TS>:aa:bb:cc`, so two machines' MACs were two templates. The masks for
+  whole identifiers now run first; nothing is lost the other way round,
+  since a timestamp has no `::` and never eight colon-separated groups.
+
+- **`skew` printed an unsigned offset where the sign was the finding.**
+  `human_seconds` documented itself as signed and then took `abs()`, so the
+  SOURCES table -- the one place the direction is not also said in words --
+  rendered a source 40ms ahead and one 40ms behind identically as `40ms`.
+  That column exists to show which source disagrees and which way. The
+  helper now keeps the sign, and the lines that say the direction in words
+  of their own (`40ms fast`, `UTC-5h`) pass the magnitude in, so it is
+  stated once rather than twice.
+
+- **`netmesh` could name a dead interface as the egress.** `default_iface`
+  took the first row in `/proc/net/route` with a zero destination, though
+  its own comment said it checked the flags. A downed interface keeps its
+  entry and a box on two uplinks has a default per uplink, so the first row
+  is not necessarily the route in use -- and the coalescing timer read off
+  that interface then belonged to a card carrying nothing. Routes that are
+  not UP are skipped and the lowest metric wins. A point-to-point default
+  (`default dev tun0`), which carries no GATEWAY flag, still counts.
+
+- **`during` and `why-slow` reported negative disk and network rates.**
+  Both modules guard their counters against a reset -- "unknown is None,
+  never a negative rate" -- everywhere except the disk and netdev deltas,
+  which were subtracted inline. A device removed and re-added, or a veth
+  recreated mid-run, keeps its name and starts again from zero, which put a
+  negative utilisation and a negative MB/s into the series; `during`'s
+  analysis then read that sample as the quietest moment of the run, and
+  `why-slow` picked its busiest disk between numbers that were not
+  measurements. Both now leave the pair blank, as the CPU and swap
+  counters already did.
+
+- **`muster release` handed a live lease to the next worker.** Releasing
+  through a ticket refuses to touch an item held by somebody else, which is
+  the one guarantee the lease exists to give. Releasing the same item by
+  `--item` or from a hand-written list skipped the check entirely and freed
+  it silently, because the check keyed on a lease id that a bare name does
+  not carry. With no ticket the holder recorded on the row now decides.
+  `reset` remains the way to put an item back regardless of who holds it,
+  and the "a longer --lease is nearly always the fix" hint is no longer
+  printed for a conflict that has nothing to do with lease length.
+
+- **`resolve` printed a timeout budget that did not multiply out.** The
+  budget is counted from the configured nameserver list, duplicates
+  included, because that is the list the stub works down -- but the finding
+  printed the count of *distinct* servers probed. A resolv.conf naming one
+  server twice therefore read `timeout:5 x attempts:2 x 2 servers` beside a
+  total of 30. The line now shows the count the arithmetic used and names
+  the repeated line, which was the reason for the wait.
+
+- **`reachable` reformatted an inline comment it was asked only to
+  comment out.** When a range line has mixed results it is expanded to one
+  line per host, and the comment carried across lost the space after its
+  `#` -- so `# the slow one` came back as `#the slow one` on every host the
+  range split into, a diff in a file this tool promises only to comment and
+  uncomment. Everything after the first `#` is now carried over verbatim.
+
 ### Added
+
+- **`manifest --explain` says what each selector named.** A count that is
+  not the one you expected is the normal way this tool goes wrong, and
+  working it out used to mean re-running with `--csv` and an awk over the
+  room column. `--explain` prints, per selector, the elements it actually
+  named and how many were still standing after it, so the answer is read
+  off rather than investigated. It goes to stderr, so the host list still
+  pipes, and it is asked for outright, so `--quiet` does not silence it.
+
+- **`manifest` reports an id that answered to more than one spelling.**
+  Forgiving id matching is what makes `rack[1]` find `R01` from memory, but
+  a bare number ignores the letters in front of an id entirely: `rack[1]`
+  is `r01` in each hall *and* `g01` in the GPU room, and `room[1]` is
+  `wr01` *and* `gpu1`. That is now said on stderr, naming the spellings
+  that answered and the `rack[r01]`-or-a-path way to mean one of them.
+
+  It stays a report rather than a refusal -- one number answering to two
+  spellings is often exactly what was meant -- but quietly returning a
+  second room's worth of machines is how a fan-out reaches a rack nobody
+  meant to touch.
 
 - **`netmesh --hops N` locates the queue.** `--baseline` says a pair got
   slower under load; this says *where* along the path. A queue forms in

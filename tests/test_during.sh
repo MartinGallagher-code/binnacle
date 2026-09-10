@@ -320,6 +320,89 @@ t_asking_for_neither_a_command_nor_a_window_is_a_usage_error() {
     assert_status $rc 2
 }
 
+t_a_device_whose_counters_reset_leaves_the_row_blank() {
+    # A disk removed and re-added, or a veth recreated, keeps its name and
+    # starts its counters again from zero. Subtracting anyway wrote a
+    # negative utilisation and a negative Mb/s into the series, and the
+    # analysis then read that sample as the quietest moment of the run.
+    # Blank stays blank is the rule the CPU and swap counters already
+    # follow.
+    mkdir -p "$TEST_TMPDIR/proc/net"
+    printf 'cpu  100 0 20 500 5 0 2 10 0 0\ncpu0 100 0 20 500 5 0 2 10 0 0\nctxt 100\nprocesses 5\nprocs_running 1\nprocs_blocked 0\n' \
+        > "$TEST_TMPDIR/proc/stat"
+    printf 'MemTotal: 1000000 kB\nMemAvailable: 900000 kB\n' \
+        > "$TEST_TMPDIR/proc/meminfo"
+    printf '   8 0 sda 900000 0 8000000 500000 700000 0 6000000 400000 0 900000 1400000\n' \
+        > "$TEST_TMPDIR/proc/diskstats"
+    netdev() {
+        printf 'Inter-|   Receive                                |  Transmit\n' > "$TEST_TMPDIR/proc/net/dev"
+        printf ' face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n' \
+            >> "$TEST_TMPDIR/proc/net/dev"
+        printf '  eth0: %s 0 0 0 0 0 0 %s 0 0 0 0 0 0\n' "$1 $2" "$3 $4" \
+            >> "$TEST_TMPDIR/proc/net/dev"
+    }
+    netdev 900000000 900000 800000000 800000
+    ( sleep 1.2
+      printf '   8 0 sda 12 0 90 8 5 0 40 3 0 11 19\n' \
+          > "$TEST_TMPDIR/proc/diskstats"
+      netdev 500 5 400 4 ) &
+    du_ --seconds 2 --interval 0.6 --proc-root "$TEST_TMPDIR/proc" \
+        --sys-root "$TEST_TMPDIR/nosys" --no-procs \
+        --samples "$TEST_TMPDIR/s.csv" --quiet >/dev/null 2>&1
+    wait
+    # Nothing in the series may be negative, and the pair that straddled
+    # the reset carries no disk or network figure at all.
+    assert_not_contains "$(cat "$TEST_TMPDIR/s.csv")" ",-"
+    "$PY" -c "
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+blank = [r for r in rows if not r['disk_util_pct'] and not r['net_mbps']]
+sys.exit(0 if blank else 1)" "$TEST_TMPDIR/s.csv" \
+        || fail "the sample spanning the reset should carry no disk or net figure"
+}
+
+t_going_quiet_for_a_moment_is_not_the_limit_moving() {
+    # SHIFTED means the *kind* of limit changed -- cpu-bound early,
+    # io-bound late -- and its advice is to benchmark the phases apart.
+    # Counting stretches rather than distinct limits made one quiet sample
+    # in the middle of a cpu-bound run read as cpu -> free -> cpu, so the
+    # finding fired one line under a verdict naming a single bottleneck.
+    cd "$TEST_TMPDIR"
+    "$PY" - "$DU" > dip.csv <<'EOF'
+import csv, importlib.util, sys
+spec = importlib.util.spec_from_file_location("du", sys.argv[1])
+du = importlib.util.module_from_spec(spec); spec.loader.exec_module(du)
+w = csv.DictWriter(sys.stdout, fieldnames=du.SAMPLE_FIELDS, restval="",
+                   lineterminator="\n")
+w.writeheader()
+for i in range(20):
+    busy = 10.0 if i == 9 else 95.0          # one quiet sample in the middle
+    w.writerow({"host": "box", "ts": 1000 + i, "elapsed_s": i,
+                "cpu_busy_pct": "%.1f" % busy, "cpu_cores": 8})
+EOF
+    out="$(du_ --from-samples dip.csv)"
+    assert_not_contains "$out" "the limit moved: "
+    # ...and a run that really does change limits still says so.
+    "$PY" - "$DU" > two.csv <<'EOF'
+import csv, importlib.util, sys
+spec = importlib.util.spec_from_file_location("du", sys.argv[1])
+du = importlib.util.module_from_spec(spec); spec.loader.exec_module(du)
+w = csv.DictWriter(sys.stdout, fieldnames=du.SAMPLE_FIELDS, restval="",
+                   lineterminator="\n")
+w.writeheader()
+for i in range(20):
+    row = {"host": "box", "ts": 1000 + i, "elapsed_s": i, "cpu_cores": 8}
+    if i < 10:
+        row["cpu_busy_pct"] = "95.0"
+    else:
+        row["cpu_busy_pct"] = "20.0"
+        row["disk_util_pct"] = "97.0"
+    w.writerow(row)
+EOF
+    out="$(du_ --from-samples two.csv)"
+    assert_contains "$out" "the limit moved: "
+}
+
 echo "during"
 t_a_foreign_csv_is_not_a_quiet_healthy_run() {
     # A file with none of the columns a sample carries is some other CSV.
@@ -600,4 +683,6 @@ run_test "traffic that was not yours"          t_traffic_that_was_not_yours_is_a
 run_test "a link carrying yours is not"        t_a_link_carrying_what_you_sent_is_not_a_finding
 run_test "intruder severity scales"            t_the_intruder_severity_scales_with_how_much_was_not_yours
 run_test "no expectation says why it skipped"  t_without_an_expectation_the_link_check_says_why_it_skipped
+run_test "a reset device leaves it blank"     t_a_device_whose_counters_reset_leaves_the_row_blank
+run_test "a quiet sample is not a shift"      t_going_quiet_for_a_moment_is_not_the_limit_moving
 finish

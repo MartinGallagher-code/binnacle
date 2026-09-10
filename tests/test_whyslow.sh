@@ -405,5 +405,33 @@ run_test "ceilings read from a /proc tree"    t_ceilings_are_read_from_a_synthet
 run_test "absent conntrack is not empty"      t_an_absent_conntrack_table_is_not_an_empty_one
 run_test "an empty fact file is not health"   t_an_empty_fact_file_is_not_a_clean_bill_of_health
 run_test "a non-dict fact file is refused"    t_a_facts_file_that_is_not_a_dictionary_is_refused
+t_a_disk_whose_counters_reset_is_not_the_busiest() {
+    # Same rule as the CPU and swap counters, applied to the disk: a
+    # device removed and re-added keeps its name and starts again from
+    # zero. Subtracting anyway produced a negative utilisation and a
+    # negative MB/s, and "busiest disk" was then decided between numbers
+    # that were not measurements.
+    mkdir -p "$TEST_TMPDIR/proc"
+    printf 'cpu  100 0 20 500 5 0 2 10 0 0\ncpu0 100 0 20 500 5 0 2 10 0 0\nctxt 100\nprocesses 5\nprocs_running 1\nprocs_blocked 0\n' \
+        > "$TEST_TMPDIR/proc/stat"
+    printf '0.40 0.30 0.20 1/210 9999\n' > "$TEST_TMPDIR/proc/loadavg"
+    printf 'MemTotal: 1000000 kB\nMemAvailable: 900000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' \
+        > "$TEST_TMPDIR/proc/meminfo"
+    printf '10 0\n' > "$TEST_TMPDIR/proc/uptime"
+    # major minor name reads rd_merged rd_sectors rd_ms writes wr_merged
+    # wr_sectors wr_ms inflight io_ms weighted_ms
+    printf '   8 0 sda 900000 0 8000000 500000 700000 0 6000000 400000 0 900000 1400000\n' \
+        > "$TEST_TMPDIR/proc/diskstats"
+    ( sleep 0.4
+      printf '   8 0 sda 12 0 90 8 5 0 40 3 0 11 19\n' \
+          > "$TEST_TMPDIR/proc/diskstats" ) &
+    out="$(ws --proc-root "$TEST_TMPDIR/proc" --sys-root "$TEST_TMPDIR/nosys" \
+             --interval 1 --no-exec --facts)"
+    wait
+    assert_contains "$out" '"disk.busiest": null'
+    assert_not_contains "$out" '": -'
+}
+
+run_test "a reset disk is not the busiest"    t_a_disk_whose_counters_reset_is_not_the_busiest
 run_test "a counter reset is unknown"          t_a_counter_reset_is_unknown_not_negative
 finish

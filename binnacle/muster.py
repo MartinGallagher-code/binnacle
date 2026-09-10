@@ -101,8 +101,15 @@ Conventions
   A ticket is one item per line, so it is already the input to whatever
   does the work -- `for h in $(grep -v '^#' mine.txt); do ...` -- with the
   lease recorded in comment lines above it, which `done` reads to tell
-  your completion from somebody else's.  A hand-written list of item
-  names works too; it is only the conflict detection that gets quieter.
+  your completion from somebody else's.
+
+  A hand-written list of item names, or `--item`, works too -- with the
+  lease line missing there is nothing to check a completion against, so
+  `done` accepts it quietly.  `release` does not: with no ticket the
+  holder recorded on the row decides, so releasing an item somebody else
+  holds is refused rather than done silently.  Name yourself with `--as`
+  if that is who took it, or use `reset`, which puts an item back
+  regardless of who holds it.
 
 Exit status
   0   nothing wrong
@@ -915,6 +922,16 @@ def _close(args, verb):
                 continue
 
             mine = (not lease) or (it.lease_id == lease)
+            if verb == "release" and not lease:
+                # No ticket, so nothing here proves the lease is ours, and
+                # the holder recorded on the row is all there is to go on.
+                # Reporting work finished without a ticket is defensible --
+                # it did happen -- but handing somebody's item to a third
+                # worker while they are still on it is the exact thing the
+                # lease exists to prevent, and `--item` was doing it
+                # silently while the same release through a ticket refused.
+                # `reset` is the verb for putting an item back regardless.
+                mine = it.holder == (args.holder or whoami())
             if verb == "done":
                 if not mine and it.state == HELD:
                     late = now - _num(it.taken_ts)
@@ -946,6 +963,9 @@ def _close(args, verb):
                     findings.append((
                         "CONFLICT", name,
                         "is held by %s, not by your lease -- left alone"
+                        % it.holder if lease else
+                        "is held by %s -- left alone; name the holder with "
+                        "--as, or `reset` puts an item back regardless"
                         % it.holder))
                     continue
                 it.note = ""
@@ -963,7 +983,11 @@ def _close(args, verb):
     note("%s %d item(s); %d of %d still outstanding"
          % ("completed" if verb == "done" else "released",
             changed, left, total), args.quiet)
-    if any(k == "CONFLICT" for k, _, _ in findings):
+    # Only for `done`, where a CONFLICT means the lease lapsed mid-run.
+    # A release refused because the item belongs to somebody else is not a
+    # lease that was too short, and saying so sent the reader to lengthen
+    # a lease that was never the problem.
+    if verb == "done" and any(k == "CONFLICT" for k, _, _ in findings):
         note("a longer --lease is nearly always the fix for a CONFLICT",
              args.quiet)
     return 1 if findings else 0

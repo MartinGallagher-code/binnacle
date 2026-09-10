@@ -285,6 +285,35 @@ t_ipv6_entries_are_probed_not_mangled() {
     assert_contains "$bad" "not a valid IPv6 address"
 }
 
+t_an_inline_comment_survives_a_split_range() {
+    # A range line with mixed results is expanded to one line per host,
+    # and each carries the original inline comment across verbatim --
+    # spacing included, since this tool promises to comment and uncomment
+    # a file rather than to reformat it.
+    install_fake_probes
+    printf 'web[01-03]  # the slow ones\n' > "$TEST_TMPDIR/h.txt"
+    printf 'web01\nweb02\n' > "$TEST_TMPDIR/ssh_ok"
+    set +e
+    re "$TEST_TMPDIR/h.txt" -o "$TEST_TMPDIR/out.txt" --quiet
+    set -e
+    body="$(cat "$TEST_TMPDIR/out.txt")"
+    assert_contains "$body" "web01  # the slow ones"
+    assert_not_contains "$body" "#the slow ones"
+}
+
+t_a_port_outside_the_range_is_refused() {
+    # This tool rewrites the file it is given on the strength of the
+    # probe, so a port that cannot be connected to would comment out every
+    # entry carrying it for a reason that was never on the network.
+    install_fake_probes
+    printf 'web01=10.0.0.1:99999\n' > "$TEST_TMPDIR/h.txt"
+    set +e
+    out="$(re "$TEST_TMPDIR/h.txt" --quiet 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+}
+
 echo "reachable"
 t_rewriting_keeps_the_file_it_was_given() {
     # This is the one tool that edits a file you already had, so the file
@@ -329,4 +358,6 @@ run_test "--dry-run contacts nobody"           t_dry_run_contacts_nobody
 run_test "name=address form"                   t_name_equals_address_form
 run_test "--recheck-only is narrow"            t_recheck_only_touches_commented_lines
 run_test "rewriting keeps the file given"     t_rewriting_keeps_the_file_it_was_given
+run_test "inline comment survives a split" t_an_inline_comment_survives_a_split_range
+run_test "a port outside the range is refused" t_a_port_outside_the_range_is_refused
 finish

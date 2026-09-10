@@ -166,6 +166,68 @@ t_csv_swallowing_the_log_is_diagnosed() {
     assert_contains "$(head -1 "$TEST_TMPDIR/syslog")" "sshd"
 }
 
+t_an_address_is_masked_whole_or_not_at_all() {
+    # Two lines differing only in an address have to reach the same
+    # template -- that is the whole job. The v6 pattern could only start
+    # at a `::`, so the leading group fell through to the number mask and
+    # `2001:db8::1` templated as `<NUM>:db8<IP6>`.
+    assert_eq "$(lt --mask 'peer 2001:db8::1 timed out' | head -1)" \
+              "peer <IP6> timed out"
+    assert_eq "$(lt --mask 'peer fe80::1234:5678%eth0 timed out' | head -1)" \
+              "peer <IP6> timed out"
+    assert_eq "$(lt --mask 'peer 2001:0db8:0000:0000:0000:ff00:0042:8329 timed out' | head -1)" \
+              "peer <IP6> timed out"
+    assert_eq "$(lt --mask 'peer ::1 timed out' | head -1)" \
+              "peer <IP6> timed out"
+}
+
+t_a_mac_is_not_eaten_by_the_clock_mask() {
+    # The first three octets of a MAC are very often a valid-looking
+    # time -- 08:00:27 is VirtualBox's prefix -- and with the time masks
+    # running first this templated as `<TS>:aa:bb:cc`, so two machines'
+    # MACs were two templates.
+    assert_eq "$(lt --mask 'saw 08:00:27:aa:bb:cc on eth0' | head -1)" \
+              "saw <MAC> on eth0"
+    assert_eq "$(lt --mask 'saw 08:00:27:dd:ee:ff on eth0' | head -1)" \
+              "saw <MAC> on eth0"
+}
+
+t_the_timestamps_still_mask() {
+    # Nothing is lost by claiming addresses first: a timestamp has no
+    # `::` and never eight colon-separated groups.
+    assert_eq "$(lt --mask 'Aug 15 03:14:07 web01 sshd: hi' | head -1)" \
+              "<TS> web01 sshd: hi"
+    assert_eq "$(lt --mask '2026-08-15T03:14:07.123+01:00 done' | head -1)" \
+              "<TS> done"
+    assert_eq "$(lt --mask 'took 12:34:56 to finish' | head -1)" \
+              "took <TS> to finish"
+    assert_eq "$(lt --mask '[   12.345678] kernel thing' | head -1)" \
+              "<TS> kernel thing"
+}
+
+t_records_a_window_cannot_filter_are_disclosed() {
+    # A window only applies to records that carry a time. Untimestamped
+    # ones are kept -- dropping them would lose the stack traces and the
+    # dmesg tail that are the reason to run this -- but kept silently they
+    # outranked the records the window did apply to, marked NEW against a
+    # baseline they were never in, under a header claiming a one-second
+    # span.
+    cd "$TEST_TMPDIR"
+    {
+      echo "Aug 15 03:55:01 web01 app: inside the window"
+      echo "Aug 15 03:14:07 web01 app: outside the window"
+      echo "a bare line with no timestamp"
+      echo "a bare line with no timestamp"
+    } > mix.log
+    touch -d "2026-08-15 04:00:00" mix.log
+    out="$(lt mix.log --since 2026-08-15T03:50:00)"
+    assert_contains "$out" "carry no timestamp"
+    assert_contains "$out" "could not be applied"
+    # Nothing extra is said when no window was asked for.
+    out="$(lt mix.log)"
+    assert_not_contains "$out" "could not be applied"
+}
+
 echo "logtriage"
 run_test "--csv swallowing the log is caught" t_csv_swallowing_the_log_is_diagnosed
 run_test "uuid masked before hex"             t_mask_order_uuid_before_hex
@@ -219,4 +281,8 @@ run_test "eviction is reported, not silent"   t_eviction_is_reported_not_silent
 run_test "reads stdin and gzip"               t_reads_stdin_and_gzip
 run_test "no timestamps degrades cleanly"     t_no_timestamps_falls_back_to_line_numbers
 run_test "new year does not reverse the log"  t_new_years_eve_does_not_reverse_the_log
+run_test "an address masks whole"             t_an_address_is_masked_whole_or_not_at_all
+run_test "a mac is not eaten by the clock"    t_a_mac_is_not_eaten_by_the_clock_mask
+run_test "the timestamps still mask"          t_the_timestamps_still_mask
+run_test "an unfilterable record is disclosed" t_records_a_window_cannot_filter_are_disclosed
 finish

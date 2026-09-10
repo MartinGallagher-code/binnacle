@@ -670,10 +670,19 @@ def derive(prev, cur, elapsed, host, exclude_tree=None):
             if not x:
                 continue
             ios = y["ios"] - x["ios"]
-            util = min(100.0, (y["io_ms"] - x["io_ms"]) / (dt * 1000.0) * 100.0)
-            await_ms = ((y["weighted_ms"] - x["weighted_ms"]) / ios) \
-                if ios > 0 else 0.0
-            mbps = (y["sectors"] - x["sectors"]) * 512 / 1e6 / dt
+            d_io_ms = y["io_ms"] - x["io_ms"]
+            d_weighted = y["weighted_ms"] - x["weighted_ms"]
+            d_sectors = y["sectors"] - x["sectors"]
+            # Same rule as _rate: a counter that went backwards means the
+            # device was removed and re-added, or its stats wrapped, and
+            # the pair is not a measurement. Computing it anyway put a
+            # negative utilisation and a negative MB/s into the row, which
+            # analyse() then read as the quietest disk on the box.
+            if min(ios, d_io_ms, d_weighted, d_sectors) < 0:
+                continue
+            util = min(100.0, d_io_ms / (dt * 1000.0) * 100.0)
+            await_ms = (d_weighted / ios) if ios > 0 else 0.0
+            mbps = d_sectors * 512 / 1e6 / dt
             if worst is None or util > worst[1]:
                 worst = (name, util, await_ms, mbps)
         if worst:
@@ -686,8 +695,14 @@ def derive(prev, cur, elapsed, host, exclude_tree=None):
             x = prev["net"].get(name)
             if not x:
                 continue
-            mbps = ((y["rx_bytes"] - x["rx_bytes"])
-                    + (y["tx_bytes"] - x["tx_bytes"])) * 8 / 1e6 / dt
+            d_rx = y["rx_bytes"] - x["rx_bytes"]
+            d_tx = y["tx_bytes"] - x["tx_bytes"]
+            # A veth or bridge recreated mid-run keeps its name and starts
+            # its counters again from zero, which is the common way this
+            # goes negative.
+            if d_rx < 0 or d_tx < 0:
+                continue
+            mbps = (d_rx + d_tx) * 8 / 1e6 / dt
             drops = _rate(x["rx_drop"], y["rx_drop"], dt)
             if worst is None or mbps > worst[1]:
                 worst = (name, mbps, drops)
@@ -1023,11 +1038,14 @@ def analyse(samples, meta=None):
     f["bound.free_share"] = shares.get(FREE) if states else None
     f["bound.changed"] = None
     if states:
-        seen = []
-        for st in states:
-            if not seen or seen[-1] != st:
-                seen.append(st)
-        f["bound.changed"] = len([s for s in seen if s != FREE]) > 1
+        # Distinct limits, not stretches of them.  Counting runs instead
+        # made one quiet sample in the middle of a CPU-bound run read as
+        # cpu -> free -> cpu, which is two stretches and one limit -- so
+        # SHIFTED fired on a run with a single bottleneck and told the
+        # reader to benchmark its phases separately, one line under a
+        # verdict that named that bottleneck. Going idle for a moment is
+        # not the limit moving; the limit moving is a different limit.
+        f["bound.changed"] = len(set(s for s in states if s != FREE)) > 1
 
     key = pick_key_metric(samples)
     f["key.metric"] = key[0] if key else None

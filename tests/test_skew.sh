@@ -330,6 +330,35 @@ t_the_hardware_clock_is_read_from_where_it_lives() {
     assert_contains "$out" "hardware clock"
 }
 
+t_a_source_offset_keeps_its_sign() {
+    # The SOURCES table has only this string to say which way a source is
+    # out. A source 40ms ahead and one 40ms behind are different findings
+    # -- one runs fast, the other is the one to stop trusting -- and
+    # printing both as "40ms" hides exactly the disagreement the table
+    # exists to show.
+    skew_facts_json "$TEST_TMPDIR/f.json" \
+        'srv.list=["a.example","b.example"]' \
+        'srv.alive=["a.example","b.example"]' \
+        'srv.all={"a.example":{"reachable":true,"offset_s":0.04,"delay_ms":3.1,"stratum":2},"b.example":{"reachable":true,"offset_s":-0.04,"delay_ms":4.2,"stratum":2}}'
+    out="$(sk --from-facts "$TEST_TMPDIR/f.json")"
+    assert_contains "$out" "-40ms"
+    # ...and the magnitude is still there for the one running ahead.
+    assert_contains "$out" "40ms"
+}
+
+t_a_direction_is_never_said_twice() {
+    # Where the line says the direction in words, the number is the
+    # magnitude: "-40ms fast" would state it twice and "UTC--5h" is not
+    # a timezone at all.
+    skew_facts_json "$TEST_TMPDIR/fast.json" clock.offset_s=-120.0 \
+        rtc.delta_s=-120.0 tz.utc_offset_s=-18000 'tz.name="America/New_York"'
+    out="$(sk --from-facts "$TEST_TMPDIR/fast.json" --all)"
+    assert_contains "$out" "2m 00s fast"
+    assert_not_contains "$out" "-2m 00s fast"
+    assert_contains "$out" "UTC-5h"
+    assert_not_contains "$out" "UTC--5h"
+}
+
 echo "skew"
 run_test "a correct clock says so"              t_a_correct_clock_says_so
 run_test "no source outranks the drift"         t_no_source_outranks_the_drift_it_causes
@@ -337,6 +366,8 @@ run_test "unreadable config is not no sources"  t_an_unreadable_config_is_not_a_
 run_test "offset thresholds fire past the line" t_offset_thresholds_fire_only_past_the_line
 run_test "thresholds are movable"               t_thresholds_are_movable
 run_test "contradictory thresholds refused"     t_a_contradictory_threshold_pair_is_refused
+run_test "a source offset keeps its sign"     t_a_source_offset_keeps_its_sign
+run_test "a direction is never said twice"    t_a_direction_is_never_said_twice
 run_test "which way round the error is"         t_which_way_round_the_error_is
 run_test "an answering source can be useless"   t_a_source_that_answers_can_still_be_useless
 run_test "disagreeing sources are a finding"    t_disagreeing_sources_are_a_finding

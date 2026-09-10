@@ -209,6 +209,26 @@ REPORT_FIELDS = [
 CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every",
                "flows", "hops")
 
+# What each numeric key in that line has to be, checked once when the mesh
+# is read.  The line is the one thing the whole fleet shares -- netmesh
+# copies itself and this file to every host -- so `size=big` used to reach
+# every agent and kill each one with a traceback in its own log, leaving
+# `status` to report a fleet that simply would not start. Caught here it
+# is one message, on the box of whoever edited the file.
+#
+# Only the port carries a range: the rest are clamped where they are used
+# (_packet bounds the payload, flows and hops are clamped to their maxima),
+# and a port is not, because it is handed to bind and sendto.
+CFG_NUMERIC = {
+    "size": (int, None, None),
+    "port": (int, 1, 65535),
+    "pps": (float, None, None),
+    "mtu_ceiling": (int, None, None),
+    "pmtu_every": (float, None, None),
+    "flows": (int, None, None),
+    "hops": (int, None, None),
+}
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -509,6 +529,12 @@ def parse_token(tok):
             port = int(p)
         except ValueError:
             die("bad port in host token %r" % tok)
+        # Checked here rather than left to fail at bind time: int() is
+        # happy with -5 and 99999, and the socket error that follows names
+        # the port without naming the mesh row it came from.
+        if not 1 <= port <= 65535:
+            die("port %d is out of range in host token %r (want 1-65535)"
+                % (port, tok))
         if bare:
             name = addr
     if not name or not addr:
@@ -563,6 +589,19 @@ def load_mesh(path):
                 line_numbers.append(lineno)
     if not data_lines:
         die("%s: no grid found (just comments?)" % path)
+
+    for key in sorted(cfg):
+        if key not in CFG_NUMERIC:
+            continue
+        cast, low, high = CFG_NUMERIC[key]
+        try:
+            value = cast(cfg[key])
+        except ValueError:
+            die("%s: %s=%s is not a number" % (path, key, cfg[key]))
+        if (low is not None and value < low) or \
+                (high is not None and value > high):
+            die("%s: %s=%s is out of range (want %d-%d)"
+                % (path, key, cfg[key], low, high))
 
     rows = list(csv.reader(data_lines))
     header = rows[0]
@@ -2530,25 +2569,48 @@ def render_queue_at_hop(recs, top=3):
     return lines
 
 
-def default_iface():
+# /proc/net/route flags, from linux/route.h.  Only UP is tested: a default
+# route over a point-to-point link (`default dev tun0`) carries no GATEWAY
+# flag, and refusing those would report no egress on exactly the boxes
+# whose egress is most worth naming.
+RTF_UP = 0x0001
+
+
+def default_iface(path="/proc/net/route"):
     """The interface carrying the default route, from /proc/net/route.
 
     Read rather than exec'd, and best-effort: this is only used to label a
     measurement, so a box whose egress cannot be identified reports None
     and the check that needs it skips.
+
+    A destination of zero is not on its own the default route.  The table
+    routinely holds more than one -- a downed interface keeps its entry,
+    and a box on two networks has a default per uplink -- so the flags and
+    the metric decide: routes that are not UP are skipped, and the lowest
+    metric wins, which is the one the kernel would actually use.  Matching
+    the first zero destination instead named a dead interface, and the
+    coalescing timer then read off it belonged to a card carrying nothing.
     """
     try:
-        with io.open("/proc/net/route", encoding="utf-8-sig",
-                     errors="replace") as fh:
+        with io.open(path, encoding="utf-8-sig", errors="replace") as fh:
             txt = fh.read()
     except (OSError, UnicodeDecodeError):
         return None
+    best = None
     for line in txt.splitlines()[1:]:
         f = line.split()
-        # destination 00000000 with the UP|GATEWAY flags is the default.
-        if len(f) >= 4 and f[1] == "00000000":
-            return f[0]
-    return None
+        # Destination and mask both zero: everything not matched elsewhere.
+        if len(f) < 8 or f[1] != "00000000" or f[7] != "00000000":
+            continue
+        try:
+            flags, metric = int(f[3], 16), int(f[6])
+        except ValueError:
+            continue
+        if not flags & RTF_UP:
+            continue
+        if best is None or metric < best[0]:
+            best = (metric, f[0])
+    return best[1] if best else None
 
 
 def read_rx_usecs(iface):

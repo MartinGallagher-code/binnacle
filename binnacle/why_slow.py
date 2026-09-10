@@ -803,10 +803,17 @@ def collect_facts(interval, top_n, boot_window):
             ios = (b["reads"] + b["writes"]) - (a["reads"] + a["writes"])
             io_ms = b["io_ms"] - a["io_ms"]
             wt_ms = b["weighted_ms"] - a["weighted_ms"]
+            sectors = ((b["read_sectors"] + b["write_sectors"])
+                       - (a["read_sectors"] + a["write_sectors"]))
+            # Same rule as _delta_rate: a counter that went backwards is a
+            # device removed and re-added, or a wrap, and the pair is not a
+            # measurement. Reporting it anyway named a negative utilisation
+            # as this box's busiest disk.
+            if min(ios, io_ms, wt_ms, sectors) < 0:
+                continue
             util = min(100.0, io_ms / (dt * 1000.0) * 100.0) if dt else None
             await_ms = (wt_ms / ios) if ios > 0 else 0.0
-            mb = ((b["read_sectors"] + b["write_sectors"])
-                  - (a["read_sectors"] + a["write_sectors"])) * 512 / 1e6 / dt
+            mb = sectors * 512 / 1e6 / dt
             f["disk.all"][name] = {"util_pct": util, "await_ms": await_ms,
                                    "iops": ios / dt if dt else None,
                                    "mbps": mb, "inflight": b["inflight"]}
