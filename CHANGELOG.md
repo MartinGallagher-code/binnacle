@@ -8,6 +8,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`during` called a quiet moment a change of bottleneck.** `SHIFTED`
+  means the *kind* of limit moved -- CPU-bound early, I/O-bound late --
+  and its advice is to benchmark the phases separately. The fact behind it
+  counted *stretches* of non-idle samples rather than distinct limits, so
+  one sample dipping under every threshold in the middle of a CPU-bound
+  run read as cpu -> free -> cpu, and the finding fired one line below a
+  verdict that named a single bottleneck. It now counts distinct limits.
+
+- **`netmesh` let a typo in the mesh config line reach the whole fleet.**
+  The `# key=value` line above the grid is the one thing every host
+  shares, and its numbers were cast where they were used -- `int()` inside
+  `Agent.__init__`, which runs on each host after netmesh copies itself
+  there. `size=big` therefore killed every agent with a traceback in its
+  own log, leaving `status` to report a fleet that simply would not start,
+  while every other malformed thing in that file gets a clean refusal.
+  The numeric keys are now checked once when the mesh is read, on the box
+  of whoever edited it, and `port` is range-checked like the host tokens.
+
+- **`logtriage` applied `--since`/`--until` to some records and not
+  others, silently.** A window can only be applied to a record that
+  carries a time; untimestamped ones are kept, because dropping them would
+  lose the stack traces and the dmesg tail that are the reason to run this
+  at all. Kept silently, they outranked the records the window did apply
+  to -- top of the report, marked `NEW` against a baseline they were never
+  in, under a header claiming a one-second span. The report now says how
+  many records the window could not be applied to. It only said anything
+  before when *every* record lacked a timestamp.
+
 - **Two netmesh tests shared a port pair with a test that needs it
   silent.** An agent is bounded by `--duration` rather than killed, so it
   can outlive the test that started it. `t_loss_columns_go_blank...`

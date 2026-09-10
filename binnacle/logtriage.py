@@ -843,6 +843,20 @@ def render_human(counter, rows, cut, args):
     if counter.no_ts and counter.no_ts == counter.n_records:
         out.append("             no timestamps found -- ordering by line "
                    "number")
+    elif counter.no_ts and (args.since_epoch or args.until_epoch):
+        # A window can only be applied to a record that carries a time.
+        # These were kept, because dropping a line for having no timestamp
+        # would lose the stack traces and the dmesg tail that are the
+        # reason to run this at all -- but kept silently they outranked
+        # the records the window did apply to, marked NEW against a
+        # baseline they were never in. Same rule as everywhere here: say
+        # what was done to the data.
+        out.append("             %s record%s carry no timestamp: --since/"
+                   "--until could not be applied to %s, and %s counted"
+                   % ("{:,}".format(counter.no_ts),
+                      "" if counter.no_ts == 1 else "s",
+                      "it" if counter.no_ts == 1 else "them",
+                      "it is" if counter.no_ts == 1 else "they are"))
     out.append("")
 
     if not rows:

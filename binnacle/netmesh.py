@@ -209,6 +209,26 @@ REPORT_FIELDS = [
 CONFIG_KEYS = ("size", "port", "pps", "pmtu", "mtu_ceiling", "pmtu_every",
                "flows", "hops")
 
+# What each numeric key in that line has to be, checked once when the mesh
+# is read.  The line is the one thing the whole fleet shares -- netmesh
+# copies itself and this file to every host -- so `size=big` used to reach
+# every agent and kill each one with a traceback in its own log, leaving
+# `status` to report a fleet that simply would not start. Caught here it
+# is one message, on the box of whoever edited the file.
+#
+# Only the port carries a range: the rest are clamped where they are used
+# (_packet bounds the payload, flows and hops are clamped to their maxima),
+# and a port is not, because it is handed to bind and sendto.
+CFG_NUMERIC = {
+    "size": (int, None, None),
+    "port": (int, 1, 65535),
+    "pps": (float, None, None),
+    "mtu_ceiling": (int, None, None),
+    "pmtu_every": (float, None, None),
+    "flows": (int, None, None),
+    "hops": (int, None, None),
+}
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -569,6 +589,19 @@ def load_mesh(path):
                 line_numbers.append(lineno)
     if not data_lines:
         die("%s: no grid found (just comments?)" % path)
+
+    for key in sorted(cfg):
+        if key not in CFG_NUMERIC:
+            continue
+        cast, low, high = CFG_NUMERIC[key]
+        try:
+            value = cast(cfg[key])
+        except ValueError:
+            die("%s: %s=%s is not a number" % (path, key, cfg[key]))
+        if (low is not None and value < low) or \
+                (high is not None and value > high):
+            die("%s: %s=%s is out of range (want %d-%d)"
+                % (path, key, cfg[key], low, high))
 
     rows = list(csv.reader(data_lines))
     header = rows[0]

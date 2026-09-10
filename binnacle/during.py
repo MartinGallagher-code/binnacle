@@ -1038,11 +1038,14 @@ def analyse(samples, meta=None):
     f["bound.free_share"] = shares.get(FREE) if states else None
     f["bound.changed"] = None
     if states:
-        seen = []
-        for st in states:
-            if not seen or seen[-1] != st:
-                seen.append(st)
-        f["bound.changed"] = len([s for s in seen if s != FREE]) > 1
+        # Distinct limits, not stretches of them.  Counting runs instead
+        # made one quiet sample in the middle of a CPU-bound run read as
+        # cpu -> free -> cpu, which is two stretches and one limit -- so
+        # SHIFTED fired on a run with a single bottleneck and told the
+        # reader to benchmark its phases separately, one line under a
+        # verdict that named that bottleneck. Going idle for a moment is
+        # not the limit moving; the limit moving is a different limit.
+        f["bound.changed"] = len(set(s for s in states if s != FREE)) > 1
 
     key = pick_key_metric(samples)
     f["key.metric"] = key[0] if key else None

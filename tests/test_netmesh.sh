@@ -822,6 +822,33 @@ t_a_port_outside_the_range_is_refused() {
     assert_contains "$(cat ok.tsv)" "2222"
 }
 
+t_a_garbled_config_line_is_refused_here() {
+    # The `# key=value` line above the grid is the one thing the whole
+    # fleet shares. A typo in it used to reach every agent and kill each
+    # one with a traceback in its own log, leaving `status` to report a
+    # fleet that would not start -- so it is checked when the mesh is
+    # read, on the box of whoever edited it.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5490 b=127.0.0.1:5491 --mesh m.csv >/dev/null 2>&1
+    for bad in "size=big" "hops=xx" "port=abc"; do
+        key="${bad%%=*}"
+        sed "s/${key}=[^ ]*/${bad}/" m.csv > bad.csv
+        set +e
+        out="$(nm agent --mesh bad.csv --host a --dir . 2>&1)"; rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "is not a number"
+        assert_not_contains "$out" "Traceback"
+    done
+    # A port that cannot exist is caught the same way.
+    sed 's/port=[^ ]*/port=99999/' m.csv > big.csv
+    set +e
+    out="$(nm agent --mesh big.csv --host a --dir . 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "out of range"
+}
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -867,4 +894,5 @@ run_test "the lowest metric default wins"      t_the_lowest_metric_default_wins
 run_test "a point-to-point default counts"     t_a_point_to_point_default_still_counts
 run_test "zero dest with a mask is not it"     t_a_zero_destination_that_is_not_a_default
 run_test "a bad port is refused"               t_a_port_outside_the_range_is_refused
+run_test "a garbled config line is refused"    t_a_garbled_config_line_is_refused_here
 finish
