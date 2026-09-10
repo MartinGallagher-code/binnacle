@@ -958,6 +958,166 @@ t_the_report_interval_bounds_what_the_agent_writes() {
     fi
 }
 
+
+# --- paths: the traceroute verb, and what it concludes ---------------------
+
+# A mesh whose host names are their own addresses, so the fake ssh shim
+# finds each host's sandbox: fleet.sh connects to the address.
+paths_mesh() {
+    install_fake_ssh
+    for h in "$@"; do fake_host "$h"; done
+    cd "$TEST_TMPDIR"
+    local spec=""
+    for h in "$@"; do spec="$spec $h=$h"; done
+    # shellcheck disable=SC2086  # deliberate: a built host list
+    nm gen $spec --mesh m.csv --pps 20 --no-pmtu >/dev/null
+}
+
+# Put a fake tracepath on HOST that prints the rest of the arguments.
+fake_tracepath() {
+    local host="$1"; shift
+    mkdir -p "$FAKE_ROOT/$host/bin"
+    { echo '#!/bin/sh'
+      for line in "$@"; do printf "printf '%%s\\\\n' %s\n" "$(printf '%q' "$line")"; done
+    } > "$FAKE_ROOT/$host/bin/tracepath"
+    chmod +x "$FAKE_ROOT/$host/bin/tracepath"
+}
+
+t_a_trace_is_parsed_into_hops() {
+    # tracepath's own shape: a 1?: local-MTU line that is not a hop, an
+    # unanswered hop, and a final one that reached.
+    paths_mesh h1 h2
+    fake_tracepath h1 \
+        '1?: [LOCALHOST]                      pmtu 1500' \
+        ' 1:  192.168.1.1                      0.123ms' \
+        ' 2:  10.0.0.1                         1.500ms' \
+        ' 3:  no reply' \
+        ' 4:  10.0.0.9                         9.000ms reached'
+    PATH="$FAKE_ROOT/h1/bin:$PATH" nm paths --mesh m.csv --pairs h1:h2 \
+        --ssh "$FAKE_BIN/ssh" --scp "$FAKE_BIN/scp" --output out >/dev/null 2>&1
+    assert_status $? 0
+    got="$(tail -n +2 out/hops.csv)"
+    # Four hops; the 1?: line is tracepath's MTU note, not a hop.
+    assert_eq "$(printf '%s\n' "$got" | wc -l | tr -d ' ')" "4"
+    # ms are recorded as microseconds, and an unanswered hop is a star.
+    assert_contains "$got" "h1,h2,1,192.168.1.1,123,,"
+    assert_contains "$got" "h1,h2,2,10.0.0.1,1500,,"
+    assert_contains "$got" "h1,h2,3,*,,,"
+}
+
+t_a_trace_that_could_not_run_is_not_a_route_with_no_hops() {
+    # The ssh never landed, so there is no route to report on. It used to
+    # come back as "0 hops" with the note "unparsed" and exit 0 -- a fact
+    # about the network, and the wrong one.
+    paths_mesh h1 h2
+    # h2 stops answering after the mesh is built.
+    fake_host_unreachable h2
+    set +e
+    out="$(nm paths --mesh m.csv --pairs h2:h1 --ssh "$FAKE_BIN/ssh" \
+             --scp "$FAKE_BIN/scp" --output out2 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "could not run the trace"
+    assert_contains "$out" "FAILED to trace"
+    assert_contains "$(cat out2/hops.csv)" "could not run the trace"
+    assert_not_contains "$(cat out2/hops.csv)" "unparsed"
+}
+
+t_two_routes_that_came_back_empty_are_not_a_finding() {
+    # Two things nobody could trace compare equal, and "they do not
+    # diverge" is a conclusion -- it sends you to look at load on a path
+    # that was never traced.
+    paths_mesh h1 h2
+    fake_host_unreachable h2
+    set +e
+    out="$(nm paths --mesh m.csv --compare h2:h1,h2:h1 --ssh "$FAKE_BIN/ssh" \
+             --scp "$FAKE_BIN/scp" --output out3 2>&1)"
+    set -e
+    assert_contains "$out" "Nothing to compare"
+    assert_not_contains "$out" "do not diverge"
+}
+
+t_compare_takes_two_pairs_and_says_so() {
+    # The flag's own help says two. A third used to be traced and then
+    # dropped without a word.
+    paths_mesh h1 h2 h3
+    set +e
+    out="$(nm paths --mesh m.csv --compare h1:h2,h1:h3,h3:h2 \
+             --ssh "$FAKE_BIN/ssh" --scp "$FAKE_BIN/scp" --output out4 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--compare takes two pairs"
+    # It refused before tracing anything.
+    assert_no_file "out4/hops.csv"
+}
+
+t_comparing_two_routes_names_where_they_part() {
+    paths_mesh h1 h2 h3
+    fake_tracepath h1 \
+        ' 1:  192.168.1.1                      0.100ms' \
+        ' 2:  10.0.0.1                         1.000ms' \
+        ' 3:  10.0.0.2                         2.000ms'
+    set +e
+    out="$(PATH="$FAKE_ROOT/h1/bin:$PATH" nm paths --mesh m.csv \
+             --compare h1:h2,h1:h3 --ssh "$FAKE_BIN/ssh" \
+             --scp "$FAKE_BIN/scp" --output out5 2>&1)"
+    set -e
+    assert_contains "$out" "PATH COMPARISON"
+    # Both traces come from h1 and are identical, so the finding is that
+    # the difference is not topological.
+    assert_contains "$out" "do not diverge"
+}
+
+
+# --- the two orchestrating verbs, end to end ------------------------------
+#
+# check and run are what the README leads with, and neither was exercised
+# past its argument parsing: the suite covered the verbs they call rather
+# than the calling. Both take --include-self, which makes every host local
+# and cuts ssh out entirely -- so these are real agents, real packets, two
+# ports on loopback, and no second machine. Ports 5500+ are this pair's
+# alone; an agent outlives its --duration and would otherwise answer a
+# later test's probes.
+
+t_check_runs_start_to_clean_and_says_what_it_found() {
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(timeout 120 "$PY" "$NM" check a=127.0.0.1:5500 b=127.0.0.1:5501 \
+             --include-self --for 4 --interval 2 --no-pmtu 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 0
+    # It went through the whole lifecycle...
+    assert_contains "$out" "agents running"
+    assert_contains "$out" "WHAT TO DO NEXT"
+    # ...measured both directions of the pair...
+    assert_contains "$out" "a            -> b"
+    assert_contains "$out" "b            -> a"
+    # ...and cleaned up after itself, which is the half that is easy to
+    # forget: check makes a temp directory and is meant to leave nothing.
+    assert_contains "$out" "clean on 2 hosts"
+}
+
+t_run_measures_an_existing_mesh_and_stops_the_agents() {
+    cd "$TEST_TMPDIR"
+    "$PY" "$NM" gen a=127.0.0.1:5502 b=127.0.0.1:5503 --mesh r.csv \
+        --pps 40 --no-pmtu >/dev/null
+    set +e
+    out="$(timeout 120 "$PY" "$NM" run --mesh r.csv --include-self --for 4 \
+             --interval 2 --reports reports 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 0
+    assert_contains "$out" "WHAT TO DO NEXT"
+    # run leaves the reports where it was told to put them, unlike check.
+    assert_file_exists "reports/a.csv"
+    assert_file_exists "reports/b.csv"
+    # And the agents are stopped, not left probing into the next run.
+    assert_contains "$out" "stop on 2 hosts"
+}
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -974,6 +1134,13 @@ run_test "an unreachable host reaches the rc"  t_a_verb_that_could_not_reach_a_h
 run_test "a reachable fleet still exits zero"  t_a_verb_that_reached_every_host_still_exits_zero
 run_test "impossible numbers are refused"      t_numbers_that_cannot_mean_anything_are_refused
 run_test "the report interval bounds output"   t_the_report_interval_bounds_what_the_agent_writes
+run_test "a trace is parsed into hops"         t_a_trace_is_parsed_into_hops
+run_test "a trace that could not run says so"  t_a_trace_that_could_not_run_is_not_a_route_with_no_hops
+run_test "two empty routes are not a finding"  t_two_routes_that_came_back_empty_are_not_a_finding
+run_test "--compare takes two pairs"           t_compare_takes_two_pairs_and_says_so
+run_test "comparing names where they part"     t_comparing_two_routes_names_where_they_part
+run_test "check runs start to clean"           t_check_runs_start_to_clean_and_says_what_it_found
+run_test "run measures and stops the agents"   t_run_measures_an_existing_mesh_and_stops_the_agents
 run_test "summarize runs from fixtures"        t_summarize_reads_fixtures_without_a_network
 run_test "clean run says so plainly"           t_clean_run_says_the_network_is_fine
 run_test "latency under load vs the baseline"   t_latency_under_load_is_reported_against_the_idle_baseline

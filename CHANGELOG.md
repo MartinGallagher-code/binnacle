@@ -32,6 +32,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`netmesh paths` reported an unreachable host as a route with no hops
+  in it.** The ssh exit status was captured and never read, so a trace
+  that never ran came back as `0 hops` with the note `unparsed`, and the
+  verb exited 0. "Unparsed" is a claim about output that arrived; nothing
+  had. The note now names what happened, and a trace that could not run
+  reaches the exit status.
+
+- **`netmesh paths --compare` drew a conclusion from two routes nobody
+  traced.** Two empty paths compare equal, and equality was reported as a
+  finding: *"The two routes do not diverge, so the difference is not
+  topological -- look at load or queueing on the shared path."* -- sending
+  you to investigate load on a path that was never traced. It says what
+  actually happened now. A route that is a shorter prefix of the other is
+  also no longer called identical: they share every hop the shorter one
+  has, and one of them carries on.
+
+- **`netmesh paths --compare` silently used two of however many pairs it
+  was given.** Its own help says "two pairs to compare hop by hop", and a
+  third was traced and then dropped without a word. Refused now, naming
+  what was passed.
+
 - **`muster --stale-lock 0` broke a lock one second old.** The break test
   is `age > stale`, so a zero makes every lock breakable the instant it is
   taken -- `muster take --stale-lock 0` reported *"breaking a stale lock,
