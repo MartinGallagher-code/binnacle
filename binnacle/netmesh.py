@@ -3350,6 +3350,12 @@ def cmd_paths(args, mesh=None, fleet=None):
                     die("--compare wants src:dst pairs, got %r" % part)
                 s, d = part.split(":", 1)
                 wanted.append((s.strip(), d.strip()))
+        # The help says two, and the comparison below reads exactly two.
+        # A third used to be traced and then dropped without a word.
+        if len(wanted) != 2:
+            die("--compare takes two pairs -- the sick one and a healthy "
+                "one from the same source -- got %d: %s"
+                % (len(wanted), " ".join("%s:%s" % p for p in wanted)))
     elif args.pairs:
         for part in args.pairs.split(","):
             if ":" not in part:
@@ -3372,6 +3378,7 @@ def cmd_paths(args, mesh=None, fleet=None):
             die("unknown destination host %r" % d)
 
     results = {}
+    failed = []
 
     def trace(pair):
         s, d = pair
@@ -3390,21 +3397,36 @@ def cmd_paths(args, mesh=None, fleet=None):
             raw = os.path.join(outdir, "%s__%s.txt" % (s, d))
             with io.open(raw, "w", encoding="utf-8") as rf:
                 rf.write(out + "\n")
-            hops = parse_hops(out)
+            hops = parse_hops(out) if rc == 0 else []
             results[(s, d)] = hops
-            note = "" if hops else ("no-trace-tool" if "no-trace-tool" in out
-                                    else "unparsed")
+            if rc != 0:
+                # The trace never ran. "0 hops, unparsed" reads as a route
+                # that answered nothing, which is a fact about the network
+                # rather than about ssh, and it is the wrong one.
+                failed.append((s, d))
+                note = "could not run the trace on %s (exit %s)" % (s, rc)
+            elif hops:
+                note = ""
+            elif "no-trace-tool" in out:
+                note = "no-trace-tool"
+            else:
+                note = "unparsed"
             if not hops:
                 w.writerow([s, d, "", "", "", "", note])
             for n, addr, rtt, mtu in hops:
                 w.writerow([s, d, n, addr, rtt, mtu, ""])
-            log("  %s -> %s: %d hops  (%s)" % (s, d, len(hops), raw))
+            log("  %s -> %s: %s  (%s)"
+                % (s, d, note if note else "%d hops" % len(hops), raw))
 
     log("[%s] wrote %s" % (PROG, hops_path))
 
-    if args.compare and len(wanted) >= 2:
+    if args.compare:
         _compare_paths(wanted, results)
-    return 0
+    if failed:
+        log("[%s] FAILED to trace from %d of %d: %s"
+            % (PROG, len(failed), len(wanted),
+               " ".join("%s->%s" % p for p in failed)))
+    return 1 if failed else 0
 
 
 def _compare_paths(wanted, results):
@@ -3414,6 +3436,19 @@ def _compare_paths(wanted, results):
     a, b = results.get((s1, d1), []), results.get((s2, d2), [])
     log("")
     log("  PATH COMPARISON")
+    # Two routes nobody could trace compare equal, and "they do not
+    # diverge" is a finding -- it sends you off to look at load on a path
+    # that was never traced. Say what actually happened instead.
+    if not a or not b:
+        empty = [n for n, hops in (("%s -> %s" % (s1, d1), a),
+                                   ("%s -> %s" % (s2, d2), b)) if not hops]
+        log("    Nothing to compare: no hops came back for %s."
+            % " or ".join(empty))
+        log("    Look at the note column in hops.csv -- an unreachable "
+            "source or a")
+        log("    host with no tracepath/traceroute is not a route with no "
+            "hops in it.")
+        return
     log("    %-28s %-28s" % ("%s -> %s" % (s1, d1), "%s -> %s" % (s2, d2)))
     n = max(len(a), len(b))
     first_diff = None
@@ -3431,6 +3466,13 @@ def _compare_paths(wanted, results):
         log("    The routes are identical up to hop %d and diverge there."
             % (first_diff - 1))
         log("    That hop is where to look first.")
+    elif len(a) != len(b):
+        longer, shorter = (1, 2) if len(a) > len(b) else (2, 1)
+        log("")
+        log("    Every hop they share is the same, but route %d runs %d hop"
+            "%s further." % (longer, abs(len(a) - len(b)),
+                             "" if abs(len(a) - len(b)) == 1 else "s"))
+        log("    They do not diverge so much as one of them carries on.")
     else:
         log("")
         log("    The two routes do not diverge, so the difference is not "
