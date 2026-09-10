@@ -33,6 +33,21 @@ for f in "${files[@]}"; do
     echo
 done
 
+# Not a suite of cases: one check across every tool at once, so it only
+# runs when they all do.  It holds every numeric option in the package to
+# a decision -- refuse a zero, or say why zero means something -- because
+# five bugs in one audit were the same number typed where it could not
+# mean what it said.
+if [ $# -eq 0 ]; then
+    echo "numeric options"
+    if "$PY" check_numeric_args.py; then
+        echo
+    else
+        total_failed=$((total_failed + 1))
+        echo
+    fi
+fi
+
 if [ "$total_failed" -gt 0 ]; then
     echo "$total_failed suite(s) failed"
     exit 1

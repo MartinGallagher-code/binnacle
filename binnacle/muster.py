@@ -1307,6 +1307,19 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.cmd:
         args = parser.parse_args(["status"] + argv)
+    # A lock that is stale the instant it is taken is not a lock. The
+    # break test is `age > stale`, so --stale-lock 0 makes every lock
+    # breakable at once -- it reported "breaking a stale lock, 0s old"
+    # and took the pool out from under whoever was holding it, which is
+    # the one thing this tool exists to prevent.
+    if getattr(args, "stale_lock", None) is not None and args.stale_lock <= 0:
+        die("--stale-lock wants a positive number of seconds, got %g: a "
+            "lock that is stale as soon as it is taken is not a lock"
+            % args.stale_lock)
+    # Zero here is meaningful -- try once and give up rather than block --
+    # but a negative deadline is already past.
+    if getattr(args, "lock_timeout", None) is not None and args.lock_timeout < 0:
+        die("--lock-timeout cannot be negative, got %g" % args.lock_timeout)
     return VERBS[args.cmd](args)
 
 

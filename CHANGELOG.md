@@ -32,6 +32,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`muster --stale-lock 0` broke a lock one second old.** The break test
+  is `age > stale`, so a zero makes every lock breakable the instant it is
+  taken -- `muster take --stale-lock 0` reported *"breaking a stale lock,
+  0s old"* and took the pool out from under whoever was holding it. That
+  is the one thing this tool exists to prevent: the lock is what stops two
+  people being handed the same item. Refused now, along with a negative
+  `--lock-timeout`; zero there stays legal, since "try once rather than
+  block" is a real answer.
+
+- **`netmesh gen` wrote a mesh netmesh's own validator refuses.**
+  `CFG_NUMERIC` has bounded `port` since it was written, but only on the
+  *read* path -- so `gen --port 0` exited 0, wrote the file, and every
+  later command then rejected it with that same validator's message,
+  "port=0 is out of range (want 1-65535)". The check is one function now,
+  run when a mesh is read and when one is written.
+
 - **`netmesh --interval 0` turned every agent in the fleet into a
   disk-filling loop.** The agent's report loop advances
   `next_report += self.interval` and falls back to `now + self.interval`,
@@ -363,6 +379,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uncomment. Everything after the first `#` is now carried over verbatim.
 
 ### Added
+
+- **`tests/check_numeric_args.py`, so this class of bug cannot come back
+  quietly.** Five bugs in one audit were the same shape: a number a user
+  can type that the tool then acts on as if it made sense -- `agree
+  --first 0` running the whole fleet instead of the canary, `during --
+  true` exiting 1 because a successful `0` read as "no status",
+  `resolve --timeout 0` announcing a DNS outage, `netmesh --interval 0`
+  writing 247,637 report rows in three seconds onto every host, `muster
+  --stale-lock 0` breaking a live lock. Fixing five instances does not
+  stop the sixth.
+
+  The check finds every `type=int`/`type=float` option on every parser in
+  the package -- 65 of them -- and requires each to be classified: either
+  the tool must refuse a zero, which it verifies by running the tool, or
+  the flag is listed with the reason zero means something there. A new
+  numeric flag fails the check until somebody decides which it is. It runs
+  from `tests/run_tests.sh`.
 
 - **`dredge`, an eleventh instrument: bring that file back from every
   host, kept apart.** Something is wrong on some of forty machines and

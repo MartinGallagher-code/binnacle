@@ -230,6 +230,28 @@ CFG_NUMERIC = {
 }
 
 
+def check_cfg(cfg, where):
+    """Hold a run config to the table above, naming WHERE it came from.
+
+    Run when a mesh is read *and* when one is written.  Reading alone was
+    not enough: `gen --port 0` exited 0, wrote the file, and every later
+    command then refused it with this function's own message -- the file
+    was rejected by the tool that had just reported writing it.
+    """
+    for key in sorted(cfg):
+        if key not in CFG_NUMERIC:
+            continue
+        cast, low, high = CFG_NUMERIC[key]
+        try:
+            value = cast(cfg[key])
+        except ValueError:
+            die("%s: %s=%s is not a number" % (where, key, cfg[key]))
+        if (low is not None and value < low) or \
+                (high is not None and value > high):
+            die("%s: %s=%s is out of range (want %d-%d)"
+                % (where, key, cfg[key], low, high))
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -590,18 +612,7 @@ def load_mesh(path):
     if not data_lines:
         die("%s: no grid found (just comments?)" % path)
 
-    for key in sorted(cfg):
-        if key not in CFG_NUMERIC:
-            continue
-        cast, low, high = CFG_NUMERIC[key]
-        try:
-            value = cast(cfg[key])
-        except ValueError:
-            die("%s: %s=%s is not a number" % (path, key, cfg[key]))
-        if (low is not None and value < low) or \
-                (high is not None and value > high):
-            die("%s: %s=%s is out of range (want %d-%d)"
-                % (path, key, cfg[key], low, high))
+    check_cfg(cfg, path)
 
     rows = list(csv.reader(data_lines))
     header = rows[0]
@@ -662,6 +673,8 @@ def load_mesh(path):
 
 
 def write_mesh(path, hosts, addrs, ports, pingonly, rate, cfg):
+    # Refuse it here rather than writing a file this tool will not read.
+    check_cfg(cfg, path)
     cfg_bits = " ".join("%s=%s" % (k, cfg[k]) for k in CONFIG_KEYS if k in cfg)
     default_port = int(cfg.get("port", DEFAULT_PORT))
 
