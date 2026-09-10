@@ -517,6 +517,58 @@ t_an_unmakeable_pull_dir_does_not_end_the_run() {
     assert_not_contains "$out" "Traceback"
 }
 
+
+t_a_guard_that_reads_zero_as_unset_is_not_a_guard() {
+    # --first is the canary you run before the fleet and --limit is the
+    # refusal that stops a wide fan-out. Both were `if args.X`, so a zero
+    # -- an unset variable in a script, usually -- read as "not given":
+    # --first 0 ran every host instead of one, and --limit 0 waved the
+    # whole fleet through.
+    install_fake_ssh
+    for h in web01 web02 web03; do fake_host "$h"; done
+    for v in 0 -1; do
+        set +e
+        out="$(ag -H web01,web02,web03 --first "$v" --quiet -- echo hi 2>&1)"
+        rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "--first wants at least 1"
+    done
+    set +e
+    out="$(ag -H web01,web02,web03 --limit 0 --quiet -- echo hi 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--limit wants at least 1"
+}
+
+t_the_canary_still_limits_when_it_is_given_a_number() {
+    install_fake_ssh
+    for h in web01 web02 web03; do fake_host "$h"; done
+    out="$(ag -H web01,web02,web03 --first 2 --quiet -- echo hi 2>&1)"
+    assert_contains "$out" "2 hosts"
+    # And the wide-run guard still refuses above its number.
+    set +e
+    out="$(ag -H web01,web02,web03 --limit 2 --quiet -- echo hi 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "refusing to run across 3 hosts"
+}
+
+t_other_numbers_that_cannot_mean_anything_are_refused() {
+    install_fake_ssh
+    fake_host web01
+    for pair in "--jobs 0" "--max-output 0" "--timeout 0"; do
+        set +e
+        # shellcheck disable=SC2086  # deliberate: a flag and its value
+        out="$(ag -H web01 $pair --quiet -- echo hi 2>&1)"
+        rc=$?
+        set -e
+        assert_status $rc 2
+    done
+}
+
 echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
@@ -550,4 +602,7 @@ run_test "a port outside the range is refused" t_a_port_outside_the_range_is_ref
 run_test "a pull that brings nothing is named" t_a_pull_that_brings_nothing_back_is_reported
 run_test "a pull that works is not a finding" t_a_pull_that_works_is_not_a_finding
 run_test "an unmakeable pull dir is survived" t_an_unmakeable_pull_dir_does_not_end_the_run
+run_test "a zero guard is not a guard"        t_a_guard_that_reads_zero_as_unset_is_not_a_guard
+run_test "the canary still limits"            t_the_canary_still_limits_when_it_is_given_a_number
+run_test "other impossible numbers refused"   t_other_numbers_that_cannot_mean_anything_are_refused
 finish

@@ -34,7 +34,9 @@ Options:
   --keep-remote       leave the pushed files behind instead of cleaning up
   --remote-dir DIR    where pushed files go           (AGREE_REMOTE_DIR)
   --first N           only the first N hosts -- the canary before the fleet
-  --limit N           refuse to run wider than N hosts without --yes
+  --limit N           refuse to run wider than N hosts without --yes; both
+                      of these want at least 1, because a guard that reads
+                      a zero as "not given" is a guard that is not there
   --dry-run           print the ssh command per host and stop
   --yes               proceed past the mutation guard
   --full              print each group's output instead of diffing it
@@ -418,7 +420,7 @@ def collect_hosts(args):
             continue
         seen.add(h.name)
         hosts.append(h)
-    if args.first:
+    if args.first is not None:
         hosts = hosts[:args.first]
     return hosts
 
@@ -1207,7 +1209,7 @@ def cmd_run(args):
 
 def run_fleet(args, command, label=None):
     hosts = collect_hosts(args)
-    if args.limit and len(hosts) > args.limit and not args.yes:
+    if args.limit is not None and len(hosts) > args.limit and not args.yes:
         die("refusing to run across %d hosts (--limit %d); pass --yes to "
             "proceed" % (len(hosts), args.limit))
     check_danger(command, args)
@@ -1363,6 +1365,26 @@ def build_parser():
 
 
 def apply_presets(args):
+    # Numbers that cannot mean what they say, refused before anything is
+    # contacted.  Two of these guard the fleet rather than the run, and
+    # both used to disable themselves on a zero: `if args.first` and
+    # `if args.limit` read 0 as "not given", so `--first 0` -- an unset
+    # variable in a script, usually -- ran the whole fleet instead of the
+    # canary, and `--limit 0` waved the fan-out through instead of
+    # refusing it.  A negative was quieter still: `--first -1` slices to
+    # hosts[:-1], which is every host but the last and looks like it
+    # worked.
+    for name, low in (("first", 1), ("limit", 1), ("jobs", 1),
+                      ("max_output", 1), ("timeout", None)):
+        v = getattr(args, name, None)
+        if v is None:
+            continue
+        if low is None:
+            if v <= 0:
+                die("--timeout must be positive, got %s" % v)
+        elif v < low:
+            die("--%s wants at least %d, got %d"
+                % (name.replace("_", "-"), low, v))
     # A pattern that will not compile is refused here, naming the flag and
     # the reason, rather than surfacing as a traceback from inside the
     # per-host normalizer once the fan-out is already underway.

@@ -228,6 +228,28 @@ t_records_a_window_cannot_filter_are_disclosed() {
     assert_not_contains "$out" "could not be applied"
 }
 
+
+t_a_split_outside_the_log_is_refused() {
+    # --split is a fraction of the log. Outside 0..1 it put the baseline
+    # boundary outside the log's own time range and said so in a
+    # perfectly plausible line -- "baseline: everything before 23:59:36"
+    # for a log ending at 13:59:48 -- making the whole file baseline, so
+    # every NEW mark vanished and the findings that matter quietly lost
+    # the score that comes with being new.
+    gen_log "$TEST_TMPDIR/l.log"
+    for v in 2 -1 0 1; do
+        set +e
+        out="$(lt --split "$v" "$TEST_TMPDIR/l.log" 2>&1)"
+        rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "--split is a fraction"
+    done
+    # And a real fraction still splits.
+    out="$(lt --split 0.5 "$TEST_TMPDIR/l.log" 2>&1)"
+    assert_contains "$out" "NEW"
+}
+
 echo "logtriage"
 run_test "--csv swallowing the log is caught" t_csv_swallowing_the_log_is_diagnosed
 run_test "uuid masked before hex"             t_mask_order_uuid_before_hex
@@ -285,4 +307,5 @@ run_test "an address masks whole"             t_an_address_is_masked_whole_or_no
 run_test "a mac is not eaten by the clock"    t_a_mac_is_not_eaten_by_the_clock_mask
 run_test "the timestamps still mask"          t_the_timestamps_still_mask
 run_test "an unfilterable record is disclosed" t_records_a_window_cannot_filter_are_disclosed
+run_test "a split outside the log is refused" t_a_split_outside_the_log_is_refused
 finish

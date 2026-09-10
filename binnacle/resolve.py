@@ -1618,6 +1618,14 @@ def main(argv=None):
     NO_EXEC = args.no_exec
     args.min_severity = {"info": INFO, "warn": WARN,
                          "critical": CRITICAL}[args.min_severity]
+    # canonical copy: binnacle/skew.py, same block for the same flags.
+    # A zero timeout is not a fast query, it is no query: every resolver
+    # then fails to answer and this tool says so in as many words --
+    # "no resolver on this box is answering" -- about a box whose DNS is
+    # fine. A wrong verdict from a typo is worse than no verdict.
+    for name in ("timeout", "attempts"):
+        if getattr(args, name) <= 0:
+            die("--%s must be positive" % name)
     args.types = [t.strip().upper() for t in args.types.split(",")
                   if t.strip()]
     for t in args.types:

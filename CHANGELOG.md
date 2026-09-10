@@ -8,6 +8,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`agree`'s two fleet guards disabled themselves on a zero.** `--first`
+  is the canary you run before the fleet and `--limit` is the refusal
+  that stops a wide fan-out; both were written `if args.first` / `if
+  args.limit`, so a zero read as "not given". `--first 0` -- an unset
+  variable in a script, usually -- ran the *whole fleet* instead of one
+  host, and `--limit 0` waved the fan-out through instead of refusing
+  it. A negative was quieter still: `--first -1` slices to `hosts[:-1]`,
+  which is every host but the last and looks exactly like it worked.
+  Both now want at least 1 and say so, and the other numbers that cannot
+  mean anything (`--jobs 0`, `--max-output 0`, `--timeout 0`) are
+  refused with them.
+
+- **`resolve --timeout 0` manufactured a DNS outage.** A zero timeout is
+  not a fast query, it is no query -- so every resolver "failed to
+  answer" and the tool announced, CRITICAL, that *no resolver on this
+  box is answering. Every timeout you are chasing downstream starts
+  here*, about a box whose DNS was fine. `skew`, which is the same shape
+  of tool with the same two flags, has refused both since it was
+  written; `resolve` now carries the same check in the same words.
+
+- **`logtriage --split` accepted a fraction outside the log.** It is a
+  fraction of the log, and outside 0..1 it put the baseline boundary
+  outside the log's own time range -- printing a perfectly plausible
+  "baseline: everything before 23:59:36" for a log that ends at
+  13:59:48. The whole file then counted as baseline, so every `NEW` mark
+  disappeared and the findings that matter quietly lost the score that
+  comes with being new. It is refused now.
+
 - **`agree --pull` failed silently.** The whole point of `--pull` is to
   bring the files back, and `pull_files`'s exit status was discarded: a
   glob that matched nothing, an scp that failed, a `--pull-dir` that
