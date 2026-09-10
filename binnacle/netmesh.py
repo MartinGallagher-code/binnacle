@@ -1995,8 +1995,9 @@ fi
             "logf": LOG_NAME}
         return fleet.sh(host, script)
 
-    fleet.each(status)
-    return 0
+    # each() already said "FAILED on N/M hosts"; saying it and then
+    # exiting 0 tells a script the opposite of what it printed.
+    return 1 if fleet.each(status) else 0
 
 
 def cmd_stop(args, mesh=None, fleet=None):
@@ -2007,8 +2008,10 @@ def cmd_stop(args, mesh=None, fleet=None):
         return fleet.sh(host, _kill_block(fleet.dir_for(host))
                         + '\necho "$status"\n')
 
-    fleet.each(stop, label="stop")
-    return 0
+    # A stop that could not reach a host leaves an agent running there,
+    # and a stale agent goes on sending traffic into the next run's
+    # measurements. That is the last thing to report as success.
+    return 1 if fleet.each(stop, label="stop") else 0
 
 
 def cmd_clean(args, mesh=None, fleet=None):
@@ -2022,8 +2025,8 @@ echo "$status cleaned"
 """ % shlex.quote(fleet.dir_for(host))
         return fleet.sh(host, script)
 
-    fleet.each(clean, label="clean", quiet=args.quiet)
-    return 0
+    # Same for clean: the remote directory is still there.
+    return 1 if fleet.each(clean, label="clean", quiet=args.quiet) else 0
 
 
 def cmd_collect(args, mesh=None, fleet=None, quiet=False):
@@ -2044,7 +2047,9 @@ def cmd_collect(args, mesh=None, fleet=None, quiet=False):
         return 0, "%d rows" % max(0, n)
 
     failed = fleet.each(fetch, label=None if quiet else "collect", quiet=True)
-    return failed
+    # Not the raw count: an exit status is one byte, so 256 failed hosts
+    # would have come back as 0 -- success, from a total failure.
+    return 1 if failed else 0
 
 
 def cmd_logs(args, mesh=None, fleet=None):
@@ -2056,8 +2061,7 @@ def cmd_logs(args, mesh=None, fleet=None):
                         % (args.lines,
                            shlex.quote(fleet.rpath(host, LOG_NAME))))
 
-    fleet.each(get)
-    return 0
+    return 1 if fleet.each(get) else 0
 
 
 # ---------------------------------------------------------------------------
@@ -2892,9 +2896,13 @@ def _subnet(host, hosts):
 
 def cmd_summarize(args, mesh=None, fleet=None):
     mesh = mesh or (load_mesh(args.mesh) if os.path.isfile(args.mesh) else None)
+    uncollected = 0
     if not args.no_collect and mesh is not None:
         fleet = fleet or Fleet(mesh, args)
-        cmd_collect(args, mesh, fleet, quiet=True)
+        # Held rather than acted on: a summary of the hosts that did answer
+        # is still worth printing, but it is a summary of a partial fleet
+        # and must not go out under a clean exit status.
+        uncollected = cmd_collect(args, mesh, fleet, quiet=True)
 
     rows = read_reports(args.reports)
     if not rows:
@@ -3110,7 +3118,7 @@ def cmd_summarize(args, mesh=None, fleet=None):
         log("[%s] grids written to %s/" % (PROG, args.grid))
     if args.json:
         _emit_json(measured, med, jit, sent, recv, black)
-    return 0
+    return 1 if uncollected else 0
 
 
 def _write_grids(outdir, pairs, hosts):
@@ -3220,9 +3228,12 @@ def cmd_run(args, mesh=None, fleet=None):
 
     if split is not None:
         args.load_split = split
-    cmd_summarize(args, mesh, fleet)
-    cmd_stop(args, mesh, fleet)
-    return 0
+    # Both of these report real trouble -- a fleet only partly collected,
+    # agents that would not stop -- and both used to be thrown away under
+    # a hardcoded 0.
+    summarised = cmd_summarize(args, mesh, fleet)
+    stopped = cmd_stop(args, mesh, fleet)
+    return 1 if (summarised or stopped) else 0
 
 
 def cmd_check(args):
@@ -3251,12 +3262,14 @@ def cmd_check(args):
     try:
         log("[%s] probing for %s" % (PROG, fmt_secs(args.for_secs)))
         time.sleep(args.for_secs + 1.0)
-        cmd_summarize(args, mesh, fleet)
+        rc = cmd_summarize(args, mesh, fleet) or rc
     except KeyboardInterrupt:
         log("[%s] interrupted" % PROG)
     finally:
         args.quiet = True
-        cmd_clean(args, mesh, fleet)
+        # Agents and remote directories left behind on a host are worth a
+        # non-zero status: the next run inherits them.
+        rc = cmd_clean(args, mesh, fleet) or rc
         if args.keep_mesh:
             shutil.copy(args.mesh, args.keep_mesh)
             log("[%s] mesh kept at %s (re-run it with: %s run --mesh %s)"
@@ -3450,8 +3463,10 @@ def cmd_doctor(args, mesh=None, fleet=None):
         return fleet.sh(host, DOCTOR_SCRIPT, timeout=60)
 
     log("")
-    fleet.each(check, label="remote checks")
-    return 0
+    # doctor exists to answer "can this fleet be reached?". Answering
+    # "no, on three of them" and exiting 0 makes `doctor && start` run
+    # against a fleet doctor just said was broken.
+    return 1 if fleet.each(check, label="remote checks") else 0
 
 
 def cmd_selftest(args):
@@ -3757,6 +3772,41 @@ def cmd_full_help(parser, sub):
     return 0
 
 
+# Numbers that cannot mean what they say, refused on the box where they
+# were typed rather than on every host in the fleet.  This is the same
+# argument the CFG_NUMERIC comment makes about the mesh config line, and
+# these are the two keys that comment does not cover: it justifies leaving
+# the rest unbounded because they are clamped where they are used, and
+# neither of these is.
+#
+#   --pps 0 or less    every cell of the grid comes out empty, `gen` still
+#                      reports success ("2 ordered pairs, -5 probes/s
+#                      each"), and every later command refuses the file it
+#                      wrote -- naming empty cells, which is true and is
+#                      not the cause.
+#   --interval 0       the agent's report loop has no wait left in it, so
+#                      it writes a report row per pass: 247,637 rows and
+#                      11.7 MB from a three-second run, measured, on every
+#                      host in the fleet and then collected back.
+#
+# Deliberately not here: size, flows and hops, which CFG_NUMERIC documents
+# as clamped where they are used, and pmtu_every, whose zero turns out to
+# be harmless (a run with it is byte-for-byte a normal run).
+_POSITIVE = ("pps", "interval", "for_secs", "jobs")
+_FLAG_NAMES = {"for_secs": "--for"}
+
+
+def _check_numbers(args):
+    for name in _POSITIVE:
+        v = getattr(args, name, None)
+        if v is not None and v <= 0:
+            die("%s wants a positive number, got %g"
+                % (_FLAG_NAMES.get(name, "--" + name.replace("_", "-")), v))
+    dur = getattr(args, "duration", None)
+    if dur is not None and dur < 0:
+        die("--duration cannot be negative, got %g" % dur)
+
+
 def main(argv=None):
     _stdio_safe()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -3770,6 +3820,7 @@ def main(argv=None):
     if getattr(args, "func", None) is None:
         parser.print_help()
         return 2
+    _check_numbers(args)
     # `check` needs to know whether --reports was given, because it puts
     # reports in a temp dir and deletes them unless asked not to.
     args.reports_given = any(a == "--reports" or a.startswith("--reports=")
