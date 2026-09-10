@@ -334,19 +334,28 @@ t_a_device_whose_counters_reset_leaves_the_row_blank() {
         > "$TEST_TMPDIR/proc/meminfo"
     printf '   8 0 sda 900000 0 8000000 500000 700000 0 6000000 400000 0 900000 1400000\n' \
         > "$TEST_TMPDIR/proc/diskstats"
+    # Built whole and moved into place: the sampler is reading this file
+    # while the reset rewrites it, and three appends leave a window where
+    # eth0 is simply absent -- which is a different fact from a reset.
     netdev() {
-        printf 'Inter-|   Receive                                |  Transmit\n' > "$TEST_TMPDIR/proc/net/dev"
-        printf ' face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n' \
-            >> "$TEST_TMPDIR/proc/net/dev"
-        printf '  eth0: %s 0 0 0 0 0 0 %s 0 0 0 0 0 0\n' "$1 $2" "$3 $4" \
-            >> "$TEST_TMPDIR/proc/net/dev"
+        {
+            printf 'Inter-|   Receive                                |  Transmit\n'
+            printf ' face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n'
+            printf '  eth0: %s 0 0 0 0 0 0 %s 0 0 0 0 0 0\n' "$1 $2" "$3 $4"
+        } > "$TEST_TMPDIR/proc/net/dev.new"
+        mv "$TEST_TMPDIR/proc/net/dev.new" "$TEST_TMPDIR/proc/net/dev"
     }
     netdev 900000000 900000 800000000 800000
-    ( sleep 1.2
+    # The reset lands a second in, with three seconds of sampling left
+    # after it.  It used to land at 1.2s of a 2s run, which is fine on an
+    # idle box and a coin toss on a loaded CI runner: the reset only has
+    # to slip past the last sample for the case to see no straddling pair
+    # at all.  Only one sample has to span it, so the slack is free.
+    ( sleep 1
       printf '   8 0 sda 12 0 90 8 5 0 40 3 0 11 19\n' \
           > "$TEST_TMPDIR/proc/diskstats"
       netdev 500 5 400 4 ) &
-    du_ --seconds 2 --interval 0.6 --proc-root "$TEST_TMPDIR/proc" \
+    du_ --seconds 4 --interval 0.5 --proc-root "$TEST_TMPDIR/proc" \
         --sys-root "$TEST_TMPDIR/nosys" --no-procs \
         --samples "$TEST_TMPDIR/s.csv" --quiet >/dev/null 2>&1
     wait

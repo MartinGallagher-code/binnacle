@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failing assertion in the test suite could lose its own reason.**
+  Nine cases across three suites end a hand-rolled check with `fail
+  "why"`, on the strength of a helper that was never defined. The case
+  still failed -- on 127, "command not found" -- but the sentence saying
+  what had gone wrong went with it, which is exactly the moment you need
+  it. `fail` is now a helper beside `_fail`.
+
+- **The `during` counter-reset case raced its own fixture.** It rewrote
+  the disk and network counters 1.2s into a 2s run and required a sample
+  to straddle that; on a loaded runner the rewrite slips past the last
+  sample and there is nothing to straddle. The reset now lands a second
+  into a four-second run, and the `/proc/net/dev` fixture is built whole
+  and moved into place rather than appended to under the sampler's nose.
+
 - **`logtriage --since -30m` was refused by the tool that recommends it.**
   A value beginning with `-` looks like an option to argparse, so the
   relative spelling every error message in this tool suggests was
