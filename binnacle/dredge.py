@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Martin J. Gallagher
-"""dredge.py -- bring a file back from every host, named so you can tell them apart.
+"""dredge.py -- bring an answer back from every host, named so you can tell them apart.
 
 Usage: dredge /var/log/syslog --hosts hosts.txt      one file from every host
+       dredge --cmd 'ss -s' --hosts hosts.txt        what a command says, instead
        dredge /var/log/syslog --tail 200 -H 'web[01-40]'   only the last 200 lines
        dredge /etc/nginx --hosts hosts.txt           a whole directory each
        dredge /var/log/app.log --since -1h           only what changed lately
-       dredge /var/log/app.log --since -1h --append  add it to what is here
+       dredge --cmd 'uptime' --tag before --hosts h  labelled, to keep runs apart
 
 Options:
+  -c, --cmd CMD       a bash command to run on each host; what it says comes
+                      back as the artifact, in place of a file
+  -t, --tag NAME      label this run's artifacts, so several runs can share
+                      one directory and still be told apart
   -H, --host TOKEN    hosts, repeatable; ranges expand (`web[01-40]`)
       --hosts FILE    a server list, one per line -- reachable's output works
   -d, --dir DIR       where collected files land   (default: dredge-<stamp>)
@@ -25,7 +30,7 @@ Options:
       --timeout S     ssh timeout per host                  (DREDGE_TIMEOUT)
       --user NAME     ssh user                              (DREDGE_USER)
       --ssh CMD       ssh command                           (DREDGE_SSH)
-      --csv [PATH]    host,remote_path,local_path,bytes,outcome
+      --csv [PATH]    host,source,local_path,bytes,outcome,exit_status
       --dry-run       print the remote command and stop
       --quiet         no progress and no summary, just the findings
 
@@ -58,6 +63,34 @@ Only the part you need, and only if it changed
   is the instrument for that question, and worth a run across the fleet
   before trusting a tight `--since` window.
 
+A file or a command, the same way round
+  Half of what you want off a fleet is in a file and half of it is only
+  ever printed: `ss -s`, `sysctl -a`, `rpm -q`, `systemctl is-failed`.
+  `--cmd` runs one bash command on each host and lands what it says as
+  that host's artifact, so both halves come back into the same directory
+  under the same naming, and the command afterwards -- `grep -l`,
+  `logtriage`, a diff -- does not care which half it is reading.
+
+  The command is a bash command, and it arrives exactly as typed.  It
+  travels base64'd and is decoded into a variable on the far side, so no
+  shell parses it on the way: quotes, newlines, `$(...)`, backticks and
+  backslashes all survive, and the only shell that ever interprets it is
+  the bash that runs it.  Quoting it instead would mean nesting two
+  levels correctly and getting both right for whatever the remote login
+  shell turns out to be; base64 makes that count zero.
+
+  stderr is merged into stdout, because the answer is what you would have
+  seen on the terminal and in the order you would have seen it -- a tool
+  that writes its headline to stderr and its table to stdout is giving
+  one answer, not two.  A command that wants them apart can say so
+  (`... 2>/dev/null`).
+
+  The exit status is the one thing a file has no equivalent of, so it is
+  kept rather than folded away: it comes back in its own frame, is
+  reported when it is not zero, and is a column in `--csv`.  A command
+  that failed still has an answer worth keeping -- its error text is the
+  artifact -- so the collection is not a failure, it is a finding.
+
 Names that stay apart
   One directory per run, and everything in it is told apart by its *name*
   rather than by where it sits:
@@ -71,6 +104,17 @@ Names that stay apart
   `logtriage dredge-*/web*syslog`, and both of those want one directory
   of distinctly-named files, not forty identical paths under forty host
   directories.
+
+  `--tag NAME` puts a label in front of every name in the run:
+
+      audit~web01~etc~ssh~sshd_config      (a file, tagged)
+      ss~web01                             (--cmd 'ss -s', tag from the
+                                            command's own first word)
+
+  That is the order that makes a shared directory readable: several runs
+  land side by side, `ls` groups them by run, `rm audit~*` clears one of
+  them, and a file says which collection it belongs to without anyone
+  having to remember.
 
   `-d DIR` names the directory yourself.  Without it every run gets one
   of its own, stamped with the time: collecting the same path twice an
@@ -117,9 +161,10 @@ How it goes over the wire
   holding the connection open.
 
 Exit status
-  0   every host answered and everything asked for came back
-  1   a host failed, a path was missing, a ceiling was hit, a name
-      collided, or nothing was collected
+  0   every host answered, everything asked for came back, and any
+      command exited zero
+  1   a host failed, a path was missing, a command exited non-zero, a
+      ceiling was hit, a name collided, or nothing was collected
   2   usage error
 """
 
@@ -565,6 +610,78 @@ def remote_tar_command(args, since_epoch):
               '2>/dev/null\n' % _find_expr(args, since_epoch))
 
 
+_CMD_SCRIPT = r'''
+MARK=%(mark)s
+export MARK
+command -v bash >/dev/null 2>&1 || {
+  echo "dredge: no bash on this host, and --cmd runs a bash command" >&2
+  exit 5
+}
+st=$(mktemp 2>/dev/null) || st=/tmp/dredge-status.$$
+CMDB64=%(cmd)s
+export CMDB64
+printf "%%s FILE\n" "$MARK"
+printf "%%s" %(name)s
+printf "\n%%s DATA\n" "$MARK"
+{ CMD=$(printf "%%s" "$CMDB64" | base64 -d); export CMD
+  bash -c "eval \"\$CMD\""
+  echo $? > "$st"
+} 2>&1 %(cut)s| base64
+printf "%%s END\n" "$MARK"
+printf "%%s EXIT %%s\n" "$MARK" "$(cat "$st" 2>/dev/null || echo unknown)"
+rm -f "$st"
+'''
+
+
+def remote_cmd_command(args, mark):
+    """Run one bash command on the far side and frame what it says.
+
+    Three things have to survive the trip, and each is handled where it
+    can be: the command itself, its output, and its exit status.
+
+    The command travels base64'd and is decoded into a variable on the
+    far side, so nothing in it is ever parsed by a shell on the way --
+    not by the local one building this, not by ssh, not by the remote
+    login shell.  A command with quotes, newlines, `$(...)`, a stray
+    backslash or a lone apostrophe arrives exactly as typed.
+
+    Quoting would be the other way, and it is the one that goes wrong.
+    The command sits inside a script that ssh hands to whatever the
+    remote *login* shell is, which then runs `bash -c` on it, so quoting
+    it means nesting two levels correctly and getting both right for a
+    shell nobody here chose -- `shlex.quote` assumes a POSIX one, and a
+    csh or a restricted shell on the far side is where that assumption
+    is discovered.  Base64 makes the count of levels zero: the payload
+    is alphanumeric whatever the command was, so there is nothing left
+    for any shell to misread.
+
+    stderr is merged into stdout rather than split out, because the point
+    is to get back what you would have seen on the terminal, in the order
+    you would have seen it -- a diagnostic that writes its headline to
+    stderr and its table to stdout is one answer, not two.  A command
+    that wants them apart can say so itself (`... 2>/dev/null`).
+
+    The status cannot come down the same pipe as the output without
+    becoming part of it, so it goes to a temp file and comes back in its
+    own frame.  It is the one thing a file has no equivalent of, and
+    losing it would mean a command that failed and a command that printed
+    nothing looked the same.
+    """
+    cut = ""
+    if args.head:
+        cut = "| head -n %d " % args.head
+    elif args.tail:
+        cut = "| tail -n %d " % args.tail
+    return _CMD_SCRIPT % {
+        "mark": shlex.quote(mark),
+        "cmd": shlex.quote(base64.b64encode(
+            args.cmd.encode("utf-8")).decode("ascii")),
+        "name": shlex.quote(base64.b64encode(
+            args.tag.encode("utf-8")).decode("ascii")),
+        "cut": cut,
+    }
+
+
 def remote_slice_command(args, since_epoch, mark):
     """head/tail on the far side, framed so any byte can come back.
 
@@ -614,8 +731,38 @@ def _clean_relpath(name):
     return "/".join(parts)
 
 
+TAG_RE = re.compile(r"[^A-Za-z0-9._+-]+")
+
+
+def _clean_tag(tag):
+    """A tag, reduced to something that is safe as part of a filename.
+
+    The tag is the one part of the name the caller writes freely, so it
+    is the one part that could carry a slash or a separator and quietly
+    mean something else.
+    """
+    cleaned = TAG_RE.sub("-", (tag or "").strip()).strip("-")
+    return cleaned or "tag"
+
+
+def default_tag(cmd):
+    """A tag for a command nobody named: the command's own first word.
+
+    `--cmd 'ss -s'` lands as `web01~ss`, which is what somebody reading
+    the directory later would have called it anyway.
+    """
+    first = (cmd or "").strip().split()
+    return _clean_tag(first[0].rsplit("/", 1)[-1]) if first else "cmd"
+
+
 def local_path(args, host, relpath):
     """Where a file from HOST lands: one directory, the name says which.
+
+    With `--tag` the tag leads: `audit~web01~etc~hosts`.  That is the
+    order that makes a shared directory readable -- several runs land
+    side by side and `ls` groups them by run, `rm audit~*` clears one of
+    them, and a file tells you which collection it belongs to without
+    anyone having to remember.
 
     Everything from a run goes in one directory and is told apart by its
     *name* rather than by where it sits.  Rebuilding each host's
@@ -628,8 +775,14 @@ def local_path(args, host, relpath):
     rel = _clean_relpath(relpath)
     if not rel:
         rel = "unnamed"
-    return os.path.join(args.dir,
-                        host.name + FLAT_SEP + rel.replace("/", FLAT_SEP))
+    if args.cmd:
+        # A command has no path; the tag is the whole of its name.
+        parts = [_clean_tag(args.tag), host.name]
+    else:
+        parts = [host.name, rel.replace("/", FLAT_SEP)]
+        if args.tag:
+            parts.insert(0, _clean_tag(args.tag))
+    return os.path.join(args.dir, FLAT_SEP.join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +871,7 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
 
 class Result(object):
     __slots__ = ("host", "outcome", "detail", "files", "bytes", "skipped",
-                 "collisions", "truncated", "duration")
+                 "collisions", "truncated", "exit_status", "duration")
 
     def __init__(self, host):
         self.host = host
@@ -732,6 +885,10 @@ class Result(object):
         # closed pipe, and its exit status describes that decision rather
         # than a failure -- so it must not be read as one.
         self.truncated = False
+        # What --cmd's command exited with. None for a file collection:
+        # a file has no status, which is the whole reason this is carried
+        # separately rather than folded into the outcome.
+        self.exit_status = None
         self.duration = 0.0
 
 
@@ -939,8 +1096,27 @@ def collect_tar(args, host):
                 consume)
 
 
+def collect_command(args, host):
+    """One command's output, through the same framed stream a slice uses.
+
+    The same transport for the same reason: the length of what a command
+    will say is not known until it has said it, so it cannot be tarred,
+    and base64 inside a per-run token frame carries any byte it produces.
+    """
+    return _run(args, host, remote_cmd_command(args, args.mark_token),
+                _frame_consumer(args, host))
+
+
 def collect_slices(args, host):
     """A head or a tail of each file, out of the framed base64 stream."""
+    return _run(args, host,
+                remote_slice_command(args, args.since_epoch,
+                                     args.mark_token),
+                _frame_consumer(args, host))
+
+
+def _frame_consumer(args, host):
+    """Read `<MARK> FILE|DATA|END|EXIT` frames off a stream."""
     mark = args.mark_token
 
     def consume(stream, r):
@@ -952,6 +1128,9 @@ def collect_slices(args, host):
                 state, path, chunks = "path", None, []
             elif line == mark + " DATA":
                 state = "data"
+            elif line.startswith(mark + " EXIT "):
+                raw_st = line[len(mark) + 6:].strip()
+                r.exit_status = int(raw_st) if raw_st.isdigit() else raw_st
             elif line == mark + " END":
                 if path is not None:
                     try:
@@ -977,11 +1156,12 @@ def collect_slices(args, host):
                 chunks.append(line)
         r.files = [(p, n) for _h, p, n in taken]
         r.bytes = sum(n for _p, n in r.files)
-    return _run(args, host,
-                remote_slice_command(args, args.since_epoch, mark), consume)
+    return consume
 
 
 def collect_one(args, host):
+    if args.cmd:
+        return collect_command(args, host)
     if args.head or args.tail:
         return collect_slices(args, host)
     return collect_tar(args, host)
@@ -1026,7 +1206,9 @@ def render(results, args, elapsed):
     nfiles = sum(len(r.files) for r in results)
     nbytes = sum(r.bytes for r in results)
 
-    what = args.path
+    what = args.cmd if args.cmd else args.path
+    if args.tag:
+        what = "[%s] %s" % (args.tag, what)
     if args.head:
         what += "   [head %d]" % args.head
     elif args.tail:
@@ -1048,9 +1230,25 @@ def render(results, args, elapsed):
         if args.since:
             out.append("            nothing under %s changed since %s there"
                        % (args.path, args.since))
+        elif args.cmd:
+            out.append("            the command printed nothing there")
     for r in bad:
         out.append("  %-9s %s: %s" % (r.outcome.upper(), r.host.name,
                                       r.detail or "?"))
+    # A command that failed still has an answer worth keeping -- its
+    # error text is the artifact -- so this is a finding rather than a
+    # failed host. It is also the one thing a file collection has no
+    # equivalent of, and it must not go unsaid.
+    angry = [r for r in results if r.exit_status not in (None, 0)]
+    if angry:
+        out.append("  NONZERO   the command exited non-zero on %d host%s:"
+                   % (len(angry), "" if len(angry) == 1 else "s"))
+        for r in angry[:6]:
+            out.append("            %-12s exit %s" % (r.host.name,
+                                                      r.exit_status))
+        if len(angry) > 6:
+            out.append("            ... and %d more" % (len(angry) - 6))
+        out.append("            What it said is collected either way.")
     cut = [r for r in results if r.truncated]
     if cut:
         names = " ".join(r.host.name for r in cut[:6])
@@ -1088,7 +1286,7 @@ def render(results, args, elapsed):
             out.append("            ... and %d more" % (len(skipped) - 5))
         out.append("            --tail N brings back the end of one without "
                    "the rest of it.")
-    if empty or bad or skipped or clashed or cut:
+    if empty or bad or skipped or clashed or cut or angry:
         out.append("")
 
     if good and not args.quiet:
@@ -1101,7 +1299,8 @@ def render(results, args, elapsed):
     return "\n".join(out) + "\n"
 
 
-CSV_FIELDS = ["host", "remote_path", "local_path", "bytes", "outcome"]
+CSV_FIELDS = ["host", "source", "local_path", "bytes", "outcome",
+              "exit_status"]
 
 
 def write_csv(results, args, path):
@@ -1111,14 +1310,17 @@ def write_csv(results, args, path):
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
         w.writeheader()
         for r in results:
+            source = args.cmd if args.cmd else args.path
+            st = "" if r.exit_status is None else r.exit_status
             if not r.files:
-                w.writerow({"host": r.host.name, "remote_path": args.path,
+                w.writerow({"host": r.host.name, "source": source,
                             "local_path": "", "bytes": 0,
-                            "outcome": r.outcome})
+                            "outcome": r.outcome, "exit_status": st})
                 continue
             for p, n in r.files:
-                w.writerow({"host": r.host.name, "remote_path": args.path,
-                            "local_path": p, "bytes": n, "outcome": r.outcome})
+                w.writerow({"host": r.host.name, "source": source,
+                            "local_path": p, "bytes": n,
+                            "outcome": r.outcome, "exit_status": st})
     finally:
         if fh is not sys.stdout:
             fh.close()
@@ -1140,8 +1342,14 @@ def build_parser():
                        "This is free software: you are free to change and redistribute it.\n"
                        "There is no warranty, to the extent permitted by law."
                    ) % (PROG, VERSION))
-    p.add_argument("path", metavar="PATH",
+    p.add_argument("path", metavar="PATH", nargs="?",
                    help="the file or directory to bring back from each host")
+    p.add_argument("-c", "--cmd", metavar="CMD",
+                   help="a bash command to run on each host; its output "
+                        "comes back as the artifact, in place of a file")
+    p.add_argument("-t", "--tag", metavar="NAME",
+                   help="label this run's artifacts, so several runs can "
+                        "share a directory and still be told apart")
     p.add_argument("-H", "--host", dest="H", action="append", metavar="TOKEN")
     p.add_argument("--hosts", action="append", metavar="FILE")
     p.add_argument("-d", "--dir", default=_env("DIR"))
@@ -1199,6 +1407,23 @@ def main(argv=None):
     args = build_parser().parse_args(
         glue_relative_times(argv, ("--since",)))
 
+    if args.cmd and args.path:
+        die("give a PATH or --cmd, not both: %r would be collected and %r "
+            "would be run, and only one of them can be the artifact"
+            % (args.path, args.cmd))
+    if not args.cmd and not args.path:
+        die("nothing to collect: give a PATH, or --cmd to run something")
+    if args.cmd and not args.cmd.strip():
+        die("--cmd is empty")
+    if args.cmd and args.since is not None:
+        # The file-selecting options have nothing to select with --cmd.
+        # --since is the one that can be told apart from its default, so
+        # it is the one that can be refused rather than quietly ignored;
+        # --max-bytes and --max-files always carry a value and are simply
+        # not consulted.  What bounds a runaway command is --timeout.
+        die("--since selects among files by age, and --cmd has no files to "
+            "select from -- it has one command and one answer")
+    args.tag = args.tag or (default_tag(args.cmd) if args.cmd else None)
     if args.head and args.tail:
         die("--head and --tail are opposite ends of the same file: pick one")
     if args.append and args.prepend:
@@ -1233,9 +1458,13 @@ def main(argv=None):
     hosts = collect_hosts(args)
 
     if args.dry_run:
-        cmd = (remote_slice_command(args, args.since_epoch, args.mark_token)
-               if (args.head or args.tail)
-               else remote_tar_command(args, args.since_epoch))
+        if args.cmd:
+            cmd = remote_cmd_command(args, args.mark_token)
+        elif args.head or args.tail:
+            cmd = remote_slice_command(args, args.since_epoch,
+                                       args.mark_token)
+        else:
+            cmd = remote_tar_command(args, args.since_epoch)
         sys.stdout.write("# %d host(s): %s\n"
                          % (len(hosts),
                             " ".join(h.name for h in hosts[:8])
@@ -1258,6 +1487,7 @@ def main(argv=None):
     # back is not what was asked for -- which is the definition of
     # something worth seeing, and worth stopping a script over.
     if any(r.outcome != OK or r.collisions or r.truncated
+           or r.exit_status not in (None, 0)
            for r in results) or not nfiles:
         return 1
     return 0

@@ -6,7 +6,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`dredge --cmd` brings back what a command says, the same way it brings
+  back a file.** Half of what you want off a fleet is in a file and half
+  of it is only ever printed -- `ss -s`, `sysctl -a`, `rpm -q`,
+  `systemctl --failed`. Both halves now land in one directory under one
+  naming, so the `grep -l` or `logtriage` afterwards does not have to care
+  which half it is reading.
+
+  The command arrives exactly as typed. It travels base64'd and is decoded
+  into a variable on the far side, so no shell parses it on the way --
+  quotes, apostrophes, backslashes, embedded newlines, `$(...)` and
+  backticks all survive, and the only shell that ever interprets it is the
+  bash that runs it. Quoting would be the other way round: the command
+  sits inside a script that ssh hands to whatever the remote *login*
+  shell is, which then runs `bash -c` on it, so quoting means nesting two
+  levels correctly and getting both right for a shell nobody here chose.
+  Base64 makes that count zero.
+
+  The same *information* comes back either way, which means three things
+  a file gets for free had to be arranged for a command: stderr is merged
+  into stdout in order, because the artifact is what you would have seen
+  on the terminal; any byte survives, because the output travels through
+  the same framed base64 a `--tail` slice does; and the exit status comes
+  back in a frame of its own. A command that failed still has an answer
+  worth keeping -- its error text *is* the artifact -- so a non-zero
+  status is a `NONZERO` finding with the output collected, not a lost
+  host.
+
+  `--head`/`--tail` cut a command's output as they cut a file's. `--since`
+  selects among files and is refused rather than ignored.
+
+- **`dredge --tag NAME` labels a run's artifacts so several runs can share
+  one directory.** The tag leads the name -- `audit~web01~var~log~app.log`
+  -- because that is the order that makes a shared directory readable:
+  `ls` groups by run, `rm audit~*` clears one of them, and a file says
+  which collection it belongs to without anybody having to remember. A
+  `--cmd` run has no path to name itself with, so the tag is the whole of
+  its name, defaulting to the command's own first word (`--cmd 'ss -s'`
+  lands as `ss~web01`). The tag is the one part of the name written
+  freely, so anything outside `A-Za-z0-9._+-` folds to `-` and it cannot
+  smuggle a directory into the name.
+
 ### Changed
+
+- **`dredge --csv` gained a column and renamed one.** The header is now
+  `host,source,local_path,bytes,outcome,exit_status`: `remote_path` became
+  `source` because the column holds either a collected path or the command
+  that was run, and `exit_status` is that command's status, empty for a
+  file. Anything parsing the old header by position or by name needs
+  updating.
 
 - **`dredge` lands one directory of distinctly-named files, not a rebuilt
   tree.** Every collected file went to `collected/<host>/<the remote

@@ -23,7 +23,7 @@ between them.
 | `skew` | Does this box know what time it is? |
 | `muster` | Who has which of these, and what is still outstanding? |
 | `manifest` | Which servers are those, in the layout? |
-| `dredge` | Bring that file back from every host, kept apart |
+| `dredge` | Bring that answer back from every host, kept apart |
 
 ```bash
 pip install binnacle

@@ -309,7 +309,7 @@ t_csv_carries_a_row_per_file() {
     cd "$TEST_TMPDIR"
     dr logs -H web01 -d out --csv c.csv --quiet
     head="$(head -1 c.csv)"
-    assert_eq "$head" "host,remote_path,local_path,bytes,outcome"
+    assert_eq "$head" "host,source,local_path,bytes,outcome,exit_status"
     assert_contains "$(cat c.csv)" "web01,logs,out/web01~logs~app.log"
 }
 
@@ -517,6 +517,154 @@ t_ceilings_that_cannot_mean_anything_are_refused() {
     assert_contains "$out" "--timeout"
 }
 
+
+# --- --cmd: the other half of what you want off a fleet --------------------
+
+t_a_command_comes_back_as_that_hosts_artifact() {
+    seed
+    cd "$TEST_TMPDIR"
+    for h in web01 web02; do printf 'i am %s\n' "$h" > "$FAKE_ROOT/$h/who"; done
+    dr --cmd 'cat who' -H web01,web02 -d out --quiet
+    assert_status $? 0
+    # Named for the command, because nobody passed --tag.
+    assert_file_exists "out/cat~web01"
+    assert_eq "$(cat "out/cat~web01")" "i am web01"
+    assert_eq "$(cat "out/cat~web02")" "i am web02"
+}
+
+t_a_command_arrives_exactly_as_typed() {
+    # It travels base64'd and is decoded into a variable on the far side,
+    # so no shell parses it on the way. These cases hold for careful
+    # nested quoting too -- what they guard is the property, and what
+    # they catch is the naive version that interpolates the command in.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd "echo 'it'\''s here'" -H web01 -d q1 --quiet
+    assert_eq "$(cat "q1/echo~web01")" "it's here"
+
+    dr --cmd 'echo "a \"quoted\" word"' -H web01 -d q2 --quiet
+    assert_eq "$(cat "q2/echo~web01")" 'a "quoted" word'
+
+    # A literal backslash in the output, not printf's own escape: the
+    # point is that the backslash reaches the far side, and `printf
+    # "a\b\n"` would be printf eating it there rather than us losing it
+    # here.
+    dr --cmd 'printf "%s\n" "a\b"' -H web01 -d q3 --quiet
+    assert_eq "$(cat "q3/printf~web01")" 'a\b'
+
+    # A command substitution is the far side's to run, not ours -- which
+    # is exactly why it must not expand here.
+    # shellcheck disable=SC2016
+    dr --cmd 'echo "$(echo nested)"' -H web01 -d q4 --quiet
+    assert_eq "$(cat "q4/echo~web01")" "nested"
+
+    # And a command spanning lines is one command.
+    dr --cmd 'echo one
+echo two' -H web01 -d q5 --quiet
+    assert_eq "$(printf '%s' "$(cat "q5/echo~web01")" | tr '\n' '|')" "one|two"
+}
+
+t_a_command_that_says_nothing_in_words_still_says_it() {
+    # Binary through the same framed base64 the slices use: any byte the
+    # command produces has to survive, or "the same information back" is
+    # only true for text.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'printf "\x00\x01\xff\xfe"' -H web01 -d b --quiet
+    printf '\x00\x01\xff\xfe' > want.bin
+    cmp -s want.bin "b/printf~web01"
+    assert_status $? 0
+}
+
+t_stderr_comes_back_with_stdout_in_order() {
+    # The answer is what you would have seen on the terminal. A tool that
+    # writes its headline to stderr and its table to stdout is giving one
+    # answer, not two.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo out; echo err >&2; echo more' -H web01 -d e --quiet
+    assert_eq "$(tr '\n' '|' < "e/echo~web01")" "out|err|more|"
+}
+
+t_a_command_that_failed_is_a_finding_not_a_lost_host() {
+    # The exit status is the one thing a file has no equivalent of. A
+    # command that failed still has an answer worth keeping -- its error
+    # text is the artifact -- so the collection is not a failure.
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr --cmd 'echo before; exit 7' -H web01 -d f --csv f.csv 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "NONZERO"
+    assert_contains "$out" "exit 7"
+    # The output was kept either way.
+    assert_eq "$(cat "f/echo~web01")" "before"
+    # And the status is a column, not just a sentence.
+    assert_contains "$(cat f.csv)" "exit_status"
+    assert_contains "$(cat f.csv)" ",ok,7"
+}
+
+t_a_command_that_worked_is_quiet_about_it() {
+    seed
+    cd "$TEST_TMPDIR"
+    out="$(dr --cmd 'echo fine' -H web01 -d g 2>&1)"
+    assert_status $? 0
+    assert_not_contains "$out" "NONZERO"
+}
+
+t_the_tag_leads_the_name_so_runs_can_share_a_directory() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo alive' -H web01 -d shared --tag probe --quiet
+    dr logs/app.log -H web01 -d shared --tag before-restart --quiet
+    # Two runs, one directory, told apart at a glance -- and sorted by run.
+    assert_file_exists "shared/probe~web01"
+    assert_file_exists "shared/before-restart~web01~logs~app.log"
+}
+
+t_a_tag_cannot_smuggle_a_path_into_the_name() {
+    # The tag is the one part of the name the caller writes freely.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo hi' -H web01 -d odd --tag 'a/b c:d' --quiet
+    assert_file_exists "odd/a-b-c-d~web01"
+    assert_eq "$(find odd -type d | wc -l | tr -d ' ')" "1"
+}
+
+t_a_command_and_a_path_are_not_both_the_artifact() {
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr --cmd 'echo x' logs/app.log -H web01 -d r1 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "not both"
+
+    set +e
+    out="$(dr -H web01 -d r2 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "nothing to collect"
+
+    # --since picks among files; a command has no files to pick from.
+    set +e
+    out="$(dr --cmd 'echo x' --since -1h -H web01 -d r3 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--since selects among files"
+}
+
+t_head_and_tail_cut_a_commands_output_too() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'printf "a\nb\nc\nd\n"' -H web01 -d h1 --tail 2 --quiet
+    assert_eq "$(tr '\n' '|' < "h1/printf~web01")" "c|d|"
+    dr --cmd 'printf "a\nb\nc\nd\n"' -H web01 -d h2 --head 1 --quiet
+    assert_eq "$(tr '\n' '|' < "h2/printf~web01")" "a|"
+}
+
 echo "dredge"
 run_test "a file comes back under its host"    t_a_file_comes_back_under_the_name_of_its_host
 run_test "a directory comes back as names"     t_a_directory_comes_back_as_named_files
@@ -551,4 +699,14 @@ run_test "two paths on one name are caught"    t_two_paths_folding_onto_one_name
 run_test "a stalled transfer is bounded"       t_a_transfer_that_stalls_mid_stream_is_bounded
 run_test "a lingering pipe is let go of"       t_something_still_holding_the_pipe_does_not_hang_the_run
 run_test "impossible ceilings are refused"     t_ceilings_that_cannot_mean_anything_are_refused
+run_test "a command is that host's artifact"   t_a_command_comes_back_as_that_hosts_artifact
+run_test "a command arrives as typed"          t_a_command_arrives_exactly_as_typed
+run_test "binary output survives"              t_a_command_that_says_nothing_in_words_still_says_it
+run_test "stderr comes back in order"          t_stderr_comes_back_with_stdout_in_order
+run_test "a failed command is a finding"       t_a_command_that_failed_is_a_finding_not_a_lost_host
+run_test "a command that worked is quiet"      t_a_command_that_worked_is_quiet_about_it
+run_test "the tag leads the name"              t_the_tag_leads_the_name_so_runs_can_share_a_directory
+run_test "a tag cannot smuggle a path"         t_a_tag_cannot_smuggle_a_path_into_the_name
+run_test "a command and a path are not both"   t_a_command_and_a_path_are_not_both_the_artifact
+run_test "head and tail cut a command too"     t_head_and_tail_cut_a_commands_output_too
 finish

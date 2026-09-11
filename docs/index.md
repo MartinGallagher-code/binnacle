@@ -59,7 +59,7 @@ there is one name to remember instead of eleven.
 | [`skew`](tools/skew.md) | Does this box know what time it is? |
 | [`muster`](tools/muster.md) | Who has which of these, and what is still outstanding? |
 | [`manifest`](tools/manifest.md) | Which servers are those, in the layout? |
-| [`dredge`](tools/dredge.md) | Bring that file back from every host, kept apart |
+| [`dredge`](tools/dredge.md) | Bring that answer back from every host, kept apart |
 
 ## Diagnose, don't dump
 
