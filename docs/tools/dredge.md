@@ -1,13 +1,14 @@
 # `dredge`
 
-**Bring that file back from every host, kept apart.**
+**Bring that answer back from every host, kept apart.**
 
 ```bash
 dredge /var/log/syslog --hosts hosts.txt          # one file from every host
+dredge --cmd 'ss -s' --hosts hosts.txt            # what a command says, instead
 dredge /var/log/syslog --tail 200 -H 'web[01-40]' # only the last 200 lines
 dredge /etc/nginx --hosts hosts.txt               # a whole directory each
 dredge /var/log/app.log --since -1h --append      # only what changed, added on
-dredge /var/log/syslog -d today --hosts hosts.txt # into a directory you name
+dredge --cmd uptime --tag before -d audit         # labelled, to share a directory
 ```
 
 ## The problem it solves
@@ -23,6 +24,77 @@ says which machine each came from — so the next command can be `grep -r`, or
 It is the gathering half of what [`agree`](agree.md) does with commands: agree
 runs one command everywhere and groups the answers; dredge brings one *file*
 back from everywhere and keeps them apart.
+
+## A file or a command, the same way round
+
+Half of what you want off a fleet is in a file and half of it is only ever
+printed — `ss -s`, `sysctl -a`, `rpm -q nginx`, `systemctl --failed`. `--cmd`
+runs one bash command on each host and lands what it says as that host's
+artifact:
+
+```bash
+dredge --cmd 'ss -s' --hosts hosts.txt
+dredge --cmd 'sysctl -a' --tag sysctl -d audit --hosts hosts.txt
+```
+
+Both halves come back into the same directory under the same naming, so the
+command you run afterwards — `grep -l`, `logtriage`, a `diff` between two
+hosts — does not have to care which half it is reading.
+
+Where [`agree`](agree.md) runs a command everywhere and *groups* the answers
+into classes, this keeps every host's answer as its own file. That is the
+difference between "which of my forty machines disagree" and "I want all forty
+answers on disk to work through".
+
+### It arrives exactly as typed
+
+The command travels base64'd and is decoded into a variable on the far side,
+so no shell parses it on the way — not the local one, not ssh, not the remote
+login shell. The only shell that ever interprets it is the bash that runs it.
+
+```bash
+dredge --cmd "grep -c 'error' /var/log/app.log" --hosts hosts.txt
+dredge --cmd 'echo "$(hostname -f): $(uptime -p)"' --hosts hosts.txt
+```
+
+Quotes, apostrophes, backslashes, embedded newlines, `$(...)` and backticks
+all survive. Quoting would be the other way round, and it is the one that goes
+wrong: the command sits inside a script that ssh hands to whatever the remote
+*login* shell is, which then runs `bash -c` on it, so quoting means nesting two
+levels correctly and getting both right for a shell nobody here chose. Base64
+makes the count of levels zero — the payload is alphanumeric whatever the
+command was, so there is nothing left for any shell to misread.
+
+`bash` has to exist on the far side — the flag says bash, so a host without it
+is reported rather than silently run under something else.
+
+### One answer, not two
+
+stderr is merged into stdout, in order. The artifact is what you would have
+seen on the terminal: a tool that writes its headline to stderr and its table
+to stdout is giving one answer, and splitting them would lose which line came
+when. A command that wants them apart can say so itself — `... 2>/dev/null`.
+
+### The status is kept, not folded away
+
+The exit status is the one thing a file has no equivalent of, so it comes back
+in its own frame rather than being inferred from the output:
+
+```text
+  NONZERO   the command exited non-zero on 2 hosts:
+            web12        exit 1
+            web31        exit 127
+            What it said is collected either way.
+```
+
+A command that failed still has an answer worth keeping — its error text *is*
+the artifact — so the collection is not a failed host, it is a finding. The
+status is also a column in `--csv`, and a non-zero one makes the run exit 1.
+
+`--head` and `--tail` cut a command's output the same way they cut a file's,
+on the far side. `--since`, `--max-bytes` and `--max-files` select among files
+and have nothing to select from here; `--since` is refused rather than
+ignored, and `--timeout` is what bounds a command that will not finish.
 
 ## Names that stay apart
 
@@ -40,6 +112,29 @@ command you actually want next is `grep -l oom *`, or `logtriage
 dredge-*/web*syslog`, and both of those want one directory of
 distinctly-named files — not forty identical paths under forty host
 directories.
+
+### The tag
+
+`--tag NAME` puts a label in front of every name in the run:
+
+```text
+audit/sysctl~web01                        # --cmd 'sysctl -a' --tag sysctl
+audit/before-restart~web01~var~log~app.log
+```
+
+The tag leads because that is the order that makes a shared directory
+readable: several runs land side by side, `ls` groups them by run, `rm
+audit~*` clears one of them, and a file says which collection it belongs to
+without anybody having to remember.
+
+A `--cmd` run has no path to name itself with, so the tag is the whole of the
+name. Without `--tag` it takes the command's own first word — `--cmd 'ss -s'`
+lands as `ss~web01`, which is what somebody reading the directory later would
+have called it anyway.
+
+The tag is the one part of the name the caller writes freely, so it is the one
+part that could carry a slash and quietly mean a directory: anything outside
+`A-Za-z0-9._+-` folds to `-`, and `--tag 'a/b c:d'` lands as `a-b-c-d~web01`.
 
 ### The directory
 
@@ -162,6 +257,7 @@ hosts with a thousand files each is forty connections, not forty thousand.
 |---|---|---|
 | whole files | `find … \| tar` streamed | the bytes and nothing else; tar frames itself |
 | `--head` / `--tail` | framed base64 | a slice's length is not known until it is cut |
+| `--cmd` | framed base64 | nor is the length of what a command will say |
 
 The second one needs explaining. Framing by length would mean measuring the
 slice and then reading it, and on the growing log this tool is pointed at
@@ -223,14 +319,17 @@ dredge -- /var/log/syslog   [tail 200]
 ```
 
 `--csv PATH` writes one row per collected file —
-`host,remote_path,local_path,bytes,outcome` — including a row for the hosts
-that returned nothing, so the record says who was asked as well as what came
-back.
+`host,source,local_path,bytes,outcome,exit_status` — including a row for the
+hosts that returned nothing, so the record says who was asked as well as what
+came back. `source` is the path that was collected, or the command that was
+run; `exit_status` is that command's status, and empty for a file.
 
 ## Options
 
 | Option | Meaning |
 |---|---|
+| `-c, --cmd CMD` | a bash command to run on each host; its output is the artifact |
+| `-t, --tag NAME` | label this run's artifacts so several runs can share a directory |
 | `-H, --host TOKEN` | hosts, repeatable; ranges expand (`web[01-40]`) |
 | `--hosts FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
 | `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
@@ -248,8 +347,8 @@ back.
 
 | Code | Meaning |
 |---|---|
-| `0` | every host answered and everything asked for came back |
-| `1` | a host failed, a path was missing, a ceiling was hit, a name collided, or nothing was collected |
+| `0` | every host answered, everything asked for came back, and any command exited zero |
+| `1` | a host failed, a path was missing, a command exited non-zero, a ceiling was hit, a name collided, or nothing was collected |
 | `2` | usage error |
 
 Exit 1 on an empty collection is deliberate: a script that fans out to gather
