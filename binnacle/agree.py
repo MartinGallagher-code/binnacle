@@ -11,13 +11,15 @@ Usage: agree.py [run] [OPTIONS] -- COMMAND...
 
 Examples:
   agree.py -H web01,web02,db01 -- rpm -q openssl
-  agree.py --hosts prod.txt -- 'sysctl net.core.somaxconn'
-  agree.py --hosts 'node[01-24]' --loose -- uname -r
-  agree.py script why-slow --hosts prod.txt --fleet-csv -- --csv
+  agree.py --servers prod.txt -- 'sysctl net.core.somaxconn'
+  agree.py --servers 'node[01-24]' --loose -- uname -r
+  agree.py script why-slow --servers prod.txt --fleet-csv -- --csv
 
 Options:
-  --hosts FILE|SPEC   host list: a file, a range like node[01-24], or - for
-                      stdin                                  (AGREE_HOSTS)
+  --servers FILE|SPEC server list: a file, a range like node[01-24], or -
+                      for stdin                            (AGREE_SERVERS)
+  --hosts             the old name for --servers; still works, and so
+                      does AGREE_HOSTS
   -H a,b,c            hosts inline, repeatable
   --jobs N            hosts contacted at once                 (AGREE_JOBS)
   --timeout S         per-host command timeout, seconds       (AGREE_TIMEOUT)
@@ -189,6 +191,16 @@ class _WriteGuard(object):
 def _env(name, default=None):
     v = os.environ.get("AGREE_" + name)
     return v if v not in (None, "") else default
+
+
+def _typed(argv, flag):
+    """True if this exact long option was given, as `--flag` or `--flag=x`.
+
+    Reading the arguments again is the only way to tell which of two
+    spellings of one option was used: argparse folds them into a single
+    dest and then cannot say which arrived.
+    """
+    return any(a == flag or a.startswith(flag + "=") for a in argv)
 
 
 def progress(msg):
@@ -395,7 +407,7 @@ def read_host_file(path):
 
 def collect_hosts(args):
     tokens = []
-    for spec in (args.hosts or []):
+    for spec in (args.servers or []):
         from_file = read_host_file(spec)
         if from_file is not None:
             tokens.extend(from_file)
@@ -410,7 +422,7 @@ def collect_hosts(args):
                 tokens.extend(got)
                 break
     if not tokens:
-        die("no hosts given (use --hosts FILE, --hosts 'node[01-09]' or "
+        die("no hosts given (use --servers FILE, --servers 'node[01-09]' or "
             "-H a,b,c; hosts.txt and servers.txt are used if present)")
 
     expanded = []
@@ -1307,8 +1319,14 @@ def run_fleet(args, command, label=None):
 # ---------------------------------------------------------------------------
 
 def _add_common(p):
-    p.add_argument("--hosts", "-f", action="append",
-                   default=([_env("HOSTS")] if _env("HOSTS") else None))
+    # --hosts/AGREE_HOSTS is what this was called until the
+    # fleet-listing flag was made one name across the binnacle. Both
+    # still work, so a script written against the old spelling does not
+    # break; the new name wins if both are set.
+    listed = _env("SERVERS") or _env("HOSTS")
+    p.add_argument("--servers", "--hosts", "-f", dest="servers",
+                   action="append",
+                   default=([listed] if listed else None))
     p.add_argument("-H", action="append")
     p.add_argument("--jobs", "-j", type=int,
                    default=int(_env("JOBS", min(32, 4 * (os.cpu_count() or 4)))))
@@ -1508,6 +1526,9 @@ def main(argv=None):
         argv = ["run"] + argv
 
     args = parser.parse_args(argv)
+    if _typed(argv, "--hosts"):
+        sys.stderr.write("[%s] --hosts is now --servers; the old spelling "
+                         "still works\n" % PROG)
     args.command_argv = command_argv
     apply_presets(args)
     if getattr(args, "func", None) is None:

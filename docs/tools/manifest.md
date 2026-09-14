@@ -73,7 +73,7 @@ shape every other tool here already takes:
 
 ```bash
 manifest floor.dc 'rack[1-3]' | muster add -
-manifest floor.dc 'row[A,C]' > hosts.txt && agree --hosts hosts.txt
+manifest floor.dc 'row[A,C]' > hosts.txt && agree --servers hosts.txt
 manifest floor.dc 'room[1]' | netmesh gen --servers -
 ```
 

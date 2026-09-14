@@ -30,7 +30,7 @@ What it does
   here already takes.
 
       manifest dc.dc 'rack[1-3]' | muster add -
-      manifest dc.dc 'row[A,C]' > hosts.txt && agree --hosts hosts.txt
+      manifest dc.dc 'row[A,C]' > hosts.txt && agree --servers hosts.txt
       manifest dc.dc 'room[1]' | netmesh gen --servers -
 
   It reads and prints.  Nothing is contacted, nothing is written, and the

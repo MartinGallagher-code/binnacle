@@ -87,7 +87,7 @@ following that number is how an afternoon disappears into the wrong problem.
 reachable prod.txt -i
 
 # Fleet-wide triage: every box diagnosed, hosts grouped by what is wrong.
-agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 ```text

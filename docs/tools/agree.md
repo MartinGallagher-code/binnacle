@@ -7,10 +7,10 @@ agree, 3 do not, here is the diff.
 
 ```bash
 agree -H 'node[01-24]' -- rpm -q openssl
-agree --hosts prod.txt --loose -- uname -r
-agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree --servers prod.txt --loose -- uname -r
+agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 agree hosts -H 'rack[a-c]-node[01-04]'      # expand without running anything
-agree doctor --hosts prod.txt               # can each host be reached and used?
+agree doctor --servers prod.txt               # can each host be reached and used?
 ```
 
 ## What it looks like
@@ -183,8 +183,8 @@ The same grammar as `servers.txt` in `iperf_orchestrator` and
 tokens — so an existing fleet list works unchanged.
 
 ```bash
-agree --hosts prod.txt -- uptime      # a file
-agree --hosts - -- uptime             # stdin
+agree --servers prod.txt -- uptime      # a file
+agree --servers - -- uptime             # stdin
 agree -H web01,web02,db01 -- uptime   # inline
 agree -H 'node[01-24]' -- uptime      # a range
 agree -H 'rack[a-c]-node[01-04]' -- uptime   # cartesian
@@ -229,7 +229,7 @@ collects files after, and `agree script PATH` is the sugar for the whole
 cycle: push, `chmod +x`, run, collect, clean up.
 
 ```bash
-agree script why-slow --hosts prod.txt --fleet-csv -- --csv --interval 2
+agree script why-slow --servers prod.txt --fleet-csv -- --csv --interval 2
 ```
 
 This is the reason `agree` exists in the same distribution as the others.

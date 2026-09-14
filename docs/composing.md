@@ -10,7 +10,7 @@ half wasted.
 The composition that motivates the whole set:
 
 ```bash
-agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 That pushes `why-slow` to every host, runs it, collects the CSV, and groups
@@ -73,7 +73,7 @@ awk -F, '$5=="CRITICAL"' triage.csv
 ## The same trick for DNS
 
 ```bash
-agree script resolve --hosts prod.txt --fleet-csv -- db01.example.com --csv
+agree script resolve --servers prod.txt --fleet-csv -- db01.example.com --csv
 ```
 
 Hosts get grouped by **what they think a name means**. One rack pointed at a
@@ -83,7 +83,7 @@ otherwise meet as intermittent application errors on a third of the fleet.
 ## The same trick for logs
 
 ```bash
-agree script logtriage --hosts prod.txt --fleet-csv -- /var/log/syslog --csv
+agree script logtriage --servers prod.txt --fleet-csv -- /var/log/syslog --csv
 ```
 
 Hosts get grouped by **which templates they are emitting**. This works for
@@ -104,7 +104,7 @@ what:
 reachable prod.txt -i
 
 # 2. What is wrong, and where?
-agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 
 # 3. why-slow says the boxes are fine. Is it DNS?
 resolve db01.example.com
@@ -130,7 +130,7 @@ usually printed for you: `why-slow` on a healthy box suggests `resolve`,
 ## Prune before you fan out
 
 ```bash
-reachable prod.txt -i && agree --hosts prod.txt -- uptime
+reachable prod.txt -i && agree --servers prod.txt -- uptime
 ```
 
 `reachable` is safe to run on a schedule because it converges: hosts it
@@ -150,7 +150,7 @@ instant:
 during -- ./benchmark.sh
 
 # The whole fleet, while something else drives the load
-agree script during --hosts prod.txt --fleet-csv -- --seconds 60 --csv
+agree script during --servers prod.txt --fleet-csv -- --seconds 60 --csv
 ```
 
 Run it on the **load generator** as well as the target. A generator that

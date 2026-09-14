@@ -3,12 +3,12 @@
 # SPDX-FileCopyrightText: 2026 Martin J. Gallagher
 """dredge.py -- bring an answer back from every host, named so you can tell them apart.
 
-Usage: dredge /var/log/syslog --hosts hosts.txt      one file from every host
-       dredge --cmd 'ss -s' --hosts hosts.txt        what a command says, instead
+Usage: dredge /var/log/syslog --servers hosts.txt    one file from every host
+       dredge --cmd 'ss -s' --servers hosts.txt      what a command says, instead
        dredge /var/log/syslog --tail 200 -H 'web[01-40]'   only the last 200 lines
-       dredge /etc/nginx --hosts hosts.txt           a whole directory each
+       dredge /etc/nginx --servers hosts.txt         a whole directory each
        dredge /var/log/app.log --since -1h           only what changed lately
-       dredge --cmd 'uptime' --tag before --hosts h  labelled, to keep runs apart
+       dredge --cmd 'uptime' --tag before --servers h  labelled, to keep runs apart
 
 Options:
   -c, --cmd CMD       a bash command to run on each host; what it says comes
@@ -16,7 +16,8 @@ Options:
   -t, --tag NAME      label this run's artifacts, so several runs can share
                       one directory and still be told apart
   -H, --host TOKEN    hosts, repeatable; ranges expand (`web[01-40]`)
-      --hosts FILE    a server list, one per line -- reachable's output works
+      --servers FILE  a server list, one per line -- reachable's output works
+      --hosts FILE    the old name for --servers; still works
   -d, --dir DIR       where collected files land   (default: dredge-<stamp>)
       --head N        only the first N lines of each file
       --tail N        only the last N lines of each file
@@ -263,6 +264,16 @@ def note(msg, quiet=False):
         sys.stderr.write("[%s] %s\n" % (PROG, msg))
 
 
+def _typed(argv, flag):
+    """True if this exact long option was given, as `--flag` or `--flag=x`.
+
+    Reading the arguments again is the only way to tell which of two
+    spellings of one option was used: argparse folds them into a single
+    dest and then cannot say which arrived.
+    """
+    return any(a == flag or a.startswith(flag + "=") for a in argv)
+
+
 def _env(name, default=None):
     v = os.environ.get("DREDGE_" + name)
     return v if v not in (None, "") else default
@@ -474,7 +485,7 @@ def read_host_file(path):
 def collect_hosts(args):
     """Every host named, expanded, in the order given and each named once."""
     tokens = []
-    for spec in (args.hosts or []):
+    for spec in (args.servers or []):
         from_file = read_host_file(spec)
         if from_file is not None:
             tokens.extend(from_file)
@@ -489,7 +500,7 @@ def collect_hosts(args):
                 tokens.extend(got)
                 break
     if not tokens:
-        die("no hosts given (use --hosts FILE, --hosts 'node[01-09]' or "
+        die("no hosts given (use --servers FILE, --servers 'node[01-09]' or "
             "-H a,b,c; hosts.txt and servers.txt are used if present)")
 
     hosts, seen = [], {}
@@ -1351,7 +1362,11 @@ def build_parser():
                    help="label this run's artifacts, so several runs can "
                         "share a directory and still be told apart")
     p.add_argument("-H", "--host", dest="H", action="append", metavar="TOKEN")
-    p.add_argument("--hosts", action="append", metavar="FILE")
+    # --hosts is what this was called until the fleet-listing flag was
+    # made one name across the binnacle. It still works as an alias, so
+    # a script written against the old spelling does not break.
+    p.add_argument("--servers", "--hosts", dest="servers",
+                   action="append", metavar="FILE")
     p.add_argument("-d", "--dir", default=_env("DIR"))
     p.add_argument("--head", type=int, metavar="N")
     p.add_argument("--tail", type=int, metavar="N")
@@ -1406,6 +1421,8 @@ def main(argv=None):
         argv = sys.argv[1:]
     args = build_parser().parse_args(
         glue_relative_times(argv, ("--since",)))
+    if _typed(argv, "--hosts"):
+        note("--hosts is now --servers; the old spelling still works")
 
     if args.cmd and args.path:
         die("give a PATH or --cmd, not both: %r would be collected and %r "
@@ -1522,5 +1539,5 @@ if __name__ == "__main__":
 #
 # This one leans on `agree` more than most: the host list, the ranges, the
 # ssh argv and the fan-out are the same problem agree already solved, and
-# solving it differently here would mean `dredge --hosts hosts.txt` and
-# `agree --hosts hosts.txt` disagreeing about what that file says.
+# solving it differently here would mean `dredge --servers hosts.txt` and
+# `agree --servers hosts.txt` disagreeing about what that file says.

@@ -132,7 +132,7 @@ The tool earns its place here. One command, and you find out that six boxes
 in one rack have been quietly four minutes out for a week:
 
 ```bash
-agree script ./skew.py --hosts prod.txt --fleet-csv \
+agree script ./skew.py --servers prod.txt --fleet-csv \
     --scrub '[0-9]+[.][0-9]+' -- --csv
 ```
 

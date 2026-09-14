@@ -87,7 +87,7 @@ prompt. A host that needs a password is reported as a finding.
 Check a fleet is usable before relying on it:
 
 ```bash
-agree doctor --hosts prod.txt      # reachable? python3? sudo without a password?
+agree doctor --servers prod.txt      # reachable? python3? sudo without a password?
 netmesh doctor                     # ...and can it run the probe agent?
 ```
 
