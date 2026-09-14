@@ -3,10 +3,10 @@
 **Bring that answer back from every host, kept apart.**
 
 ```bash
-dredge /var/log/syslog --hosts hosts.txt          # one file from every host
-dredge --cmd 'ss -s' --hosts hosts.txt            # what a command says, instead
+dredge /var/log/syslog --servers hosts.txt          # one file from every host
+dredge --cmd 'ss -s' --servers hosts.txt            # what a command says, instead
 dredge /var/log/syslog --tail 200 -H 'web[01-40]' # only the last 200 lines
-dredge /etc/nginx --hosts hosts.txt               # a whole directory each
+dredge /etc/nginx --servers hosts.txt               # a whole directory each
 dredge /var/log/app.log --since -1h --append      # only what changed, added on
 dredge --cmd uptime --tag before -d audit         # labelled, to share a directory
 ```
@@ -33,8 +33,8 @@ runs one bash command on each host and lands what it says as that host's
 artifact:
 
 ```bash
-dredge --cmd 'ss -s' --hosts hosts.txt
-dredge --cmd 'sysctl -a' --tag sysctl -d audit --hosts hosts.txt
+dredge --cmd 'ss -s' --servers hosts.txt
+dredge --cmd 'sysctl -a' --tag sysctl -d audit --servers hosts.txt
 ```
 
 Both halves come back into the same directory under the same naming, so the
@@ -53,8 +53,8 @@ so no shell parses it on the way — not the local one, not ssh, not the remote
 login shell. The only shell that ever interprets it is the bash that runs it.
 
 ```bash
-dredge --cmd "grep -c 'error' /var/log/app.log" --hosts hosts.txt
-dredge --cmd 'echo "$(hostname -f): $(uptime -p)"' --hosts hosts.txt
+dredge --cmd "grep -c 'error' /var/log/app.log" --servers hosts.txt
+dredge --cmd 'echo "$(hostname -f): $(uptime -p)"' --servers hosts.txt
 ```
 
 Quotes, apostrophes, backslashes, embedded newlines, `$(...)` and backticks
@@ -142,7 +142,7 @@ part that could carry a slash and quietly mean a directory: anything outside
 stamped with the time:
 
 ```bash
-dredge /var/log/syslog --hosts hosts.txt      # -> dredge-20260910-172845/
+dredge /var/log/syslog --servers hosts.txt      # -> dredge-20260910-172845/
 dredge /var/log/syslog -d before-the-restart  # -> before-the-restart/
 ```
 
@@ -170,7 +170,7 @@ writes inside the collection directory or not at all.
 A log is usually gigabytes and the interesting part is the end of it.
 
 ```bash
-dredge /var/log/huge.log --tail 200 --hosts hosts.txt
+dredge /var/log/huge.log --tail 200 --servers hosts.txt
 ```
 
 The `tail` runs **on the far side**, so what crosses the network is two
@@ -196,7 +196,7 @@ dump in the directory you asked for does not become the whole run:
 ## Only if it changed
 
 ```bash
-dredge /var/log --since -1h --hosts hosts.txt
+dredge /var/log --since -1h --servers hosts.txt
 ```
 
 `--since` filters by modification time, also on the far side, so a directory
@@ -331,7 +331,7 @@ run; `exit_status` is that command's status, and empty for a file.
 | `-c, --cmd CMD` | a bash command to run on each host; its output is the artifact |
 | `-t, --tag NAME` | label this run's artifacts so several runs can share a directory |
 | `-H, --host TOKEN` | hosts, repeatable; ranges expand (`web[01-40]`) |
-| `--hosts FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
+| `--servers FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
 | `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
 | `--head N` / `--tail N` | only that many lines, cut on the far side |
 | `--since T` | only files modified since T |

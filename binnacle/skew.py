@@ -108,7 +108,7 @@ Grouping a fleet
   different amounts are different rows.  To group by *what is wrong*
   rather than by how much, scrub the magnitudes:
 
-    agree script ./skew.py --hosts prod.txt --fleet-csv \\
+    agree script ./skew.py --servers prod.txt --fleet-csv \\
         --scrub '[0-9]+[.][0-9]+' -- --csv
 
   which collapses "4m 12s fast" and "3m 51s fast" onto the same finding
@@ -1317,7 +1317,7 @@ def render_human(facts, findings, skipped, passed, args, C):
                 "check.", 4))
             out.append("")
             out.append("    %s" % _wrap(
-                "agree script ./skew.py --hosts prod.txt --fleet-csv "
+                "agree script ./skew.py --servers prod.txt --fleet-csv "
                 "-- --csv    (the whole fleet)", 4))
     else:
         for f in shown[:4]:

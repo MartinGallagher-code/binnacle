@@ -182,7 +182,7 @@ One host only, deliberately. Fanning out and grouping the answers is
 [`agree`](agree.md)'s job:
 
 ```bash
-agree script why-slow --hosts prod.txt --fleet-csv -- --csv
+agree script why-slow --servers prod.txt --fleet-csv -- --csv
 ```
 
 ## For fleets
@@ -198,7 +198,7 @@ Determinism is what makes it composable: two hosts with the same problem
 produce byte-identical rows, so [`agree`](agree.md) groups them together:
 
 ```bash
-agree script why-slow --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 That reports *"44 hosts healthy, 4 agree they are swapping, 2 unreachable"*.

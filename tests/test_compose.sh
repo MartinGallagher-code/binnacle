@@ -203,6 +203,11 @@ t_every_flag_appears_in_its_tools_help() {
     # netmesh is exempt and says so in its own words: its docstring lists
     # "Common options" and it carries a `help` verb that prints every flag
     # of every verb, which is checked separately below.
+    #
+    # dredge was simply missing from the list rather than exempt, so its
+    # flags went unchecked until the --hosts/--servers rename noticed --
+    # this rule caught the undocumented alias in agree and would not have
+    # caught the same one next door.
     "$PY" - "$BINNACLE_DIR" <<'EOF'
 import argparse, importlib.util, os, sys
 
@@ -234,7 +239,8 @@ def walk(parser, flags, seen):
 
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
-             "during", "skew", "binnacle", "muster", "manifest"):
+             "during", "skew", "binnacle", "muster", "manifest",
+             "dredge"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -281,7 +287,7 @@ t_a_stray_utf8_byte_does_not_lose_the_run() {
     assert_contains "$out" "sshd"
 
     out="$(ascii_run "$PY" "$BINNACLE_DIR/agree.py" hosts \
-             --hosts "$TEST_TMPDIR/hosts.txt")"
+             --servers "$TEST_TMPDIR/hosts.txt")"
     assert_not_contains "$out" "UnicodeDecodeError"
     assert_contains "$out" "web01"
 

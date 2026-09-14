@@ -160,7 +160,7 @@ would call every disk-bound run unstable each time the CPU idled.
 
 ```bash
 # Every host diagnosed while the fleet is under load, grouped by what bound it
-agree script ./during.py --hosts prod.txt --fleet-csv -- --seconds 60 --csv
+agree script ./during.py --servers prod.txt --fleet-csv -- --seconds 60 --csv
 ```
 
 ## With the rest of the toolchain

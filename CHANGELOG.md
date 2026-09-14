@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The fleet-listing flag is `--servers` everywhere it appears.** It was
+  `--hosts` on `dredge` and `agree`, and `--servers` on `netmesh gen`, so
+  the one question every tool asks -- which machines? -- was asked by two
+  different names depending on which instrument you had picked up.
+  `--servers` wins because the file it points at is a server list, and
+  because `netmesh` was already calling it that.
+
+  **`--hosts` still works** -- `--help` lists it as an alias -- and says
+  once on stderr that it has moved; `AGREE_HOSTS` is still read, with `AGREE_SERVERS` preferred
+  when both are set. Nothing written against the old spelling breaks, and
+  nothing goes quietly.
+
+  Two things deliberately keep their names. `resolve --hosts-file` is
+  `/etc/hosts` -- the system's own file, not a fleet -- and renaming it
+  would have been the opposite of clearer. `-H`/`--host` and `--server`,
+  which name machines inline rather than pointing at a list, are a
+  different question with a different answer and are left for a separate
+  pass.
+
+  This is the first test `dredge`'s list flag has ever had: every case in
+  its suite named hosts with `-H`.
+
 ### Added
 
 - **`dredge --cmd` brings back what a command says, the same way it brings

@@ -16,7 +16,7 @@ Options:
   --ssh HOST         run on HOST instead: this file is fed to `python3 -`
                      over ssh, so nothing is copied to or left on the box.
                      One host only -- a fleet is agree's job:
-                     `agree script why-slow --hosts prod.txt --fleet-csv -- --csv`
+                     `agree script why-slow --servers prod.txt --fleet-csv -- --csv`
   --ssh-cmd CMD      the ssh to use for --ssh                (WHY_SLOW_SSH)
   --interval S       seconds between the two counter snapshots (default 2.0;
                      0 takes a single snapshot and skips every rate rule)

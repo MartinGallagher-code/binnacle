@@ -50,9 +50,32 @@ t_ranges_expand() {
 t_host_file_comments_and_order() {
     printf '# a comment\nnode02\n\nnode01  # trailing\nnode02\n' \
         > "$TEST_TMPDIR/hosts.txt"
-    out="$("$PY" "$AG" hosts --hosts "$TEST_TMPDIR/hosts.txt")"
+    out="$("$PY" "$AG" hosts --servers "$TEST_TMPDIR/hosts.txt")"
     # Input order preserved, duplicates dropped.
     assert_eq "$out" "$(printf 'node02\nnode01')"
+}
+
+t_the_old_hosts_spelling_still_works() {
+    # --hosts is what --servers was called, and AGREE_HOSTS what
+    # AGREE_SERVERS was. Both keep working, and the flag says once that
+    # it moved -- a rename nobody is told about is a breakage with a
+    # changelog.
+    printf 'node02\nnode01\n' > "$TEST_TMPDIR/hosts.txt"
+    err="$("$PY" "$AG" hosts --hosts "$TEST_TMPDIR/hosts.txt" 2>&1 >/dev/null)"
+    out="$("$PY" "$AG" hosts --hosts "$TEST_TMPDIR/hosts.txt" 2>/dev/null)"
+    assert_eq "$out" "$(printf 'node02\nnode01')"
+    assert_contains "$err" "--hosts is now --servers"
+    # The new spelling says nothing about it.
+    err="$("$PY" "$AG" hosts --servers "$TEST_TMPDIR/hosts.txt" 2>&1 >/dev/null)"
+    assert_not_contains "$err" "--hosts"
+    # The old environment variable is still read, and the new one wins.
+    out="$(AGREE_HOSTS="$TEST_TMPDIR/hosts.txt" "$PY" "$AG" hosts 2>/dev/null)"
+    assert_eq "$out" "$(printf 'node02\nnode01')"
+    printf 'node09\n' > "$TEST_TMPDIR/newer.txt"
+    out="$(AGREE_HOSTS="$TEST_TMPDIR/hosts.txt" \
+           AGREE_SERVERS="$TEST_TMPDIR/newer.txt" \
+           "$PY" "$AG" hosts 2>/dev/null)"
+    assert_eq "$out" "node09"
 }
 
 t_majority_is_baseline_and_minority_is_diffed() {
@@ -259,7 +282,7 @@ SHIM
 t_a_bad_argument_is_refused_before_the_fan_out() {
     # A regex that will not compile used to surface as a traceback from
     # inside the per-host normalizer once the fan-out was underway, and a
-    # typo'd --hosts path fell through to being a hostname -- a fleet of
+    # typo'd --servers path fell through to being a hostname -- a fleet of
     # one bogus host that then failed as "unreachable", blaming the
     # network for a typo.
     rc=0; out="$(ag -H n1 --grep '([unclosed' --quiet -- x 2>&1)" || rc=$?
@@ -269,10 +292,10 @@ t_a_bad_argument_is_refused_before_the_fan_out() {
     rc=0; out="$(ag -H n1 --scrub '*bad' --quiet -- x 2>&1)" || rc=$?
     assert_status $rc 2
     assert_contains "$out" "bad --scrub"
-    rc=0; out="$(ag_verb hosts --hosts ./no/such/hosts.txt 2>&1)" || rc=$?
+    rc=0; out="$(ag_verb hosts --servers ./no/such/hosts.txt 2>&1)" || rc=$?
     assert_status $rc 2
     assert_contains "$out" "no such host file"
-    rc=0; out="$(ag_verb hosts --hosts /tmp 2>&1)" || rc=$?
+    rc=0; out="$(ag_verb hosts --servers /tmp 2>&1)" || rc=$?
     assert_status $rc 2
     assert_contains "$out" "no such host file"
 }
@@ -638,6 +661,7 @@ echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
 run_test "host file: comments, order, dedup"   t_host_file_comments_and_order
+run_test "the old --hosts still works"         t_the_old_hosts_spelling_still_works
 run_test "majority baseline, minority diffed"  t_majority_is_baseline_and_minority_is_diffed
 run_test "unreachable is a group"              t_unreachable_is_a_group_not_an_error
 run_test "unanimous exits 0"                   t_unanimous_exits_zero

@@ -182,7 +182,7 @@ chore:
 
 ```bash
 reachable prod.txt -i
-agree script ./why_slow.py --hosts prod.txt --fleet-csv --merge-csv triage.csv -- --csv
+agree script ./why_slow.py --servers prod.txt --fleet-csv --merge-csv triage.csv -- --csv
 ```
 
 ## IPv6
