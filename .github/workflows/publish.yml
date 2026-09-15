@@ -36,8 +36,48 @@ jobs:
           echo "tag says $tag, pyproject says $version"
           if [ "$tag" != "$version" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match version ${version} in pyproject.toml." \
-                 "Bump the version in all thirteen places and re-tag, or tag the commit that carries ${version}."
+                 "Bump the version in all fourteen places (the thirteen binnacle/*.py VERSION constants and pyproject.toml) and re-tag, or tag the commit that carries ${version}."
             exit 1
+          fi
+
+      # A dispatch has no tag, so the check above does not run -- and a
+      # dispatch from an unbumped main is precisely the run that ends green
+      # having published nothing, because skip-existing (below) turns PyPI's
+      # refusal into a no-op. Ask PyPI first and say so in the summary, so
+      # the run says what it did rather than only that it worked.
+      - name: Is this version already on PyPI?
+        id: pypi
+        run: |
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if python - "$version" <<'EOF'
+          import json, sys, urllib.request
+          want = sys.argv[1]
+          with urllib.request.urlopen(
+                  "https://pypi.org/pypi/binnacle/json", timeout=30) as r:
+              releases = json.load(r)["releases"]
+          files = releases.get(want) or []
+          if files:
+              print("%s was uploaded %s" % (want, min(f["upload_time"] for f in files)))
+              sys.exit(0)
+          print("%s is not on PyPI yet" % want)
+          sys.exit(1)
+          EOF
+          then
+            echo "already=yes" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Nothing to publish"
+              echo
+              echo "\`binnacle $version\` is **already on PyPI**, so this run will"
+              echo "upload nothing and still finish green (\`skip-existing\`)."
+              echo
+              echo "Bump the version in all fourteen places, then publish from a"
+              echo "GitHub Release so the tag and the version are checked."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::binnacle $version is already on PyPI -- this run will publish nothing."
+          else
+            echo "already=no" >> "$GITHUB_OUTPUT"
+            echo "### Publishing \`binnacle $version\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Build sdist and wheel
