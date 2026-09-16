@@ -53,20 +53,22 @@ t_the_server_list_comes_from_a_file() {
     assert_no_file "out/web03~logs~app.log"
 }
 
-t_the_old_hosts_spelling_still_works() {
-    # --hosts is what --servers was called. A script written against the
-    # old name must keep working, and must be told once that it moved --
-    # a rename nobody is told about is just a breakage with a changelog.
+t_the_old_hosts_spelling_is_gone() {
+    # --hosts was this flag's name and briefly its alias. It is neither
+    # now: one name for one thing, and a flag that half-exists is worse
+    # than either. The refusal has to be a refusal -- exit non-zero with
+    # nothing collected -- rather than a run that silently gathers no
+    # hosts and reports an empty fleet.
     seed
     cd "$TEST_TMPDIR"
     printf 'web01\n' > fleet.txt
-    err="$(dr logs/app.log --hosts fleet.txt -d out --quiet 2>&1 >/dev/null)"
-    assert_file_exists "out/web01~logs~app.log"
-    assert_contains "$err" "--hosts is now --servers"
-    # And the new spelling says nothing about it.
-    err="$(dr logs/app.log --servers fleet.txt -d out2 --quiet 2>&1 >/dev/null)"
+    rc=0; out="$(dr logs/app.log --hosts fleet.txt -d out --quiet 2>&1)" || rc=$?
+    assert_status 2 "$rc" "an option that does not exist is a usage error"
+    assert_contains "$out" "--hosts"
+    assert_no_file "out/web01~logs~app.log"
+    # And the name it does answer to still works.
+    dr logs/app.log --servers fleet.txt -d out2 --quiet
     assert_file_exists "out2/web01~logs~app.log"
-    assert_not_contains "$err" "--hosts"
 }
 
 t_a_directory_comes_back_as_named_files() {
@@ -740,5 +742,5 @@ run_test "a tag cannot smuggle a path"         t_a_tag_cannot_smuggle_a_path_int
 run_test "a command and a path are not both"   t_a_command_and_a_path_are_not_both_the_artifact
 run_test "head and tail cut a command too"     t_head_and_tail_cut_a_commands_output_too
 run_test "the server list comes from a file"   t_the_server_list_comes_from_a_file
-run_test "the old --hosts still works"         t_the_old_hosts_spelling_still_works
+run_test "the old --hosts is gone"             t_the_old_hosts_spelling_is_gone
 finish
