@@ -6,6 +6,103 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`dredge --follow` is a remote tail.** Each pass brings back only what
+  was added since the last one: the offset a file was left at travels to
+  the far side, which decides -- per file, with `stat` -- between *new*,
+  *longer*, *rotated* and *untouched*, and sends the difference. A second
+  pass over a log that has grown by forty lines carries forty lines, not
+  the file and not a `--tail 200` window that repeats whatever the last
+  pass already had.
+
+  It means the same thing for a file, a directory and a command. A
+  directory brings back what grew and what appeared; a command has no
+  offset to seek to, so the far side runs it again and compares a `cksum`
+  of the bytes we already have against the same prefix of this answer --
+  identical output sends nothing, output that grew sends the part that
+  was added, and output that changed from the first byte comes back
+  whole. `cksum` rather than a digest because it is POSIX and on every
+  box this will ever land on; a host without it sends the whole answer
+  every pass, which is the safe way to be wrong.
+
+  **A rotated file is not a truncated one and neither is a file that
+  grew.** A new inode, or a size that went *backwards*, is reported as
+  `ROTATED` and comes back whole from byte zero -- resuming at the old
+  offset would hand you the middle of a different file. Both halves are
+  needed: `logrotate` moving the file aside changes the inode, and its
+  `copytruncate` mode keeps the inode and puts the size back to zero. A
+  file replaced *in place* and left longer than it was is the one case
+  this cannot see, which is the blind spot `tail -f` has and is
+  documented rather than glossed.
+
+  Where the new bytes land is still `--append`, `--prepend` or the new
+  `--replace`, and under `--follow` the default is `--append`: the local
+  file is the log, growing here as it grows there.
+
+- **`dredge --daemon` keeps doing it.** A pass, a wait, another pass,
+  until SIGINT or SIGTERM -- answered by finishing the pass in hand, so a
+  run is never stopped halfway through a file. `--every` takes `30s`,
+  `5m`, `2h` or a plain number of seconds and defaults to five minutes;
+  it is the gap *between* passes rather than a period, so a pass that
+  outlasts it is reported and the next starts immediately instead of
+  stacking up behind it. `--passes N` stops after N.
+
+  `--daemon` implies `--follow`, because a timer that re-fetched every
+  file in full every five minutes would be a denial of service against
+  the fleet it is watching. It does not fork, detach or write a pidfile:
+  `&`, `tmux` or a unit file is how it becomes a service, which is the
+  arrangement where the thing supervising it already supervises
+  everything else.
+
+- **`dredge --state FILE`, and `DREDGE_EVERY` / `DREDGE_STATE`.** The
+  offsets a follow resumes from are kept in one JSON file in the
+  collection directory -- `out/dredge-state.json` by default. It is the
+  first thing this package writes without being told to write a file, and
+  it is why `--follow` refuses to run without `-d DIR`: without one every
+  run gets a stamped directory of its own and there would be nothing to
+  resume from. A state file that cannot be read is refused rather than
+  started over, because starting over means every host sending every file
+  again -- the event `--follow` exists to avoid. Several collections can
+  share one directory and one state file; each stream is kept apart by
+  its tag and by what it collects.
+
+### Changed
+
+- **`dredge --csv` gained two columns at the end**, `pass` and
+  `unchanged`: which pass of a `--daemon` run the row is from, and how
+  many artifacts that host had that were checked and did not have to be
+  carried. Under `--daemon` the CSV is appended to rather than replaced,
+  with the header written once. Existing columns are untouched and in the
+  same order.
+
+- **`dredge --csv`'s `bytes` is what came over the wire**, not the size
+  of the local file after it landed. The two were the same until
+  `--append` existed and have differed since; under `--follow`, where the
+  whole point is how little travelled, reporting the accumulated local
+  file would have been actively misleading.
+
+- **A `--follow` pass that brought nothing back exits 0.** Nothing new is
+  the answer a tail spends most of its time giving, and a script polling
+  one would otherwise read a quiet fleet as a broken run. Everywhere
+  else, an empty collection still exits 1.
+
+- **`dredge` is in the generated CLI reference.** `docs/conf.py` carries
+  an explicit tool list and `dredge` was never added to it, so the one
+  page that cannot drift from the parsers did not mention the tool at
+  all. The environment-variable table gained its row, and `agree`'s row
+  lost `AGREE_HOSTS`, which 0.8.0 removed.
+
+### Fixed
+
+- **The numeric-option audit was not auditing `dredge`.** Its entry in
+  `tests/check_numeric_args.py` invoked the tool with `-H h1`, a flag
+  `dredge` has never had under that spelling, so argparse rejected every
+  invocation with exit 2 -- which is exactly the status the check looks
+  for. All five of its refusals passed without the tool ever reaching
+  them. With `-S` they are checked for real.
+
+
 ## [0.8.0] - 2026-09-16
 
 ### Changed

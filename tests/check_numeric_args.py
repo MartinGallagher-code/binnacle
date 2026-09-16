@@ -51,6 +51,7 @@ MUST_REFUSE = {
 # point of the entry: it is what a reviewer reads instead of guessing.
 ZERO_IS_MEANINGFUL = {
     ("dredge", "--max-bytes"): "0 is documented as no ceiling",
+    ("dredge", "--passes"): "0 is documented as until stopped",
     ("during", "--interval"): "0 means a single snapshot, not a rate",
     ("during", "--seconds"): "0 means no window; a command was given instead",
     ("during", "--settle"): "0 means do not wait before sampling",
@@ -101,7 +102,7 @@ open(_EMPTY, "w").close()
 
 BASE = {
     "agree": ["hosts", "-H", "h1"],
-    "dredge": ["/etc/hostname", "-H", "h1", "--dry-run"],
+    "dredge": ["/etc/hostname", "-S", "h1", "--dry-run"],
     "logtriage": [_EMPTY],
     "muster": ["status", "--pool", _EMPTY],
     "netmesh": ["gen", "a=1.1.1.1", "b=2.2.2.2", "--mesh", _MESH],

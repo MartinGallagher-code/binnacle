@@ -9,6 +9,8 @@ Usage: dredge /var/log/syslog --servers hosts.txt    one file from every host
        dredge /etc/nginx --servers hosts.txt         a whole directory each
        dredge /var/log/app.log --since -1h           only what changed lately
        dredge --cmd 'uptime' --tag before --servers h  labelled, to keep runs apart
+       dredge /var/log/app.log --follow -d out       only what is new since last time
+       dredge /var/log/app.log --daemon -d out       ... and again every five minutes
 
 Options:
   -c, --cmd CMD       a bash command to run on each host; what it says comes
@@ -21,8 +23,18 @@ Options:
       --head N        only the first N lines of each file
       --tail N        only the last N lines of each file
       --since T       only files modified since T: -30m, 14:20, an ISO stamp
+  -f, --follow        only what is new since the last pass: each file is
+                      resumed from the byte it stopped at
+      --daemon        keep going -- a pass, a wait, another pass, until you
+                      stop it                          (implies --follow)
+      --every T       how long between passes: 30s, 5m, 2h  (DREDGE_EVERY, 5m)
+      --passes N      stop after N passes                  (0: until stopped)
+      --state FILE    where a --follow run keeps its marks
+                                       (DREDGE_STATE, DIR/dredge-state.json)
       --append        add what came back to the end of what is already here
       --prepend       add it to the beginning instead
+      --replace       overwrite what is here (the default, except under
+                      --follow, where --append is)
       --mark          write a marker line where old meets new
       --max-bytes N   skip a file larger than this  (default 100M, 0 none)
       --max-files N   stop after this many files per host   (default 500)
@@ -30,7 +42,8 @@ Options:
       --timeout S     ssh timeout per host                  (DREDGE_TIMEOUT)
       --user NAME     ssh user                              (DREDGE_USER)
       --ssh CMD       ssh command                           (DREDGE_SSH)
-      --csv [PATH]    host,source,local_path,bytes,outcome,exit_status
+      --csv [PATH]    host,source,local_path,bytes,outcome,exit_status,
+                      pass,unchanged  (appended to under --daemon)
       --dry-run       print the remote command and stop
       --quiet         no progress and no summary, just the findings
 
@@ -126,15 +139,111 @@ Names that stay apart
 
 Collecting the same thing again
   `--append` adds what came back to the end of the local file instead of
-  replacing it, and `--prepend` adds it to the beginning.  That is how a
-  local copy grows over a week of runs.  `--mark` writes a line saying
-  which host and when, at the seam.
+  replacing it, and `--prepend` adds it to the beginning.  `--replace`
+  is the third and the default -- what came back is what is here now.
+  `--mark` writes a line saying which host and when, at the seam.
 
   Nothing is de-duplicated: appending a whole file twice gives you it
   twice.  The pairing that makes sense is `--tail`/`--since` with
   `--append`, where each run brings back a slice that the last one did not
   have.  Overlap is still possible -- two runs an hour apart with
   `--tail 200` will repeat whatever both ends saw.
+
+  `--follow` is the pairing without the overlap, and is the next section.
+
+A remote tail
+  `--follow` brings back only what is new.  Each file is resumed from the
+  byte the last pass stopped at, so the second pass over a log that has
+  grown by forty lines carries forty lines -- not the file, and not a
+  `--tail 200` window that repeats whatever the last pass already had.
+
+  It works the same way whether you point it at a file, a directory or a
+  command:
+
+      dredge /var/log/app.log --follow -d out --servers hosts.txt
+      dredge /var/log/nginx   --follow -d out --servers hosts.txt
+      dredge --cmd 'dmesg -T' --follow -d out --servers hosts.txt
+
+  A directory brings back the files that grew, and a file that appeared
+  since the last pass comes back whole -- that is what new means.  A
+  command has no byte offset to resume from, so its output is compared
+  with what came back last time: identical output is nothing new, output
+  that starts with the last one carries only the part that was added to
+  it, and output that changed from the first byte comes back whole.
+
+  What arrives then lands as `--append`, `--prepend` or `--replace` says,
+  and under `--follow` the default is `--append` -- the local file is the
+  log, growing here as it grows there.  `--replace` under `--follow` is
+  the other useful shape: the local file holds only what the last pass
+  brought back.
+
+  `--tail N` decides where a *first* sight starts: the last N lines,
+  exactly as `tail -n N -f` does.  Without it a file that has not been
+  seen before comes back whole.  `--head` cannot mean anything here --
+  the first N lines of a file never change -- and is refused.
+
+  Where the marks live
+    A pass has to know where the last one stopped, so `--follow` keeps a
+    small JSON file -- one offset per host per file -- in the collection
+    directory, and needs to be told which directory that is:
+
+        dredge /var/log/app.log --follow -d out      # out/dredge-state.json
+
+    That is the one piece of state this package keeps on its own, and it
+    is named by you: no `-d` means a new stamped directory each run and
+    nothing to resume from, so `--follow` asks for one rather than
+    quietly starting over.  `--state FILE` puts it somewhere else.
+    Delete it and the next pass starts the follow again from scratch.
+    Several collections can share one directory and one state file: each
+    is kept apart by its tag and by what it collects.
+
+  When the file is not the file it was
+    A log that was rotated is not a log that was truncated to nothing,
+    and neither is a log that grew.  A file whose inode changed, or whose
+    size went *backwards*, is reported as rotated and comes back whole
+    from byte zero, because resuming at the old offset would hand you the
+    middle of the new file.
+
+    What that cannot see is a file replaced in place, keeping its inode
+    and ending up longer than the old one -- the same blind spot `tail
+    -f` has, and the reason `logrotate`'s `copytruncate` is visible here
+    (the size goes backwards) while an in-place rewrite is not.
+
+  `--max-bytes` means the new part under `--follow`, not the whole file:
+  a log that grows past the ceiling is still followed, and a single pass
+  that would carry more than the ceiling is what gets left behind.  That
+  is a finding rather than a note -- the mark stays where it was, so the
+  next pass has more to carry and is refused for the same reason, and
+  the follow of that one artifact is stuck until the ceiling moves.
+
+Daemon mode
+  `--daemon` does that on a timer: a pass, a wait, another pass, until
+  something stops it.
+
+      dredge /var/log/app.log --daemon -d out --servers hosts.txt
+      dredge --cmd 'systemctl --failed' --daemon --every 30s -d out -S 'web[01-40]'
+
+  The wait is `--every`, which takes `30s`, `5m`, `2h` or a plain number
+  of seconds, and defaults to five minutes.  It is the gap between the
+  end of one pass and the start of the next, so a pass that runs long
+  does not stack up behind itself -- one that outlasts the interval is
+  reported and the next begins immediately.
+
+  `--daemon` implies `--follow`, because a timer that re-fetched every
+  file in full every five minutes would be a denial of service against
+  the fleet it is watching.
+
+  Each pass prints one line, and anything worth reading -- a host that
+  failed, a file that rotated, a command that exited non-zero -- prints
+  its findings under it.  `--passes N` stops after N of them; without it,
+  it runs until SIGINT or SIGTERM, which are answered by finishing the
+  pass in hand and saying what the run did.
+
+  It does not fork, detach, write a pidfile or leave anything behind but
+  the files it collected and its state file.  `&`, `tmux`, or a systemd
+  unit with `Restart=on-failure` is how it becomes a background service,
+  which is the shape where `--every` in a unit file and `DREDGE_EVERY` in
+  the environment mean the same thing.
 
 How it goes over the wire
   One ssh per host, and one round trip: a `find` on the far side selects
@@ -166,6 +275,13 @@ Exit status
   1   a host failed, a path was missing, a command exited non-zero, a
       ceiling was hit, a name collided, or nothing was collected
   2   usage error
+
+  Under `--follow` a pass that brought nothing back is a 0: nothing new
+  is the answer a tail spends most of its time giving, and a script that
+  polls one would otherwise read a quiet fleet as a broken run.  A
+  `--daemon` stopped by a signal exits 0 as well -- it was asked to
+  stop -- and one that ran out its `--passes` exits 1 if any pass in it
+  had a failure.
 """
 
 import argparse
@@ -173,6 +289,7 @@ import base64
 import binascii
 import csv
 import io
+import json
 import os
 import random
 import re
@@ -189,11 +306,34 @@ from datetime import datetime
 
 VERSION = "0.8.0"
 PROG = os.path.basename(sys.argv[0]) or "dredge.py"
+# What this tool is, as opposed to what it was invoked as: the state file
+# is stamped with it, so a copy running under another name still
+# recognises marks its sibling wrote.
+PROG_NAME = "dredge"
 
 DEFAULT_JOBS = 20
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_FILES = 500
+# Long enough that a fleet is not being asked forty questions a minute,
+# short enough that a log tail is still a tail.  It is the gap between
+# passes rather than a period, so a slow pass cannot stack up behind
+# itself.
+DEFAULT_INTERVAL = 300.0
+
+# The one file this package keeps on its own, and only when asked to:
+# --follow has to know where the last pass stopped, and re-deriving that
+# by asking the fleet is the transfer it exists to avoid.  It lives in
+# the collection directory, which is named by you -- see --follow's
+# refusal to run without -d.
+STATE_NAME = "dredge-state.json"
+STATE_VERSION = 1
+# A mark nothing has answered to in a month is a file that was rotated
+# away or a host that left the list; keeping it for ever would grow the
+# state file for the life of the daemon.  Only ever dropped for a host
+# that answered in this pass, so an unreachable machine does not lose
+# its place by being unreachable.
+STATE_TTL = 30 * 86400
 
 # canonical copy: binnacle/agree.py SSH_OPTS.
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
@@ -201,6 +341,19 @@ SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
 
 OK, MISSING, FAILED, TIMEOUT, UNREACHABLE = (
     "ok", "missing", "failed", "timeout", "unreachable")
+
+# What the far side decided about one artifact under --follow, and what
+# the local side does with it.
+#
+#   NEW       never seen before: all of it, from byte zero
+#   TAILED    never seen before, and --tail N said where to start
+#   MORE      seen before and longer: the bytes past where we stopped
+#   ROTATED   seen before and not the same file: all of it again
+#   SAME      seen before and unchanged: nothing at all, and nothing is
+#             written here either -- an untouched local file is how a
+#             follow says "no news"
+NEW, TAILED, MORE, ROTATED, SAME = "new", "tail", "more", "rotated", "same"
+FOLLOW_MODES = (NEW, TAILED, MORE, ROTATED, SAME)
 
 # canonical copy: binnacle/agree.py RANGE_RE.
 RANGE_RE = re.compile(r"\[([^\]]+)\]")
@@ -540,6 +693,235 @@ def parse_when(s, ref=None):
 
 
 # ---------------------------------------------------------------------------
+# Where the last pass stopped
+# ---------------------------------------------------------------------------
+
+class Marks(object):
+    """One offset per host per artifact, so the next pass asks for the rest.
+
+    This is the only file any instrument here writes without being told to
+    write a file, and it exists because the alternative is worse: the
+    offsets could be re-derived from the size of what is already collected
+    here, but only when the local copy is byte-for-byte what came back --
+    which `--prepend`, `--mark`, `--replace` and a half-finished run each
+    make false.  A mark that is wrong is a gap in a log or a repeated
+    page, and neither announces itself.
+
+    So it is kept, named, and in the directory you named.  Several
+    collections can share one file: each stream is keyed by its tag and by
+    what it collects, so `--tag audit /etc/hosts` and `--cmd 'ss -s'`
+    following into one directory do not read each other's marks.
+
+    Written by the worker threads as their hosts answer, so every read and
+    write of the table goes through one lock.
+    """
+
+    __slots__ = ("path", "streams", "_lock")
+
+    def __init__(self, path, streams=None):
+        self.path = path
+        self.streams = streams or {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def stream_key(args):
+        """What this run is following, as one string.
+
+        The tag and the source together: two runs collecting different
+        things into one directory are two streams, and a run that changes
+        what it collects is a different stream rather than a resume of
+        something else's offsets.
+        """
+        what = ("cmd " + args.cmd) if args.cmd else ("path " + args.path)
+        return "%s\t%s" % (_clean_tag(args.tag) if args.tag else "-", what)
+
+    @classmethod
+    def load(cls, path):
+        """The marks that are there, or an empty set if none are.
+
+        A file that exists and cannot be read as marks is refused rather
+        than started over: starting over means every host sending every
+        file again, which on the fleet this is pointed at is the event
+        `--follow` was written to avoid.
+        """
+        if not os.path.exists(path):
+            return cls(path)
+        try:
+            with io.open(path, encoding="utf-8-sig", errors="replace") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            die("cannot read the follow marks in %s: %s\n"
+                "       delete it to start the follow again from scratch"
+                % (path, exc))
+        if not isinstance(doc, dict) or doc.get("tool") != PROG_NAME:
+            die("%s is not a dredge state file -- name another with --state, "
+                "or move it out of the way" % path)
+        if doc.get("state_version") != STATE_VERSION:
+            die("the follow marks in %s were written by another version of "
+                "this format (%s, this is %d)\n"
+                "       delete it to start the follow again from scratch"
+                % (path, doc.get("state_version"), STATE_VERSION))
+        return cls(path, cls._clean(doc.get("streams")))
+
+    @staticmethod
+    def _clean(streams):
+        """The marks that are the shape marks are, and nothing else.
+
+        This file is editable by hand -- that is half the point of it
+        being JSON in a directory you named -- so every level of it is
+        checked once here rather than being trusted at four call sites
+        inside worker threads, where a TypeError comes back as a host
+        that mysteriously failed.
+        """
+        out = {}
+        if not isinstance(streams, dict):
+            return out
+        for key, stream in streams.items():
+            if not isinstance(stream, dict):
+                continue
+            hosts = stream.get("hosts")
+            if not isinstance(hosts, dict):
+                continue
+            kept = {}
+            for name, items in hosts.items():
+                if not isinstance(items, dict):
+                    continue
+                marks = {}
+                for item, mark in items.items():
+                    if not isinstance(mark, dict):
+                        continue
+                    try:
+                        offset = int(mark.get("offset"))
+                    except (TypeError, ValueError):
+                        continue
+                    if offset < 0:
+                        continue
+                    seen = mark.get("seen")
+                    marks[item] = {
+                        "offset": offset,
+                        "stamp": str(mark.get("stamp") or "0"),
+                        "seen": (seen if isinstance(seen, (int, float))
+                                 else 0)}
+                if marks:
+                    kept[name] = marks
+            if kept:
+                out[key] = {"hosts": kept}
+        return out
+
+    def of(self, key, host_name):
+        """{artifact: {offset, stamp, seen}} for one host in one stream."""
+        with self._lock:
+            stream = self.streams.get(key) or {}
+            hosts = stream.get("hosts") or {}
+            got = hosts.get(host_name) or {}
+            return dict((k, dict(v)) for k, v in got.items()
+                        if isinstance(v, dict))
+
+    def record(self, key, host_name, item, offset, stamp):
+        with self._lock:
+            stream = self.streams.setdefault(key, {})
+            hosts = stream.setdefault("hosts", {})
+            hosts.setdefault(host_name, {})[item] = {
+                "offset": int(offset), "stamp": str(stamp),
+                "seen": int(time.time())}
+
+    def touch(self, key, host_name, item):
+        """Nothing new here, but it is still there -- so it is not stale."""
+        with self._lock:
+            entry = ((self.streams.get(key) or {}).get("hosts")
+                     or {}).get(host_name, {}).get(item)
+            if entry is not None:
+                entry["seen"] = int(time.time())
+
+    def forget(self, key, host_name, item):
+        """Drop a mark whose local file is gone, so the next pass refetches."""
+        with self._lock:
+            items = ((self.streams.get(key) or {}).get("hosts")
+                     or {}).get(host_name)
+            if items is not None:
+                items.pop(item, None)
+
+    def prune(self, key, host_names, now=None):
+        """Drop marks nothing has answered to in a month.
+
+        Only for hosts that answered in this pass: a mark is how an
+        unreachable machine keeps its place, and dropping one because the
+        host was down is how a day of downtime becomes a re-transfer of
+        every file on it.
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            hosts = (self.streams.get(key) or {}).get("hosts") or {}
+            for name in host_names:
+                items = hosts.get(name) or {}
+                for item in list(items):
+                    if now - items[item].get("seen", 0) > STATE_TTL:
+                        del items[item]
+
+    def save(self):
+        """Written whole and renamed into place, once a pass.
+
+        A daemon is killed in the middle of things by definition -- that
+        is what stopping one is -- and half a state file is a follow that
+        cannot resume.
+
+        Once a pass rather than once a host, so a run killed outright
+        resumes from the last pass's marks: that repeats at most one
+        pass's bytes into the local copy, where a half-written file would
+        cost the lot.  It is called between passes, from the one thread,
+        and the temporary name it renames from is per-process rather than
+        per-thread -- two workers saving at once would share it.
+        """
+        with self._lock:
+            doc = {"tool": PROG_NAME, "state_version": STATE_VERSION,
+                   "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                   "streams": self.streams}
+            body = json.dumps(doc, indent=1, sort_keys=True)
+        d = os.path.dirname(self.path)
+        if d and not os.path.isdir(d):
+            try:
+                os.makedirs(d)
+            except OSError as exc:
+                if not os.path.isdir(d):
+                    die("cannot make %s for the follow marks: %s" % (d, exc))
+        tmp = "%s.tmp.%d" % (self.path, os.getpid())
+        try:
+            with io.open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(body + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            die("cannot write the follow marks to %s: %s" % (self.path, exc))
+
+
+def parse_interval(s):
+    """'30s', '5m', '2h', '1d', or a bare number of seconds.
+
+    Spelled the way `--since -30m` is spelled, because a person who has
+    just typed one should not have to look up the other.
+    """
+    text = (s or "").strip().lower()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([smhd]?)$", text)
+    if not m:
+        die("cannot understand an interval of %r (try 30s, 5m, 2h, or a "
+            "plain number of seconds)" % s)
+    mult = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return float(m.group(1)) * mult
+
+
+def fmt_interval(secs):
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size and secs % size == 0:
+            return "%g%s" % (secs / size, unit)
+    return "%gs" % secs
+
+
+# ---------------------------------------------------------------------------
 # The far side
 # ---------------------------------------------------------------------------
 #
@@ -572,8 +954,8 @@ if [ ! -e "$rel" ]; then echo "dredge: no such path: $p" >&2; exit 4; fi
 '''
 
 
-def _find_expr(args, since_epoch):
-    """The selection, shared by both transports.
+def _find_expr(args, since_epoch, size_clause=True):
+    """The selection, shared by every transport.
 
     `-H` follows a symlink named on the command line and nothing else,
     which is the distinction that matters here: `dredge /var/log/current`
@@ -589,7 +971,7 @@ def _find_expr(args, since_epoch):
         # the same files. (Its own clock still decides each file's mtime,
         # which is why a skewed box hands back the wrong ones.)
         bits.append("-newermt %s" % shlex.quote("@%d" % int(since_epoch)))
-    if args.max_bytes:
+    if args.max_bytes and size_clause:
         bits.append("-size -%dc" % (int(args.max_bytes) + 1))
     return " ".join(bits)
 
@@ -708,6 +1090,210 @@ def remote_slice_command(args, since_epoch, mark):
               "' sh\n" % (_find_expr(args, since_epoch), cut))
 
 
+_FOLLOW_SCRIPT = r'''
+MARK=%(mark)s
+export MARK
+RT=$(mktemp 2>/dev/null) || RT=/tmp/dredge-marks.$$
+export RT
+printf '%%s' %(marks)s | base64 -d > "$RT" 2>/dev/null
+MAXB=%(maxb)d
+export MAXB
+TAILN=%(tailn)d
+export TAILN
+%(find)s -print0 2>/dev/null | xargs -0 -r -n1 sh -c '
+f=$1
+meta=$(stat -c "%%s %%i" -- "$f" 2>/dev/null)
+if [ -n "$meta" ]; then size=${meta%% *}; ino=${meta##* }
+else size=$(wc -c < "$f" 2>/dev/null | tr -d " "); ino=0; fi
+case "$size" in ""|*[!0-9]*) exit 0;; esac
+key=$(printf "%%s" "$f" | base64 | tr -d "\n")
+prev=$(grep "^$key " "$RT" 2>/dev/null | head -n 1)
+mode=new
+start=0
+if [ -n "$prev" ]; then
+  rest=${prev#* }
+  off=${rest%% *}
+  was=${rest##* }
+  case "$off" in ""|*[!0-9]*) off="" ;; esac
+  if [ -z "$off" ]; then mode=new
+  elif [ "$was" != 0 ] && [ "$ino" != 0 ] && [ "$was" != "$ino" ]; then mode=rotated
+  elif [ "$size" -lt "$off" ]; then mode=rotated
+  elif [ "$size" -eq "$off" ]; then mode=same
+  else
+    mode=more
+    start=$off
+  fi
+elif [ "$TAILN" -gt 0 ]; then mode=tail
+fi
+if [ "$mode" != same ] && [ "$mode" != tail ] && [ "$MAXB" -gt 0 ] \
+   && [ $((size - start)) -gt "$MAXB" ]; then
+  echo "dredge-skip: $((size - start)) $f" >&2
+  exit 0
+fi
+printf "%%s FILE\n" "$MARK"
+printf "%%s" "$f" | base64 | tr -d "\n"
+printf "\n%%s META %%s %%s %%s %%s\n" "$MARK" "$mode" "$start" "$ino" "$size"
+if [ "$mode" != same ]; then
+  printf "%%s DATA\n" "$MARK"
+  if [ "$mode" = tail ]; then
+    head -c "$size" -- "$f" | tail -n "$TAILN" | base64
+  else
+    tail -c "+$((start + 1))" -- "$f" | head -c $((size - start)) | base64
+  fi
+fi
+printf "%%s END\n" "$MARK"
+' sh
+rm -f "$RT"
+'''
+
+
+def marks_table(marks):
+    """The resume table, as the far side reads it: `<b64 path> <off> <ino>`.
+
+    The path is base64'd because a filename may hold a space or a newline,
+    and a table a filename can break is a table the fleet gets to choose
+    the shape of.  Everything after it is digits, so the far side can
+    anchor a plain `grep` on the key and take the rest by splitting.
+    """
+    lines = []
+    for item in sorted(marks):
+        mark = marks[item]
+        key = base64.b64encode(item.encode("utf-8")).decode("ascii")
+        stamp = str(mark.get("stamp") or "0")
+        if not stamp.isdigit():
+            stamp = "0"
+        lines.append("%s %d %s" % (key, int(mark.get("offset") or 0), stamp))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def remote_follow_command(args, mark, marks):
+    """Only what is new, decided on the far side, one file at a time.
+
+    The decision cannot be made here: knowing whether a file grew, was
+    rotated or is untouched means knowing its size and its inode *now*,
+    and asking for that is the round trip this exists to avoid.  So the
+    marks go over instead -- one line per file we already have some of --
+    and the far side compares them against what it finds, sends only the
+    difference, and says in a META frame which of the five things it
+    decided.  The local side never has to trust that decision: the frame
+    carries the offset the bytes start at, so a mark is rebuilt from what
+    actually arrived rather than from what was promised.
+
+    The ceiling applies to the new part rather than to the file.  A log
+    that grows past `--max-bytes` is still a log being followed, and
+    refusing it at the size it has *reached* would mean a tail that
+    quietly stops at 100MB -- which is a gap in the collected copy that
+    nothing announces.  What the ceiling catches here is a single pass
+    carrying more than it, which is the runaway it is there for.
+    """
+    table = marks_table(marks)
+    return (_PREAMBLE % {"path": shlex.quote(args.path)}
+            + _FOLLOW_SCRIPT % {
+                "mark": shlex.quote(mark),
+                "marks": shlex.quote(base64.b64encode(
+                    table.encode("utf-8")).decode("ascii")),
+                "maxb": int(args.max_bytes or 0),
+                "tailn": int(args.tail or 0),
+                "find": _find_expr(args, args.since_epoch, size_clause=False),
+            })
+
+
+_CMD_FOLLOW_SCRIPT = r'''
+MARK=%(mark)s
+export MARK
+command -v bash >/dev/null 2>&1 || {
+  echo "dredge: no bash on this host, and --cmd runs a bash command" >&2
+  exit 5
+}
+st=$(mktemp 2>/dev/null) || st=/tmp/dredge-status.$$
+ob=$(mktemp 2>/dev/null) || ob=/tmp/dredge-out.$$
+CMDB64=%(cmd)s
+export CMDB64
+{ CMD=$(printf "%%s" "$CMDB64" | base64 -d); export CMD
+  bash -c "eval \"\$CMD\""
+  echo $? > "$st"
+} %(sink)s
+OFF=%(off)s
+SUM=%(sum)s
+size=$(wc -c < "$ob" 2>/dev/null | tr -d " ")
+case "$size" in ""|*[!0-9]*) size=0;; esac
+sum=$(cksum < "$ob" 2>/dev/null | cut -d" " -f1)
+case "$sum" in ""|*[!0-9]*) sum=0;; esac
+mode=new
+start=0
+if [ -n "$OFF" ] && [ "$sum" != 0 ] && [ "$size" -ge "$OFF" ]; then
+  pre=$(head -c "$OFF" -- "$ob" 2>/dev/null | cksum 2>/dev/null | cut -d" " -f1)
+  if [ -n "$pre" ] && [ "$pre" = "$SUM" ]; then
+    if [ "$size" -eq "$OFF" ]; then mode=same; else
+      mode=more
+      start=$OFF
+    fi
+  fi
+fi
+printf "%%s FILE\n" "$MARK"
+printf "%%s" %(name)s
+printf "\n%%s META %%s %%s %%s %%s\n" "$MARK" "$mode" "$start" "$sum" "$size"
+if [ "$mode" != same ]; then
+  printf "%%s DATA\n" "$MARK"
+  tail -c "+$((start + 1))" -- "$ob" | base64
+fi
+printf "%%s END\n" "$MARK"
+printf "%%s EXIT %%s\n" "$MARK" "$(cat "$st" 2>/dev/null || echo unknown)"
+rm -f "$st" "$ob"
+'''
+
+
+def remote_cmd_follow_command(args, mark, prev):
+    """The same command again, and only the part of its answer that is new.
+
+    A command has no inode and no offset to seek to -- it has to be run
+    again in full, and the whole of what it says exists only after it has
+    said it.  What can still be avoided is *carrying* it: the answer goes
+    to a temp file on the far side, and a checksum of its first OFF bytes
+    is compared with the checksum of the OFF bytes that came back last
+    time.  The three outcomes are the three that mean anything:
+
+      same length and same checksum   nothing was added: send nothing
+      longer, same prefix             `dmesg`, `journalctl`, a `cat` of a
+                                      log: send the part past OFF
+      the prefix differs              a different answer, not a longer
+                                      one: send all of it
+
+    `cksum` rather than a digest because it is in POSIX and on every box
+    this will ever land on; a checksum on an *exact prefix length* is not
+    being asked to tell two files apart, it is being asked whether the
+    output it already carried is still the start of this one.  A host
+    without `cksum` reports a sum of 0 and every pass is a whole answer,
+    which is the safe way to be wrong.
+
+    The temp file is what buys this, and it is the reason a follow of a
+    command does not stream: the far side has to know the length before
+    it can decide what to send.  Without `--follow` nothing here applies
+    and the answer streams as it always did.
+    """
+    cut = ""
+    if args.head:
+        cut = "2>&1 | head -n %d > \"$ob\"" % args.head
+    elif args.tail:
+        cut = "2>&1 | tail -n %d > \"$ob\"" % args.tail
+    else:
+        # `2>&1 >file` would send stderr to the terminal and stdout to the
+        # file, which is the opposite of one answer in the order it was
+        # said.  The redirection order is load-bearing.
+        cut = "> \"$ob\" 2>&1"
+    return _CMD_FOLLOW_SCRIPT % {
+        "mark": shlex.quote(mark),
+        "cmd": shlex.quote(base64.b64encode(
+            args.cmd.encode("utf-8")).decode("ascii")),
+        "name": shlex.quote(base64.b64encode(
+            args.tag.encode("utf-8")).decode("ascii")),
+        "sink": cut,
+        "off": shlex.quote(str(int(prev.get("offset") or 0))
+                           if prev else ""),
+        "sum": shlex.quote(str(prev.get("stamp") or "0") if prev else "0"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Naming
 # ---------------------------------------------------------------------------
@@ -811,6 +1397,11 @@ def _marker(host):
 def write_file(args, host, path, data, taken, collisions=None, remote=""):
     """Land DATA at PATH, replacing, appending or prepending.
 
+    True if the bytes landed here.  False means a name that was already
+    taken, which is the one outcome a follow must not write a mark for:
+    the mark would say those bytes had been collected, the next pass
+    would start after them, and the gap would never close.
+
     Written whole and renamed into place, so a reader -- the next tool in
     the pipeline, usually -- never sees half a file, and a run interrupted
     halfway leaves what was already there intact.
@@ -824,7 +1415,7 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
     if any(p == path for _h, p, _n in taken):
         if collisions is not None:
             collisions.append(remote or path)
-        return
+        return False
     d = os.path.dirname(path)
     if d:
         try:
@@ -832,6 +1423,10 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
         except OSError as exc:
             if not os.path.isdir(d):
                 raise LocalWriteError("cannot make %s: %s" % (d, exc))
+    # What came back, before anything already here is added to it: the
+    # report is about the transfer, and under --append the file on disk
+    # is a week of transfers rather than this one.
+    carried = len(data)
     old = b""
     if (args.append or args.prepend) and os.path.exists(path):
         try:
@@ -862,7 +1457,8 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
         except OSError:
             pass
         raise LocalWriteError("cannot write %s: %s" % (path, exc))
-    taken.append((host, path, len(data)))
+    taken.append((host, path, carried))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -871,7 +1467,8 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
 
 class Result(object):
     __slots__ = ("host", "outcome", "detail", "files", "bytes", "skipped",
-                 "collisions", "truncated", "exit_status", "duration")
+                 "collisions", "truncated", "exit_status", "duration",
+                 "unchanged", "rotated", "resynced")
 
     def __init__(self, host):
         self.host = host
@@ -890,6 +1487,19 @@ class Result(object):
         # separately rather than folded into the outcome.
         self.exit_status = None
         self.duration = 0.0
+        # What --follow found and did not have to carry. Unchanged is a
+        # count rather than a list because it is the ordinary answer and
+        # naming four hundred untouched files is not a report.
+        self.unchanged = 0
+        # Files that were not the file they were: a new inode, or a size
+        # that went backwards. Each came back whole, and each is worth
+        # saying out loud -- it is the one case where a followed copy has
+        # a seam in it that is not a seam in the original.
+        self.rotated = []
+        # The local copy was gone, so the mark was dropped rather than
+        # believed. Nothing is more confidently wrong than a follow
+        # reporting "nothing new" about a file that is no longer here.
+        self.resynced = []
 
 
 def ssh_argv(args, host, command):
@@ -1103,7 +1713,19 @@ def collect_command(args, host):
     will say is not known until it has said it, so it cannot be tarred,
     and base64 inside a per-run token frame carries any byte it produces.
     """
-    return _run(args, host, remote_cmd_command(args, args.mark_token),
+    if args.follow:
+        prev = args.marks.of(args.stream_key, host.name).get("cmd")
+        command = remote_cmd_follow_command(args, args.mark_token, prev)
+    else:
+        command = remote_cmd_command(args, args.mark_token)
+    return _run(args, host, command, _frame_consumer(args, host))
+
+
+def collect_follow(args, host):
+    """Only what is new, resumed from this host's own marks."""
+    marks = args.marks.of(args.stream_key, host.name)
+    return _run(args, host,
+                remote_follow_command(args, args.mark_token, marks),
                 _frame_consumer(args, host))
 
 
@@ -1115,19 +1737,75 @@ def collect_slices(args, host):
                 _frame_consumer(args, host))
 
 
+def parse_meta(text):
+    """`<mode> <start> <stamp> <size>`, or None if it is not that.
+
+    Nothing the far side says is trusted further than it has to be: an
+    unknown mode, a non-numeric offset or a missing field makes the whole
+    frame meaningless rather than half-believed, and a half-believed
+    offset is a gap in a collected log.
+    """
+    bits = text.split()
+    if len(bits) != 4 or bits[0] not in FOLLOW_MODES:
+        return None
+    if not bits[1].isdigit() or not bits[3].isdigit():
+        return None
+    return {"mode": bits[0], "start": int(bits[1]), "stamp": bits[2],
+            "size": int(bits[3])}
+
+
+def _land_follow(args, host, r, item, path, data, meta, taken):
+    """One artifact's worth of new bytes, and the mark that follows it.
+
+    The mark is rebuilt from what *arrived*, not from what the far side
+    said it would send: `start` plus the bytes actually decoded here. A
+    transfer cut off halfway therefore resumes from where it was cut,
+    where believing the promised size would step over whatever never
+    made it.
+
+    The exception is a first sight cut by `--tail N`, which is a count of
+    lines rather than of bytes -- there the far side clamped its read at
+    the size it measured, and that size is where the next pass starts.
+    """
+    local = local_path(args, host, path)
+    if meta["mode"] == SAME:
+        # Nothing new there. If what we already have is still here, say
+        # so and move on; if it is not, the mark is a lie and goes.
+        if os.path.exists(local):
+            r.unchanged += 1
+            args.marks.touch(args.stream_key, host.name, item)
+        else:
+            r.resynced.append(path)
+            args.marks.forget(args.stream_key, host.name, item)
+        return
+    if meta["mode"] == ROTATED:
+        r.rotated.append(path)
+    if not write_file(args, host, local, data, taken, r.collisions, path):
+        # The name was already taken, so these bytes are not here. A mark
+        # now would say they were, and the next pass would start after
+        # them.
+        return
+    offset = (meta["size"] if meta["mode"] == TAILED
+              else meta["start"] + len(data))
+    args.marks.record(args.stream_key, host.name, item, offset, meta["stamp"])
+
+
 def _frame_consumer(args, host):
-    """Read `<MARK> FILE|DATA|END|EXIT` frames off a stream."""
+    """Read `<MARK> FILE|META|DATA|END|EXIT` frames off a stream."""
     mark = args.mark_token
 
     def consume(stream, r):
         taken = []
-        state, path, chunks = None, None, []
+        state, path, chunks, meta = None, None, [], None
         for raw in stream:
             line = raw.decode("utf-8", "replace").rstrip("\n")
             if line == mark + " FILE":
-                state, path, chunks = "path", None, []
+                state, path, chunks, meta = "path", None, [], None
             elif line == mark + " DATA":
                 state = "data"
+            elif line.startswith(mark + " META "):
+                meta = parse_meta(line[len(mark) + 6:])
+                state = None
             elif line.startswith(mark + " EXIT "):
                 raw_st = line[len(mark) + 6:].strip()
                 r.exit_status = int(raw_st) if raw_st.isdigit() else raw_st
@@ -1139,9 +1817,18 @@ def _frame_consumer(args, host):
                         r.detail = "undecodable payload for %s" % path
                         data = None
                     if data is not None:
-                        write_file(args, host, local_path(args, host, path),
-                                   data, taken, r.collisions, path)
-                state, path, chunks = None, None, []
+                        if args.follow and meta is None:
+                            r.detail = ("the far side sent no follow frame "
+                                        "for %s" % path)
+                        elif args.follow:
+                            _land_follow(args, host, r,
+                                         "cmd" if args.cmd else path,
+                                         path, data, meta, taken)
+                        else:
+                            write_file(args, host,
+                                       local_path(args, host, path),
+                                       data, taken, r.collisions, path)
+                state, path, chunks, meta = None, None, [], None
                 if len(taken) >= args.max_files:
                     r.truncated = True
                     r.detail = "stopped at --max-files %d" % args.max_files
@@ -1162,6 +1849,8 @@ def _frame_consumer(args, host):
 def collect_one(args, host):
     if args.cmd:
         return collect_command(args, host)
+    if args.follow:
+        return collect_follow(args, host)
     if args.head or args.tail:
         return collect_slices(args, host)
     return collect_tar(args, host)
@@ -1198,7 +1887,17 @@ def fan_out(hosts, fn, jobs, quiet=False):
 # Output
 # ---------------------------------------------------------------------------
 
-def render(results, args, elapsed):
+def render(results, args, elapsed, compact=False):
+    """The report, or -- for one pass of a repeating run -- one line of it.
+
+    A daemon printing a full report every five minutes buries the one
+    that mattered under three hundred that said nothing.  So a pass says
+    its one line, and keeps the findings block underneath it for the
+    passes that have something in it: a host that failed, a file that
+    rotated, a command that exited non-zero.  The block is word for word
+    the one-off report's, because a thing worth reporting does not change
+    its wording for being on a timer.
+    """
     out = []
     good = [r for r in results if r.outcome == OK and r.files]
     empty = [r for r in results if r.outcome == OK and not r.files]
@@ -1215,14 +1914,50 @@ def render(results, args, elapsed):
         what += "   [tail %d]" % args.tail
     if args.since:
         what += "   [since %s]" % args.since
+    if args.follow:
+        what += "   [follow, %s]" % args.mode
+    if args.every:
+        what += "   [every %s]" % fmt_interval(args.every)
+    if compact:
+        out.append("%s  pass %-4d %d new, %s from %d of %d host%s in %.1fs"
+                   % (time.strftime("%H:%M:%S"), args.passno, nfiles,
+                      fmt_bytes(nbytes), len(good), len(results),
+                      "" if len(results) == 1 else "s", elapsed))
+        return _render_findings(out, results, args, compact)
     out.append("%s -- %s" % (PROG, what))
-    out.append("        %d file%s from %d of %d host%s, %s in %.1fs -> %s/"
-               % (nfiles, "" if nfiles == 1 else "s", len(good), len(results),
+    if args.follow:
+        noun = "%s with new data" % ("artifact" if nfiles == 1
+                                     else "artifacts")
+    else:
+        noun = "file" if nfiles == 1 else "files"
+    out.append("        %d %s from %d of %d host%s, %s in %.1fs -> %s/"
+               % (nfiles, noun, len(good), len(results),
                   "" if len(results) == 1 else "s", fmt_bytes(nbytes),
                   elapsed, args.dir))
     out.append("")
+    return _render_findings(out, results, args, compact)
 
-    if empty:
+
+def _render_findings(out, results, args, compact=False):
+    """Everything that is not the headline: what went wrong, or nearly."""
+    good = [r for r in results if r.outcome == OK and r.files]
+    empty = [r for r in results if r.outcome == OK and not r.files]
+    bad = [r for r in results if r.outcome != OK]
+    nfiles = sum(len(r.files) for r in results)
+    # Counted over the hosts this line is about, not over the run: the
+    # sub-line sits under the list of hosts that had nothing new, and a
+    # total that included the busy hosts' untouched files would be read
+    # as belonging to the quiet ones.
+    steady = sum(r.unchanged for r in empty)
+    if empty and args.follow:
+        names = " ".join(r.host.name for r in empty[:6])
+        more = "" if len(empty) <= 6 else " (+%d)" % (len(empty) - 6)
+        out.append("  UNCHANGED %d host%s had nothing new: %s%s"
+                   % (len(empty), "" if len(empty) == 1 else "s", names, more))
+        if steady:
+            out.append("            %d artifact%s checked and unchanged there"
+                       % (steady, "" if steady == 1 else "s"))
+    elif empty:
         names = " ".join(r.host.name for r in empty[:6])
         more = "" if len(empty) <= 6 else " (+%d)" % (len(empty) - 6)
         out.append("  EMPTY     %d host%s had nothing to send: %s%s"
@@ -1232,6 +1967,29 @@ def render(results, args, elapsed):
                        % (args.path, args.since))
         elif args.cmd:
             out.append("            the command printed nothing there")
+    turned = [(r.host, x) for r in results for x in r.rotated]
+    if turned:
+        out.append("  ROTATED   %d file%s was not the file it was and came "
+                   "back whole:" % (len(turned),
+                                    "" if len(turned) == 1 else "s"))
+        for host, remote in turned[:5]:
+            out.append("            %-12s %s" % (host.name, remote))
+        if len(turned) > 5:
+            out.append("            ... and %d more" % (len(turned) - 5))
+        out.append("            A new inode, or a size that went backwards: "
+                   "resuming at the old")
+        out.append("            offset would have handed you the middle of "
+                   "a different file.")
+    lost = [(r.host, x) for r in results for x in r.resynced]
+    if lost:
+        out.append("  RESYNC    %d local cop%s gone, so the mark went with "
+                   "it:" % (len(lost), "y is" if len(lost) == 1 else "ies are"))
+        for host, remote in lost[:5]:
+            out.append("            %-12s %s" % (host.name, remote))
+        if len(lost) > 5:
+            out.append("            ... and %d more" % (len(lost) - 5))
+        out.append("            The next pass brings each of them back "
+                   "whole.")
     for r in bad:
         out.append("  %-9s %s: %s" % (r.outcome.upper(), r.host.name,
                                       r.detail or "?"))
@@ -1284,12 +2042,18 @@ def render(results, args, elapsed):
                        % (host.name, fmt_bytes(size), path))
         if len(skipped) > 5:
             out.append("            ... and %d more" % (len(skipped) - 5))
-        out.append("            --tail N brings back the end of one without "
-                   "the rest of it.")
-    if empty or bad or skipped or clashed or cut or angry:
+        if args.follow:
+            out.append("            That is what one pass would carry, not "
+                       "the size of the file -- and the")
+            out.append("            next pass would carry more.  Raise "
+                       "--max-bytes: the follow is stuck here.")
+        else:
+            out.append("            --tail N brings back the end of one "
+                       "without the rest of it.")
+    if empty or bad or skipped or clashed or cut or angry or turned or lost:
         out.append("")
 
-    if good and not args.quiet:
+    if good and not args.quiet and not compact:
         shown = [p for r in good for p, _n in r.files][:6]
         for p in shown:
             out.append("  %s" % p)
@@ -1299,31 +2063,171 @@ def render(results, args, elapsed):
     return "\n".join(out) + "\n"
 
 
+# Appended to, never reordered: the header is an interface, and a
+# column that moves breaks every reader of every CSV already written.
+# `pass` is 1 for a single run and counts up under --daemon; `unchanged`
+# is what a follow checked and did not have to carry, which is the number
+# that says the tail is working.
 CSV_FIELDS = ["host", "source", "local_path", "bytes", "outcome",
-              "exit_status"]
+              "exit_status", "pass", "unchanged"]
 
 
-def write_csv(results, args, path):
-    fh = sys.stdout if path in (None, "-") else io.open(
-        path, "w", newline="", encoding="utf-8")
+def write_csv(results, args, path, append=False):
+    """One row per file, per host, per pass.
+
+    A daemon appends: the file is the log of the collection, and each
+    pass adds its rows to the end of it rather than replacing what the
+    last one wrote. The header goes down once, on the first pass.
+    """
+    if path in (None, "-"):
+        fh = sys.stdout
+    else:
+        fh = io.open(path, "a" if append else "w", newline="",
+                     encoding="utf-8")
     try:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS, lineterminator="\n")
-        w.writeheader()
+        if not append:
+            w.writeheader()
         for r in results:
             source = args.cmd if args.cmd else args.path
             st = "" if r.exit_status is None else r.exit_status
+            row = {"host": r.host.name, "source": source,
+                   "outcome": r.outcome, "exit_status": st,
+                   "pass": args.passno or 1, "unchanged": r.unchanged}
             if not r.files:
-                w.writerow({"host": r.host.name, "source": source,
-                            "local_path": "", "bytes": 0,
-                            "outcome": r.outcome, "exit_status": st})
+                row.update({"local_path": "", "bytes": 0})
+                w.writerow(row)
                 continue
             for p, n in r.files:
-                w.writerow({"host": r.host.name, "source": source,
-                            "local_path": p, "bytes": n,
-                            "outcome": r.outcome, "exit_status": st})
+                row.update({"local_path": p, "bytes": n})
+                w.writerow(row)
     finally:
         if fh is not sys.stdout:
             fh.close()
+
+
+# ---------------------------------------------------------------------------
+# A pass, and passes
+# ---------------------------------------------------------------------------
+
+def one_pass(args, hosts):
+    """Contact every host once, and write down where each one got to."""
+    t0 = time.monotonic()
+    results = fan_out(hosts, lambda h: collect_one(args, h), args.jobs,
+                      args.quiet)
+    elapsed = time.monotonic() - t0
+    if args.marks is not None:
+        # Only hosts that answered: a mark is how an unreachable machine
+        # keeps its place, and dropping one because the host was down is
+        # how an afternoon of downtime becomes a re-transfer of every
+        # file on it.
+        args.marks.prune(args.stream_key,
+                         [r.host.name for r in results if r.outcome == OK])
+        args.marks.save()
+    return results, elapsed
+
+
+def pass_failed(args, results):
+    """Whether what came back is not what was asked for.
+
+    Nothing collected is a failure for a one-off run -- it is the whole
+    point of the run -- and the ordinary answer under `--follow`, which
+    spends most of its life having nothing to say.  A tail that exits 1
+    every time the log is quiet is a tail nothing can be built on.
+    """
+    if any(r.outcome != OK or r.collisions or r.truncated
+           or r.exit_status not in (None, 0) for r in results):
+        return True
+    if args.follow and any(r.skipped for r in results):
+        # Under --follow a file left behind for being over the ceiling is
+        # not a file you can come back for: the mark stays where it was,
+        # so the next pass has *more* to carry than this one did and will
+        # be refused for the same reason. The follow of that artifact is
+        # stuck until the ceiling moves, which is not something to find
+        # out from a directory listing a week later.
+        return True
+    return not args.follow and not sum(len(r.files) for r in results)
+
+
+def report_pass(args, results, elapsed, compact=False):
+    """Say what the pass did -- unless --quiet, and nothing went wrong.
+
+    Quiet means the same thing in both shapes: a failure is still a
+    finding and still gets said, because a daemon that swallows an
+    unreachable host is a daemon you cannot leave running.
+    """
+    if args.quiet and not any(r.outcome != OK for r in results):
+        return
+    sys.stdout.write(render(results, args, elapsed, compact=compact))
+    sys.stdout.flush()
+
+
+def run_repeating(args, hosts):
+    """A pass, a wait, another pass, until something says stop.
+
+    The wait is between passes rather than a period, so a pass that runs
+    longer than `--every` cannot stack up behind itself: forty hosts that
+    take eleven minutes on a five-minute timer would otherwise queue, and
+    every pass after the first would be contending with the one before it
+    for the link it is measuring.
+
+    Stopping is a signal, and a signal arrives mid-pass: the hosts
+    already contacted are finished, their marks are written, and the run
+    ends after that rather than halfway through a file.  Asked twice, it
+    is not asked a third time -- the second signal puts the default
+    handler back, so the next one ends the process the way it always
+    would have.
+    """
+    stop = threading.Event()
+    hits = []
+
+    def _stop(signum, _frame):
+        hits.append(signum)
+        stop.set()
+        if len(hits) > 1:
+            signal.signal(signum, signal.SIG_DFL)
+        else:
+            note("stopping after this pass", args.quiet)
+
+    for name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _stop)
+        except (OSError, ValueError, RuntimeError):
+            # No handler, then: the default one already ends the run, and
+            # the only thing lost is finishing the pass in hand.
+            pass
+
+    worst = 0
+    while True:
+        args.passno += 1
+        results, elapsed = one_pass(args, hosts)
+        if args.csv is not None:
+            write_csv(results, args, args.csv, append=args.passno > 1)
+        report_pass(args, results, elapsed, compact=True)
+        if pass_failed(args, results):
+            worst = 1
+        if stop.is_set():
+            break
+        if args.passes and args.passno >= args.passes:
+            break
+        if elapsed > args.every:
+            # Said or not said, the next pass still starts now: --quiet
+            # decides what is printed, never what is done.
+            note("that pass took %.1fs, longer than --every %s: the next "
+                 "one starts now" % (elapsed, fmt_interval(args.every)),
+                 args.quiet)
+            continue
+        if stop.wait(args.every):
+            break
+    if not args.quiet:
+        note("stopped after %d pass%s" % (args.passno,
+                                          "" if args.passno == 1 else "es"))
+    # A run that was asked to stop did what it was asked. Only a run that
+    # finished its --passes reports on what those passes found.
+    return 0 if hits else worst
 
 
 # ---------------------------------------------------------------------------
@@ -1360,7 +2264,13 @@ def build_parser():
     p.add_argument("--since", metavar="T")
     p.add_argument("--append", action="store_true")
     p.add_argument("--prepend", action="store_true")
+    p.add_argument("--replace", action="store_true")
     p.add_argument("--mark", action="store_true")
+    p.add_argument("-f", "--follow", action="store_true")
+    p.add_argument("--daemon", action="store_true")
+    p.add_argument("--every", metavar="T", default=_env("EVERY"))
+    p.add_argument("--passes", type=int, default=0, metavar="N")
+    p.add_argument("--state", metavar="FILE", default=_env("STATE"))
     p.add_argument("--max-bytes", type=int,
                    default=int(_env_num("MAX_BYTES", DEFAULT_MAX_BYTES, int)))
     p.add_argument("--max-files", type=int,
@@ -1428,9 +2338,31 @@ def main(argv=None):
     args.tag = args.tag or (default_tag(args.cmd) if args.cmd else None)
     if args.head and args.tail:
         die("--head and --tail are opposite ends of the same file: pick one")
-    if args.append and args.prepend:
-        die("--append and --prepend are opposite ends of the same file: "
-            "pick one")
+    if len([f for f in (args.append, args.prepend, args.replace) if f]) > 1:
+        die("--append, --prepend and --replace are three ways of landing "
+            "the same bytes: pick one")
+    # A daemon that re-fetched every file in full every five minutes would
+    # be a denial of service against the fleet it is watching, so the
+    # timer brings the incremental collection with it.
+    if args.daemon:
+        args.follow = True
+    if args.follow and args.head:
+        die("--head takes the first N lines of a file, which never change, "
+            "and --follow brings back what was added at the end: they are "
+            "opposite ideas.  --tail N says where a first sight starts.")
+    # Which end the new bytes land at. Under --follow the local file is
+    # the log growing here as it grows there, so appending is the default
+    # there and replacing is the default everywhere else.
+    if args.append:
+        args.mode = "append"
+    elif args.prepend:
+        args.mode = "prepend"
+    elif args.replace:
+        args.mode = "replace"
+    else:
+        args.mode = "append" if args.follow else "replace"
+    args.append = args.mode == "append"
+    args.prepend = args.mode == "prepend"
     for name in ("head", "tail"):
         v = getattr(args, name)
         if v is not None and v <= 0:
@@ -1448,11 +2380,37 @@ def main(argv=None):
     if args.mark and not (args.append or args.prepend):
         die("--mark writes a line where old meets new, so it needs "
             "--append or --prepend")
+    if args.passes < 0:
+        die("--passes cannot be negative, got %d (0 means until stopped)"
+            % args.passes)
+    if args.passes and not (args.daemon or args.every):
+        die("--passes counts the passes of a repeating run, so it needs "
+            "--daemon or --every")
+    args.every = parse_interval(args.every) if args.every else (
+        DEFAULT_INTERVAL if args.daemon else None)
+    if args.every is not None and args.every <= 0:
+        die("--every wants a positive interval, got %g seconds: a pass "
+            "that starts the moment the last one ended is not a timer, "
+            "it is a loop" % args.every)
+    if args.follow and not args.dir:
+        die("--follow resumes from where the last pass stopped, and the "
+            "marks that say where that was live in the collection "
+            "directory -- name one with -d DIR.\n"
+            "       Without it every run gets a directory of its own and "
+            "there is nothing to resume from.")
     # A run of its own unless the caller named one, so today's collection
     # never lands on top of yesterday's.
     if not args.dir:
         args.dir = default_dir()
     args.since_epoch = parse_when(args.since) if args.since else None
+    # Which pass this is, for the report and the CSV. 0 until a repeating
+    # run starts counting.
+    args.passno = 0
+    args.stream_key = None
+    args.marks = None
+    if args.follow:
+        args.state = args.state or os.path.join(args.dir, STATE_NAME)
+        args.stream_key = Marks.stream_key(args)
     # Drawn fresh per run and never from the payload: a frame the far side
     # could guess is a frame the far side could forge.
     args.mark_token = "===dredge-%016x" % random.getrandbits(64)
@@ -1460,8 +2418,14 @@ def main(argv=None):
     hosts = collect_hosts(args)
 
     if args.dry_run:
-        if args.cmd:
+        if args.cmd and args.follow:
+            cmd = remote_cmd_follow_command(args, args.mark_token, None)
+        elif args.cmd:
             cmd = remote_cmd_command(args, args.mark_token)
+        elif args.follow:
+            # Per host under --follow: the marks that go over are this
+            # host's own. An empty table is what the first pass sends.
+            cmd = remote_follow_command(args, args.mark_token, {})
         elif args.head or args.tail:
             cmd = remote_slice_command(args, args.since_epoch,
                                        args.mark_token)
@@ -1474,25 +2438,23 @@ def main(argv=None):
         sys.stdout.write("# on each, over ssh:\n%s" % cmd)
         return 0
 
-    t0 = time.monotonic()
-    results = fan_out(hosts, lambda h: collect_one(args, h), args.jobs,
-                      args.quiet)
-    elapsed = time.monotonic() - t0
+    if args.follow:
+        # Read after the dry run, which contacts nothing and should not
+        # refuse to run because somebody else is holding the marks.
+        args.marks = Marks.load(args.state)
 
+    if args.every:
+        return run_repeating(args, hosts)
+
+    args.passno = 1
+    results, elapsed = one_pass(args, hosts)
     if args.csv is not None:
         write_csv(results, args, args.csv)
-    if not args.quiet or any(r.outcome != OK for r in results):
-        sys.stdout.write(render(results, args, elapsed))
-
-    nfiles = sum(len(r.files) for r in results)
+    report_pass(args, results, elapsed)
     # A ceiling that was hit, or a name that was refused, means what came
     # back is not what was asked for -- which is the definition of
     # something worth seeing, and worth stopping a script over.
-    if any(r.outcome != OK or r.collisions or r.truncated
-           or r.exit_status not in (None, 0)
-           for r in results) or not nfiles:
-        return 1
-    return 0
+    return 1 if pass_failed(args, results) else 0
 
 
 if __name__ == "__main__":
