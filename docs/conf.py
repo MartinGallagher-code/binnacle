@@ -154,7 +154,8 @@ def _generate_cli_reference():
         "| `manifest` | `MANIFEST_LAYOUT`, `MANIFEST_ROLE` |",
         "| `dredge` | `DREDGE_DIR`, `DREDGE_JOBS`, `DREDGE_TIMEOUT`, "
         "`DREDGE_USER`, `DREDGE_SSH`, `DREDGE_MAX_BYTES`, "
-        "`DREDGE_MAX_FILES`, `DREDGE_EVERY`, `DREDGE_STATE` |",
+        "`DREDGE_MAX_FILES`, `DREDGE_EVERY`, `DREDGE_STATE`, "
+        "`DREDGE_SUFFIX` |",
         "| `resolve` | `RESOLVE_SERVERS`, `RESOLVE_TYPES`, "
         "`RESOLVE_TIMEOUT`, `RESOLVE_ATTEMPTS`, `RESOLVE_MIN_SEVERITY`, "
         "`RESOLVE_CONF`, `RESOLVE_HOSTS`, `NO_COLOR` |",

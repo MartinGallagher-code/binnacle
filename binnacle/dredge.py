@@ -17,6 +17,10 @@ Options:
                       back as the artifact, in place of a file
   -t, --tag NAME      label this run's artifacts, so several runs can share
                       one directory and still be told apart
+      --suffix EXT    put EXT on the end of every file this run creates;
+                      a bare word gains a dot: `log` and `.log` both mean
+                      `.log`.  One starting with a dash needs the joined
+                      spelling, `--suffix=-raw`          (DREDGE_SUFFIX)
   -S, --server TOKEN  servers, repeatable; ranges expand (`web[01-40]`)
       --servers FILE  a server list, one per line -- reachable's output works
   -d, --dir DIR       where collected files land   (default: dredge-<stamp>)
@@ -129,6 +133,28 @@ Names that stay apart
   them, and a file says which collection it belongs to without anyone
   having to remember.
 
+  `--suffix EXT` goes on the end of every name a run creates:
+
+      dredge --cmd 'ss -s' --suffix .txt        ss~web01.txt
+      dredge /var/log/syslog --suffix .log      web01~var~log~syslog.log
+
+  That is how a collection gets an extension the rest of your tooling
+  recognises.  A `--cmd` artifact has no path, so it has no extension at
+  all, and an editor opening `ss~web01` is left guessing where
+  `ss~web01.txt` is not.  A bare word gains a dot -- `--suffix log` and
+  `--suffix .log` both mean `.log` -- and a suffix that already starts
+  with `.`, `_`, `-`, `+` or `~` is appended as typed.  A leading dash
+  needs the joined spelling `--suffix=-raw`, because a separate `-raw`
+  is something argparse has to read as an option.  A suffix with no
+  letter or digit in it at all is refused rather than put on the end of
+  every name in the run.
+
+  It is part of the name, so changing it between two `--follow` passes
+  makes the local copy the last pass wrote unfindable, and that file is
+  collected again from the start under the new name.  That is reported
+  as a RESYNC rather than being silent, but it is worth knowing before
+  changing a suffix mid-follow.
+
   `-d DIR` names the directory yourself.  Without it every run gets one
   of its own, stamped with the time: collecting the same path twice an
   hour apart is the normal way to use this, and the second run quietly
@@ -200,21 +226,38 @@ A remote tail
   When the file is not the file it was
     A log that was rotated is not a log that was truncated to nothing,
     and neither is a log that grew.  A file whose inode changed, or whose
-    size went *backwards*, is reported as rotated and comes back whole
-    from byte zero, because resuming at the old offset would hand you the
+    size went *backwards*, is reported as rotated and comes back from
+    byte zero, because resuming at the old offset would hand you the
     middle of the new file.
+
+    A rotation is a seam, never a stop: the new file is followed from
+    there exactly as the old one was, and the next pass carries only what
+    was added to it.  The warning is there to explain the seam in the
+    local copy, not to say that something was abandoned.
 
     What that cannot see is a file replaced in place, keeping its inode
     and ending up longer than the old one -- the same blind spot `tail
     -f` has, and the reason `logrotate`'s `copytruncate` is visible here
     (the size goes backwards) while an in-place rewrite is not.
 
-  `--max-bytes` means the new part under `--follow`, not the whole file:
-  a log that grows past the ceiling is still followed, and a single pass
-  that would carry more than the ceiling is what gets left behind.  That
-  is a finding rather than a note -- the mark stays where it was, so the
-  next pass has more to carry and is refused for the same reason, and
-  the follow of that one artifact is stuck until the ceiling moves.
+  `--max-bytes` means the new part under `--follow`, not the whole file,
+  and it bounds a pass rather than ending one.  When more than the
+  ceiling was added since the last pass -- a busy log, or a rotation,
+  where the whole new file is the new part -- the newest `--max-bytes`
+  come back and the follow resumes from the end of the file.
+
+  What did not fit is a hole in the local copy that will not fill, so it
+  is reported as a GAP naming the bytes and the file, and it is a column
+  in `--csv`.  It is deliberately not a refusal: refusing would leave
+  the mark where it was, the next pass would have even more to carry,
+  and that artifact would never be collected again -- losing the whole
+  of the rest of the log to protect the part of it that did not fit.
+
+  A gap does not change the exit status.  A log busy enough to outrun
+  its ceiling does it on most passes, and a daemon whose every pass
+  reported failure for working exactly as designed is a daemon whose
+  exit status stops being read.  `gap_bytes` in `--csv` is what a script
+  watches instead, and it is there for that reason.
 
 Daemon mode
   `--daemon` does that on a timer: a pass, a wait, another pass, until
@@ -278,10 +321,11 @@ Exit status
 
   Under `--follow` a pass that brought nothing back is a 0: nothing new
   is the answer a tail spends most of its time giving, and a script that
-  polls one would otherwise read a quiet fleet as a broken run.  A
-  `--daemon` stopped by a signal exits 0 as well -- it was asked to
-  stop -- and one that ran out its `--passes` exits 1 if any pass in it
-  had a failure.
+  polls one would otherwise read a quiet fleet as a broken run.  A GAP
+  is a 0 as well, for the reason under it above -- `gap_bytes` in
+  `--csv` is the machine-readable half of that finding.  A `--daemon`
+  stopped by a signal exits 0 -- it was asked to stop -- and one that
+  ran out its `--passes` exits 1 if any pass in it had a failure.
 """
 
 import argparse
@@ -1127,8 +1171,8 @@ elif [ "$TAILN" -gt 0 ]; then mode=tail
 fi
 if [ "$mode" != same ] && [ "$mode" != tail ] && [ "$MAXB" -gt 0 ] \
    && [ $((size - start)) -gt "$MAXB" ]; then
-  echo "dredge-skip: $((size - start)) $f" >&2
-  exit 0
+  echo "dredge-gap: $((size - start - MAXB)) $f" >&2
+  start=$((size - MAXB))
 fi
 printf "%%s FILE\n" "$MARK"
 printf "%%s" "$f" | base64 | tr -d "\n"
@@ -1331,6 +1375,34 @@ def _clean_tag(tag):
     return cleaned or "tag"
 
 
+SUFFIX_LEAD = "._-+~"
+
+
+def _clean_suffix(suffix):
+    """A suffix, reduced to something safe at the end of a filename.
+
+    The same treatment the tag gets, and for the same reason: it is
+    written freely by the caller, so it is a place a `/` could arrive and
+    quietly mean a directory.
+
+    A bare word gains a dot -- `--suffix log` and `--suffix .log` both
+    give `.log`, because that is what somebody typing the first one
+    meant.  A suffix that already starts with a separator is appended as
+    typed, so `--suffix=-raw` stays `-raw` and does not become `.-raw`.
+
+    A suffix with no letter or digit left in it is nothing: `--suffix //`
+    cleans to `-`, which would put a dash on the end of every name in the
+    run and mean nothing at all.  Empty comes back so the caller can
+    refuse it by name rather than quietly renaming the collection.
+    """
+    cleaned = TAG_RE.sub("-", (suffix or "").strip())
+    if not any(ch.isalnum() for ch in cleaned):
+        return ""
+    if cleaned[0] not in SUFFIX_LEAD:
+        cleaned = "." + cleaned
+    return cleaned
+
+
 def default_tag(cmd):
     """A tag for a command nobody named: the command's own first word.
 
@@ -1357,6 +1429,11 @@ def local_path(args, host, relpath):
     dredge-*/web*syslog`, and both of those want one directory of
     distinctly-named files rather than forty identical paths under forty
     host directories.
+
+    `--suffix` goes on the end of every name a run creates, which is how
+    a collection gets an extension the rest of your tooling recognises:
+    a `--cmd` artifact has no path and so has no extension at all, and
+    `ss~web01.txt` opens in an editor where `ss~web01` asks it to guess.
     """
     rel = _clean_relpath(relpath)
     if not rel:
@@ -1368,7 +1445,7 @@ def local_path(args, host, relpath):
         parts = [host.name, rel.replace("/", FLAT_SEP)]
         if args.tag:
             parts.insert(0, _clean_tag(args.tag))
-    return os.path.join(args.dir, FLAT_SEP.join(parts))
+    return os.path.join(args.dir, FLAT_SEP.join(parts) + (args.suffix or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -1468,7 +1545,7 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
 class Result(object):
     __slots__ = ("host", "outcome", "detail", "files", "bytes", "skipped",
                  "collisions", "truncated", "exit_status", "duration",
-                 "unchanged", "rotated", "resynced")
+                 "unchanged", "rotated", "resynced", "gapped")
 
     def __init__(self, host):
         self.host = host
@@ -1500,6 +1577,11 @@ class Result(object):
         # believed. Nothing is more confidently wrong than a follow
         # reporting "nothing new" about a file that is no longer here.
         self.resynced = []
+        # (bytes, path) for each artifact that grew by more than the
+        # ceiling in one pass. The newest --max-bytes came back and the
+        # rest did not: a hole in the collected copy, said out loud,
+        # rather than a follow that stops.
+        self.gapped = []
 
 
 def ssh_argv(args, host, command):
@@ -1525,18 +1607,29 @@ def _drain(stream, into):
 
 
 SKIP_RE = re.compile(r"^dredge-skip:\s+(\d+)\s+(.*)$")
+GAP_RE = re.compile(r"^dredge-gap:\s+(\d+)\s+(.*)$")
 
 
 def _parse_stderr(text):
-    """(skipped, other) -- the oversize list, and anything else it said."""
-    skipped, other = [], []
+    """(skipped, gapped, other) -- what was left behind, and anything else.
+
+    Two different things, and they must not be confused: a *skipped* file
+    was not carried at all, and a *gapped* one was carried from further
+    along than it should have been.  The first can be come back for; the
+    second is a hole that will not fill.
+    """
+    skipped, gapped, other = [], [], []
     for line in (text or "").splitlines():
         m = SKIP_RE.match(line.strip())
         if m:
             skipped.append((int(m.group(1)), m.group(2)))
+            continue
+        m = GAP_RE.match(line.strip())
+        if m:
+            gapped.append((int(m.group(1)), m.group(2)))
         elif line.strip():
             other.append(line.strip())
-    return skipped, other
+    return skipped, gapped, other
 
 
 def _run(args, host, command, consume):
@@ -1631,7 +1724,7 @@ def _run(args, host, command, consume):
             except OSError:
                 pass
     err = (errbuf[0] if errbuf else b"").decode("utf-8", "replace")
-    r.skipped, other = _parse_stderr(err)
+    r.skipped, r.gapped, other = _parse_stderr(err)
     r.duration = time.monotonic() - t0
     if r.outcome != OK:
         return r
@@ -1969,9 +2062,12 @@ def _render_findings(out, results, args, compact=False):
             out.append("            the command printed nothing there")
     turned = [(r.host, x) for r in results for x in r.rotated]
     if turned:
+        # Not "came back whole": a rotated file over the ceiling comes
+        # back from part way in, and the GAP block below says so. The two
+        # blocks must not contradict each other.
         out.append("  ROTATED   %d file%s was not the file it was and came "
-                   "back whole:" % (len(turned),
-                                    "" if len(turned) == 1 else "s"))
+                   "back as a new one:" % (len(turned),
+                                           "" if len(turned) == 1 else "s"))
         for host, remote in turned[:5]:
             out.append("            %-12s %s" % (host.name, remote))
         if len(turned) > 5:
@@ -1980,6 +2076,25 @@ def _render_findings(out, results, args, compact=False):
                    "resuming at the old")
         out.append("            offset would have handed you the middle of "
                    "a different file.")
+        out.append("            The follow carries on from the new one -- "
+                   "this is a seam, not a stop.")
+    holes = [(r.host, n, x) for r in results for n, x in r.gapped]
+    if holes:
+        out.append("  GAP       %d artifact%s grew by more than --max-bytes "
+                   "(%s) in one pass:"
+                   % (len(holes), "" if len(holes) == 1 else "s",
+                      fmt_bytes(args.max_bytes)))
+        for host, n, remote in holes[:5]:
+            out.append("            %-12s %8s not carried  %s"
+                       % (host.name, fmt_bytes(n), remote))
+        if len(holes) > 5:
+            out.append("            ... and %d more" % (len(holes) - 5))
+        out.append("            The newest %s came back and the follow is at "
+                   "the end of the file" % fmt_bytes(args.max_bytes))
+        out.append("            again, so this is one hole rather than a "
+                   "stop.  Raise --max-bytes,")
+        out.append("            or pass more often, to stop it happening "
+                   "again.")
     lost = [(r.host, x) for r in results for x in r.resynced]
     if lost:
         out.append("  RESYNC    %d local cop%s gone, so the mark went with "
@@ -2042,15 +2157,10 @@ def _render_findings(out, results, args, compact=False):
                        % (host.name, fmt_bytes(size), path))
         if len(skipped) > 5:
             out.append("            ... and %d more" % (len(skipped) - 5))
-        if args.follow:
-            out.append("            That is what one pass would carry, not "
-                       "the size of the file -- and the")
-            out.append("            next pass would carry more.  Raise "
-                       "--max-bytes: the follow is stuck here.")
-        else:
-            out.append("            --tail N brings back the end of one "
-                       "without the rest of it.")
-    if empty or bad or skipped or clashed or cut or angry or turned or lost:
+        out.append("            --tail N brings back the end of one "
+                   "without the rest of it.")
+    if empty or bad or skipped or clashed or cut or angry or turned \
+            or lost or holes:
         out.append("")
 
     if good and not args.quiet and not compact:
@@ -2067,9 +2177,17 @@ def _render_findings(out, results, args, compact=False):
 # column that moves breaks every reader of every CSV already written.
 # `pass` is 1 for a single run and counts up under --daemon; `unchanged`
 # is what a follow checked and did not have to carry, which is the number
-# that says the tail is working.
+# that says the tail is working; `gap_bytes` is what a pass could not
+# carry and nothing will bring back.
+#
+# That last one is load-bearing rather than decorative. A gap does not
+# change the exit status -- a busy log under a tight ceiling would make
+# every pass of a perfectly healthy daemon look like a failure -- so this
+# column is the only thing a script can read to learn that part of the
+# log is missing. A finding that is in the report and not in the CSV is a
+# finding automation cannot see.
 CSV_FIELDS = ["host", "source", "local_path", "bytes", "outcome",
-              "exit_status", "pass", "unchanged"]
+              "exit_status", "pass", "unchanged", "gap_bytes"]
 
 
 def write_csv(results, args, path, append=False):
@@ -2091,15 +2209,25 @@ def write_csv(results, args, path, append=False):
         for r in results:
             source = args.cmd if args.cmd else args.path
             st = "" if r.exit_status is None else r.exit_status
+            # Keyed by the local name, because that is what the rows are
+            # keyed by -- the remote path is rebuilt into one here and is
+            # never read back off the far side.
+            holes = {}
+            for n, remote in r.gapped:
+                where = local_path(args, r.host, remote)
+                holes[where] = holes.get(where, 0) + n
             row = {"host": r.host.name, "source": source,
                    "outcome": r.outcome, "exit_status": st,
-                   "pass": args.passno or 1, "unchanged": r.unchanged}
+                   "pass": args.passno or 1, "unchanged": r.unchanged,
+                   "gap_bytes": 0}
             if not r.files:
-                row.update({"local_path": "", "bytes": 0})
+                row.update({"local_path": "", "bytes": 0,
+                            "gap_bytes": sum(holes.values())})
                 w.writerow(row)
                 continue
             for p, n in r.files:
-                row.update({"local_path": p, "bytes": n})
+                row.update({"local_path": p, "bytes": n,
+                            "gap_bytes": holes.pop(p, 0)})
                 w.writerow(row)
     finally:
         if fh is not sys.stdout:
@@ -2137,14 +2265,6 @@ def pass_failed(args, results):
     """
     if any(r.outcome != OK or r.collisions or r.truncated
            or r.exit_status not in (None, 0) for r in results):
-        return True
-    if args.follow and any(r.skipped for r in results):
-        # Under --follow a file left behind for being over the ceiling is
-        # not a file you can come back for: the mark stays where it was,
-        # so the next pass has *more* to carry than this one did and will
-        # be refused for the same reason. The follow of that artifact is
-        # stuck until the ceiling moves, which is not something to find
-        # out from a directory listing a week later.
         return True
     return not args.follow and not sum(len(r.files) for r in results)
 
@@ -2254,6 +2374,9 @@ def build_parser():
     p.add_argument("-t", "--tag", metavar="NAME",
                    help="label this run's artifacts, so several runs can "
                         "share a directory and still be told apart")
+    p.add_argument("--suffix", metavar="EXT", default=_env("SUFFIX"),
+                   help="put EXT on the end of every file this run "
+                        "creates; a bare word gains a dot")
     p.add_argument("-S", "--server", dest="server", action="append",
                    metavar="TOKEN")
     p.add_argument("--servers", dest="servers",
@@ -2336,6 +2459,12 @@ def main(argv=None):
         die("--since selects among files by age, and --cmd has no files to "
             "select from -- it has one command and one answer")
     args.tag = args.tag or (default_tag(args.cmd) if args.cmd else None)
+    if args.suffix is not None:
+        cleaned = _clean_suffix(args.suffix)
+        if not cleaned:
+            die("--suffix has nothing in it that can go in a filename: %r"
+                % args.suffix)
+        args.suffix = cleaned
     if args.head and args.tail:
         die("--head and --tail are opposite ends of the same file: pick one")
     if len([f for f in (args.append, args.prepend, args.replace) if f]) > 1:

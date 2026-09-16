@@ -55,6 +55,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arrangement where the thing supervising it already supervises
   everything else.
 
+- **`dredge --suffix EXT` puts an extension on every file a run
+  creates.** `dredge --cmd 'ss -s' --suffix .txt` lands `ss~web01.txt`
+  rather than `ss~web01`, which is the case that needed it: a `--cmd`
+  artifact has no path, so it has no extension at all, and an editor
+  opening it is left guessing. A bare word gains a dot -- `log` and
+  `.log` both mean `.log` -- and one that already starts with `.`, `_`,
+  `-`, `+` or `~` is appended as typed (`--suffix=-raw`, joined, since a
+  separate `-raw` is an option to argparse first). It is cleaned exactly
+  as `--tag` is, so it cannot carry a `/` into the name, and a suffix
+  with no letter or digit in it is refused rather than put on the end of
+  every name in the run. `DREDGE_SUFFIX` sets it too.
+
 - **`dredge --state FILE`, and `DREDGE_EVERY` / `DREDGE_STATE`.** The
   offsets a follow resumes from are kept in one JSON file in the
   collection directory -- `out/dredge-state.json` by default. It is the
@@ -86,6 +98,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the answer a tail spends most of its time giving, and a script polling
   one would otherwise read a quiet fleet as a broken run. Everywhere
   else, an empty collection still exits 1.
+
+- **Under `--follow`, `--max-bytes` bounds a pass rather than ending
+  one.** When more than the ceiling was added since the last pass, the
+  newest `--max-bytes` come back and the follow resumes from the end of
+  the file, reporting what it could not carry as a `GAP` with its size.
+  It previously refused the file outright, which is the
+  one way a followed artifact could stop being followed: the mark stayed
+  where it was, so the next pass had *more* to carry and was refused for
+  the same reason, for ever.
+
+  **A rotation is how you fall into that**, which is what this came from:
+  after a rotation the whole new file is the new part, so a log that had
+  been following incrementally under the ceiling blows through it in one
+  pass. Losing the rest of the log to protect the part of it that did not
+  fit is the wrong trade in every case, so the hole is reported and the
+  follow goes on.
+
+  Rotation itself was never a stop and still is not -- the new file is
+  followed exactly as the old one was -- but the report now says so
+  (`this is a seam, not a stop`), because the warning read as an
+  abandonment to more than one person.
+
+  **A gap does not change the exit status.** A log busy enough to outrun
+  its ceiling does it on most passes, and a daemon whose every pass
+  reported failure for working exactly as designed is a daemon whose
+  exit status stops being read. That leaves the report as the only place
+  the finding appears, which is the one thing this package's conventions
+  do not allow -- so `--csv` gained a `gap_bytes` column at the end of
+  the header, and that is what a script watches for a hole in a followed
+  log.
 
 - **`dredge` is in the generated CLI reference.** `docs/conf.py` carries
   an explicit tool list and `dredge` was never added to it, so the one

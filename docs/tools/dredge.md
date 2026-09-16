@@ -138,6 +138,32 @@ The tag is the one part of the name the caller writes freely, so it is the one
 part that could carry a slash and quietly mean a directory: anything outside
 `A-Za-z0-9._+-` folds to `-`, and `--tag 'a/b c:d'` lands as `a-b-c-d~web01`.
 
+### The suffix
+
+`--suffix EXT` goes on the end of every file a run creates:
+
+```bash
+dredge --cmd 'ss -s' --suffix .txt        # ss~web01.txt
+dredge /var/log/syslog --suffix .log      # web01~var~log~syslog.log
+```
+
+That is how a collection gets an extension the rest of your tooling
+recognises. A `--cmd` artifact has no path, so it has no extension at all, and
+an editor opening `ss~web01` is left guessing where `ss~web01.txt` is not.
+
+A bare word gains a dot — `--suffix log` and `--suffix .log` both mean
+`.log` — and one that already starts with `.`, `_`, `-`, `+` or `~` is
+appended as typed. A leading dash needs the joined spelling `--suffix=-raw`,
+because a separate `-raw` is something argparse has to read as an option. Like
+the tag, it is cleaned before it is used: anything outside `A-Za-z0-9._+-`
+folds to `-`, and a suffix with no letter or digit left in it is refused rather
+than put on the end of every name in the run.
+
+It is part of the name, so changing it between two `--follow` passes makes the
+local copy the last pass wrote unfindable, and that file is collected again from
+the start under the new name — reported as a `RESYNC` rather than silently, but
+worth knowing before changing a suffix mid-follow.
+
 ### The directory
 
 `-d DIR` names it yourself. Without it, every run gets one of its own,
@@ -321,14 +347,20 @@ pointed at is the event `--follow` exists to avoid.
 
 A log that was rotated is not a log that was truncated, and neither is a log
 that grew. A file whose **inode changed**, or whose **size went backwards**,
-comes back whole from byte zero and is reported:
+comes back from byte zero and is reported:
 
 ```text
-  ROTATED   1 file was not the file it was and came back whole:
+  ROTATED   1 file was not the file it was and came back as a new one:
             web02        /var/log/app.log
             A new inode, or a size that went backwards: resuming at the old
             offset would have handed you the middle of a different file.
+            The follow carries on from the new one -- this is a seam, not a stop.
 ```
+
+**A rotation is a seam, not a stop.** The new file is followed from there
+exactly as the old one was, and the next pass carries only what was added to
+it. The warning explains the seam in the local copy; it does not mean that
+file was abandoned.
 
 Both halves matter: `logrotate` moving the file aside changes the inode, and
 its `copytruncate` mode keeps the inode and puts the size back to zero.
@@ -349,12 +381,34 @@ directory — the mark goes with it rather than being believed:
 "Nothing new" about a file that is no longer here is the most confidently
 wrong thing this could say, so it does not say it.
 
-`--max-bytes` means **the new part** under `--follow`, not the whole file: a
-log that grows past the ceiling is still a log being followed, and what the
-ceiling catches is a single pass that would carry more than it. Under
-`--follow` that is a finding and exits 1, because the mark stays where it
-was — so the next pass has *more* to carry and is refused for the same
-reason, and the follow of that artifact is stuck until the ceiling moves.
+### When more arrives than one pass can carry
+
+`--max-bytes` means **the new part** under `--follow`, not the whole file, and
+it bounds a pass rather than ending one. When more than the ceiling was added
+since the last pass — a busy log, or a rotation, where the whole new file *is*
+the new part — the newest `--max-bytes` come back and the follow resumes from
+the end of the file:
+
+```text
+  GAP       1 artifact grew by more than --max-bytes (500B) in one pass:
+            web01           2.4KB not carried  logs/app.log
+            The newest 500B came back and the follow is at the end of the file
+            again, so this is one hole rather than a stop.  Raise --max-bytes,
+            or pass more often, to stop it happening again.
+```
+
+What did not fit is a hole in the local copy that will not fill, so it is named
+with its size. It is deliberately not a refusal: refusing would leave the mark
+where it was, the next pass would have *more* to carry and would be refused for
+the same reason, and that artifact would never be collected again — losing the
+whole of the rest of the log to protect the part of it that did not fit.
+
+**A gap does not change the exit status.** A log busy enough to outrun its
+ceiling does it on most passes, and a daemon whose every pass reported failure
+for working exactly as designed is a daemon whose exit status stops being read.
+`gap_bytes` in `--csv` is the machine-readable half of the finding, and it
+exists for that reason — read it, not `$?`, if a script needs to know that part
+of a log is missing.
 
 ## Daemon mode
 
@@ -490,14 +544,15 @@ dredge -- /var/log/syslog   [tail 200]
 ```
 
 `--csv PATH` writes one row per collected file —
-`host,source,local_path,bytes,outcome,exit_status,pass,unchanged` — including
-a row for the hosts that returned nothing, so the record says who was asked as
-well as what came back. `source` is the path that was collected, or the
+`host,source,local_path,bytes,outcome,exit_status,pass,unchanged,gap_bytes` —
+including a row for the hosts that returned nothing, so the record says who was
+asked as well as what came back. `source` is the path that was collected, or the
 command that was run; `exit_status` is that command's status, and empty for a
 file. `bytes` is what came **over the wire**, not the size of the local file
 after it landed. `pass` is 1 for a one-off run and counts up under `--daemon`,
 which appends its rows rather than replacing them; `unchanged` is what a
-`--follow` pass checked and did not have to carry.
+`--follow` pass checked and did not have to carry; `gap_bytes` is what it could
+not carry and nothing will bring back.
 
 ## Options
 
@@ -505,6 +560,7 @@ which appends its rows rather than replacing them; `unchanged` is what a
 |---|---|
 | `-c, --cmd CMD` | a bash command to run on each host; its output is the artifact |
 | `-t, --tag NAME` | label this run's artifacts so several runs can share a directory |
+| `--suffix EXT` | put EXT on the end of every file the run creates; a bare word gains a dot |
 | `-S, --server TOKEN` | servers, repeatable; ranges expand (`web[01-40]`) |
 | `--servers FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
 | `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
@@ -537,6 +593,7 @@ evidence and gathers none should stop, not carry on with an empty directory.
 Under `--follow` that one rule is inverted: a pass that brought nothing back
 exits **0**, because nothing new is the answer a tail spends most of its time
 giving, and a script that polls one would otherwise read a quiet fleet as a
-broken run. A `--daemon` stopped by a signal exits 0 as well — it was asked to
+broken run. A `GAP` is **0** as well — see above; `gap_bytes` in `--csv` is
+what says so instead. A `--daemon` stopped by a signal exits 0 as well — it was asked to
 stop — and one that ran out its `--passes` exits 1 if any pass in it had a
 failure.

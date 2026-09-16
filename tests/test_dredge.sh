@@ -342,7 +342,7 @@ t_csv_carries_a_row_per_file() {
     dr logs -S web01 -d out --csv c.csv --quiet
     head="$(head -1 c.csv)"
     assert_eq "$head" \
-        "host,source,local_path,bytes,outcome,exit_status,pass,unchanged"
+        "host,source,local_path,bytes,outcome,exit_status,pass,unchanged,gap_bytes"
     assert_contains "$(cat c.csv)" "web01,logs,out/web01~logs~app.log"
 }
 
@@ -657,6 +657,48 @@ t_the_tag_leads_the_name_so_runs_can_share_a_directory() {
     assert_file_exists "shared/before-restart~web01~logs~app.log"
 }
 
+t_a_suffix_goes_on_the_end_of_every_created_file() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs -S web01 -d out --suffix .log --quiet
+    assert_file_exists "out/web01~logs~app.log.log"
+    assert_file_exists "out/web01~logs~sub~other.log.log"
+    # A --cmd artifact is the one with no extension of its own, which is
+    # half the reason this exists.
+    dr --cmd 'echo hi' -S web01 -d out --suffix .txt --quiet
+    assert_file_exists "out/echo~web01.txt"
+    assert_eq "$(cat "out/echo~web01.txt")" "hi"
+}
+
+t_a_bare_suffix_gains_a_dot() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --suffix log --quiet
+    assert_file_exists "out/web01~logs~app.log.log"
+    # One that already starts with a separator is appended as typed --
+    # with the joined spelling, since a bare -raw is an option to
+    # argparse before it is ever a suffix.
+    dr logs/app.log -S web01 -d out2 --suffix=-raw --quiet
+    assert_file_exists "out2/web01~logs~app.log-raw"
+    assert_no_file "out2/web01~logs~app.log.-raw"
+}
+
+t_a_suffix_cannot_smuggle_a_path() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --suffix '/../../etc/x' --quiet
+    # One directory, and nothing written outside it.
+    assert_eq "$(find out -type d | wc -l | tr -d ' ')" "1"
+    assert_no_file "etc/x"
+    # And a suffix that is only punctuation is nothing, so it is refused
+    # rather than put on the end of every name in the run.
+    set +e
+    out="$(dr logs/app.log -S web01 -d out6 --suffix '//' 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--suffix"
+}
+
 t_a_tag_cannot_smuggle_a_path_into_the_name() {
     # The tag is the one part of the name the caller writes freely.
     seed
@@ -955,26 +997,100 @@ import sys; open(sys.argv[1],'a').write('y' * 2000 + '\n')" \
     assert_contains "$(cat "out/web01~logs~app.log")" "yyy"
 }
 
-t_a_follow_that_is_stuck_says_so() {
-    # One pass over the ceiling leaves the mark where it was, so the next
-    # pass has *more* to carry and is refused for the same reason. That
-    # is a follow that has quietly stopped following, and it has to be a
-    # finding rather than a line to scroll past.
+t_more_than_one_pass_can_carry_is_a_hole_not_a_stop() {
+    # The ceiling bounds a pass; it does not end one. Refusing the pass
+    # would leave the mark where it was, the next pass would have *more*
+    # to carry and would be refused for the same reason, and that file
+    # would never be collected again -- the whole of the rest of the log
+    # lost to protect the part of it that did not fit.
     seed
     cd "$TEST_TMPDIR"
     dr logs/app.log -S web01 -d out --follow --quiet
     "$PY" -c "
 import sys; open(sys.argv[1],'a').write('x' * 9000 + '\n')" \
         "$FAKE_ROOT/web01/logs/app.log"
-    set +e
-    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"; rc=$?
-    set -e
-    assert_status $rc 1
-    assert_contains "$out" "OVERSIZE"
-    assert_contains "$out" "stuck"
-    # And raising it unsticks the same pass, from the same mark.
-    dr logs/app.log -S web01 -d out --follow --quiet
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"
+    # Losing bytes is a finding, and it is said out loud with its size --
+    # but not with the exit status. A log busy enough to outrun its
+    # ceiling does it on most passes, and a daemon that called that
+    # failure would have an exit status nobody reads.
+    assert_status $? 0
+    assert_contains "$out" "GAP"
+    assert_contains "$out" "not carried"
+    # The newest 500 bytes came back, so they are in the local copy.
     assert_contains "$(cat "out/web01~logs~app.log")" "xxx"
+    # And the follow is at the end of the file rather than stuck: the
+    # next pass carries what was added after it, and nothing else.
+    printf 'after the hole\n' >> "$FAKE_ROOT/web01/logs/app.log"
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"
+    assert_status $? 0
+    assert_not_contains "$out" "GAP"
+    assert_contains "$out" "15B"
+}
+
+t_a_gap_is_in_the_csv_because_it_is_not_in_the_status() {
+    # The exit status says nothing about a hole, so the CSV has to: this
+    # is the only thing automation can read to find out that part of a
+    # log is missing.
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --follow --quiet
+    "$PY" -c "
+import sys; open(sys.argv[1],'a').write('x' * 9000 + '\n')" \
+        "$FAKE_ROOT/web01/logs/app.log"
+    dr logs/app.log -S web01 -d out --follow --max-bytes 500 --csv c.csv \
+       --quiet
+    assert_status $? 0
+    # 9001 bytes added, 500 carried: the rest is the hole, on the row of
+    # the file it is a hole in.
+    row="$(grep 'web01~logs~app.log' c.csv)"
+    assert_contains "$row" ",8501"
+    # And a pass with no hole says 0 rather than leaving it to be guessed.
+    printf 'small\n' >> "$FAKE_ROOT/web01/logs/app.log"
+    dr logs/app.log -S web01 -d out --follow --max-bytes 500 --csv c2.csv \
+       --quiet
+    assert_contains "$(grep 'web01~logs~app.log' c2.csv)" ",0"
+}
+
+t_a_rotation_is_a_seam_not_a_stop() {
+    # The complaint this came from: a file that rotates has to go on
+    # being followed. It always came back; what could stop it was the
+    # ceiling, because after a rotation the whole new file is the new
+    # part -- so this drives a rotation *through* the ceiling and then
+    # asks for the pass after it.
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --follow --quiet
+    # Rotated aside, and what replaces it is over the ceiling.
+    mv "$FAKE_ROOT/web01/logs/app.log" "$FAKE_ROOT/web01/logs/app.log.1"
+    "$PY" -c "
+import sys; open(sys.argv[1],'w').write('n' * 4000 + '\n')" \
+        "$FAKE_ROOT/web01/logs/app.log"
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"
+    assert_status $? 0
+    assert_contains "$out" "ROTATED"
+    assert_contains "$out" "seam, not a stop"
+    # Still being read: the newest bytes of the new file are here.
+    assert_contains "$(cat "out/web01~logs~app.log")" "nnn"
+    # And still being read on the next pass, from the new file.
+    printf 'still following\n' >> "$FAKE_ROOT/web01/logs/app.log"
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"
+    assert_status $? 0
+    assert_not_contains "$out" "ROTATED"
+    assert_contains "$(cat "out/web01~logs~app.log")" "still following"
+}
+
+t_a_rotation_under_no_ceiling_brings_the_whole_new_file() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --follow --replace --quiet
+    mv "$FAKE_ROOT/web01/logs/app.log" "$FAKE_ROOT/web01/logs/app.log.1"
+    printf 'brand new\nsecond line\n' > "$FAKE_ROOT/web01/logs/app.log"
+    out="$(dr logs/app.log -S web01 -d out --follow --replace)"
+    assert_contains "$out" "ROTATED"
+    assert_eq "$(cat "out/web01~logs~app.log")" \
+              "$(printf 'brand new\nsecond line')"
+    assert_not_contains "$out" "GAP"
 }
 
 # --- daemon mode -----------------------------------------------------------
@@ -1121,6 +1237,9 @@ run_test "a failed command is a finding"       t_a_command_that_failed_is_a_find
 run_test "a command that worked is quiet"      t_a_command_that_worked_is_quiet_about_it
 run_test "the tag leads the name"              t_the_tag_leads_the_name_so_runs_can_share_a_directory
 run_test "a tag cannot smuggle a path"         t_a_tag_cannot_smuggle_a_path_into_the_name
+run_test "a suffix goes on every file"         t_a_suffix_goes_on_the_end_of_every_created_file
+run_test "a bare suffix gains a dot"           t_a_bare_suffix_gains_a_dot
+run_test "a suffix cannot smuggle a path"      t_a_suffix_cannot_smuggle_a_path
 run_test "a command and a path are not both"   t_a_command_and_a_path_are_not_both_the_artifact
 run_test "head and tail cut a command too"     t_head_and_tail_cut_a_commands_output_too
 run_test "the server list comes from a file"   t_the_server_list_comes_from_a_file
@@ -1143,7 +1262,10 @@ run_test "unreadable marks are refused"        t_marks_that_cannot_be_read_are_r
 run_test "a nonsense mark is dropped"          t_a_mark_that_makes_no_sense_is_dropped_not_obeyed
 run_test "a dry run shows the resume table"    t_a_dry_run_of_a_follow_shows_the_resume_table
 run_test "a follow's ceiling is the new part"  t_the_ceiling_of_a_follow_is_the_new_part
-run_test "a stuck follow says so"              t_a_follow_that_is_stuck_says_so
+run_test "too much for one pass is a hole"     t_more_than_one_pass_can_carry_is_a_hole_not_a_stop
+run_test "a gap is in the csv, not the status" t_a_gap_is_in_the_csv_because_it_is_not_in_the_status
+run_test "a rotation is a seam not a stop"     t_a_rotation_is_a_seam_not_a_stop
+run_test "a rotation brings the new file"      t_a_rotation_under_no_ceiling_brings_the_whole_new_file
 run_test "a daemon stops after its passes"     t_a_daemon_stops_after_the_passes_it_was_given
 run_test "a daemon picks up what appeared"     t_a_daemon_picks_up_what_appeared_between_passes
 run_test "a daemon asked to stop stops"        t_a_daemon_that_was_asked_to_stop_stops_cleanly
