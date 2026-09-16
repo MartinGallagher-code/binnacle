@@ -188,7 +188,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 PROG = os.path.basename(sys.argv[0]) or "dredge.py"
 
 DEFAULT_JOBS = 20
