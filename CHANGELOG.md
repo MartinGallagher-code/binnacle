@@ -55,6 +55,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arrangement where the thing supervising it already supervises
   everything else.
 
+- **`dredge --suffix EXT` puts an extension on every file a run
+  creates.** `dredge --cmd 'ss -s' --suffix .txt` lands `ss~web01.txt`
+  rather than `ss~web01`, which is the case that needed it: a `--cmd`
+  artifact has no path, so it has no extension at all, and an editor
+  opening it is left guessing. A bare word gains a dot -- `log` and
+  `.log` both mean `.log` -- and one that already starts with `.`, `_`,
+  `-`, `+` or `~` is appended as typed (`--suffix=-raw`, joined, since a
+  separate `-raw` is an option to argparse first). It is cleaned exactly
+  as `--tag` is, so it cannot carry a `/` into the name, and a suffix
+  with no letter or digit in it is refused rather than put on the end of
+  every name in the run. `DREDGE_SUFFIX` sets it too.
+
 - **`dredge --state FILE`, and `DREDGE_EVERY` / `DREDGE_STATE`.** The
   offsets a follow resumes from are kept in one JSON file in the
   collection directory -- `out/dredge-state.json` by default. It is the

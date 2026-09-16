@@ -657,6 +657,48 @@ t_the_tag_leads_the_name_so_runs_can_share_a_directory() {
     assert_file_exists "shared/before-restart~web01~logs~app.log"
 }
 
+t_a_suffix_goes_on_the_end_of_every_created_file() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs -S web01 -d out --suffix .log --quiet
+    assert_file_exists "out/web01~logs~app.log.log"
+    assert_file_exists "out/web01~logs~sub~other.log.log"
+    # A --cmd artifact is the one with no extension of its own, which is
+    # half the reason this exists.
+    dr --cmd 'echo hi' -S web01 -d out --suffix .txt --quiet
+    assert_file_exists "out/echo~web01.txt"
+    assert_eq "$(cat "out/echo~web01.txt")" "hi"
+}
+
+t_a_bare_suffix_gains_a_dot() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --suffix log --quiet
+    assert_file_exists "out/web01~logs~app.log.log"
+    # One that already starts with a separator is appended as typed --
+    # with the joined spelling, since a bare -raw is an option to
+    # argparse before it is ever a suffix.
+    dr logs/app.log -S web01 -d out2 --suffix=-raw --quiet
+    assert_file_exists "out2/web01~logs~app.log-raw"
+    assert_no_file "out2/web01~logs~app.log.-raw"
+}
+
+t_a_suffix_cannot_smuggle_a_path() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --suffix '/../../etc/x' --quiet
+    # One directory, and nothing written outside it.
+    assert_eq "$(find out -type d | wc -l | tr -d ' ')" "1"
+    assert_no_file "etc/x"
+    # And a suffix that is only punctuation is nothing, so it is refused
+    # rather than put on the end of every name in the run.
+    set +e
+    out="$(dr logs/app.log -S web01 -d out6 --suffix '//' 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--suffix"
+}
+
 t_a_tag_cannot_smuggle_a_path_into_the_name() {
     # The tag is the one part of the name the caller writes freely.
     seed
@@ -1195,6 +1237,9 @@ run_test "a failed command is a finding"       t_a_command_that_failed_is_a_find
 run_test "a command that worked is quiet"      t_a_command_that_worked_is_quiet_about_it
 run_test "the tag leads the name"              t_the_tag_leads_the_name_so_runs_can_share_a_directory
 run_test "a tag cannot smuggle a path"         t_a_tag_cannot_smuggle_a_path_into_the_name
+run_test "a suffix goes on every file"         t_a_suffix_goes_on_the_end_of_every_created_file
+run_test "a bare suffix gains a dot"           t_a_bare_suffix_gains_a_dot
+run_test "a suffix cannot smuggle a path"      t_a_suffix_cannot_smuggle_a_path
 run_test "a command and a path are not both"   t_a_command_and_a_path_are_not_both_the_artifact
 run_test "head and tail cut a command too"     t_head_and_tail_cut_a_commands_output_too
 run_test "the server list comes from a file"   t_the_server_list_comes_from_a_file

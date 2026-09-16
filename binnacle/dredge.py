@@ -17,6 +17,10 @@ Options:
                       back as the artifact, in place of a file
   -t, --tag NAME      label this run's artifacts, so several runs can share
                       one directory and still be told apart
+      --suffix EXT    put EXT on the end of every file this run creates;
+                      a bare word gains a dot: `log` and `.log` both mean
+                      `.log`.  One starting with a dash needs the joined
+                      spelling, `--suffix=-raw`          (DREDGE_SUFFIX)
   -S, --server TOKEN  servers, repeatable; ranges expand (`web[01-40]`)
       --servers FILE  a server list, one per line -- reachable's output works
   -d, --dir DIR       where collected files land   (default: dredge-<stamp>)
@@ -128,6 +132,28 @@ Names that stay apart
   land side by side, `ls` groups them by run, `rm audit~*` clears one of
   them, and a file says which collection it belongs to without anyone
   having to remember.
+
+  `--suffix EXT` goes on the end of every name a run creates:
+
+      dredge --cmd 'ss -s' --suffix .txt        ss~web01.txt
+      dredge /var/log/syslog --suffix .log      web01~var~log~syslog.log
+
+  That is how a collection gets an extension the rest of your tooling
+  recognises.  A `--cmd` artifact has no path, so it has no extension at
+  all, and an editor opening `ss~web01` is left guessing where
+  `ss~web01.txt` is not.  A bare word gains a dot -- `--suffix log` and
+  `--suffix .log` both mean `.log` -- and a suffix that already starts
+  with `.`, `_`, `-`, `+` or `~` is appended as typed.  A leading dash
+  needs the joined spelling `--suffix=-raw`, because a separate `-raw`
+  is something argparse has to read as an option.  A suffix with no
+  letter or digit in it at all is refused rather than put on the end of
+  every name in the run.
+
+  It is part of the name, so changing it between two `--follow` passes
+  makes the local copy the last pass wrote unfindable, and that file is
+  collected again from the start under the new name.  That is reported
+  as a RESYNC rather than being silent, but it is worth knowing before
+  changing a suffix mid-follow.
 
   `-d DIR` names the directory yourself.  Without it every run gets one
   of its own, stamped with the time: collecting the same path twice an
@@ -1349,6 +1375,34 @@ def _clean_tag(tag):
     return cleaned or "tag"
 
 
+SUFFIX_LEAD = "._-+~"
+
+
+def _clean_suffix(suffix):
+    """A suffix, reduced to something safe at the end of a filename.
+
+    The same treatment the tag gets, and for the same reason: it is
+    written freely by the caller, so it is a place a `/` could arrive and
+    quietly mean a directory.
+
+    A bare word gains a dot -- `--suffix log` and `--suffix .log` both
+    give `.log`, because that is what somebody typing the first one
+    meant.  A suffix that already starts with a separator is appended as
+    typed, so `--suffix=-raw` stays `-raw` and does not become `.-raw`.
+
+    A suffix with no letter or digit left in it is nothing: `--suffix //`
+    cleans to `-`, which would put a dash on the end of every name in the
+    run and mean nothing at all.  Empty comes back so the caller can
+    refuse it by name rather than quietly renaming the collection.
+    """
+    cleaned = TAG_RE.sub("-", (suffix or "").strip())
+    if not any(ch.isalnum() for ch in cleaned):
+        return ""
+    if cleaned[0] not in SUFFIX_LEAD:
+        cleaned = "." + cleaned
+    return cleaned
+
+
 def default_tag(cmd):
     """A tag for a command nobody named: the command's own first word.
 
@@ -1375,6 +1429,11 @@ def local_path(args, host, relpath):
     dredge-*/web*syslog`, and both of those want one directory of
     distinctly-named files rather than forty identical paths under forty
     host directories.
+
+    `--suffix` goes on the end of every name a run creates, which is how
+    a collection gets an extension the rest of your tooling recognises:
+    a `--cmd` artifact has no path and so has no extension at all, and
+    `ss~web01.txt` opens in an editor where `ss~web01` asks it to guess.
     """
     rel = _clean_relpath(relpath)
     if not rel:
@@ -1386,7 +1445,7 @@ def local_path(args, host, relpath):
         parts = [host.name, rel.replace("/", FLAT_SEP)]
         if args.tag:
             parts.insert(0, _clean_tag(args.tag))
-    return os.path.join(args.dir, FLAT_SEP.join(parts))
+    return os.path.join(args.dir, FLAT_SEP.join(parts) + (args.suffix or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -2315,6 +2374,9 @@ def build_parser():
     p.add_argument("-t", "--tag", metavar="NAME",
                    help="label this run's artifacts, so several runs can "
                         "share a directory and still be told apart")
+    p.add_argument("--suffix", metavar="EXT", default=_env("SUFFIX"),
+                   help="put EXT on the end of every file this run "
+                        "creates; a bare word gains a dot")
     p.add_argument("-S", "--server", dest="server", action="append",
                    metavar="TOKEN")
     p.add_argument("--servers", dest="servers",
@@ -2397,6 +2459,12 @@ def main(argv=None):
         die("--since selects among files by age, and --cmd has no files to "
             "select from -- it has one command and one answer")
     args.tag = args.tag or (default_tag(args.cmd) if args.cmd else None)
+    if args.suffix is not None:
+        cleaned = _clean_suffix(args.suffix)
+        if not cleaned:
+            die("--suffix has nothing in it that can go in a filename: %r"
+                % args.suffix)
+        args.suffix = cleaned
     if args.head and args.tail:
         die("--head and --tail are opposite ends of the same file: pick one")
     if len([f for f in (args.append, args.prepend, args.replace) if f]) > 1:

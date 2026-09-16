@@ -138,6 +138,32 @@ The tag is the one part of the name the caller writes freely, so it is the one
 part that could carry a slash and quietly mean a directory: anything outside
 `A-Za-z0-9._+-` folds to `-`, and `--tag 'a/b c:d'` lands as `a-b-c-d~web01`.
 
+### The suffix
+
+`--suffix EXT` goes on the end of every file a run creates:
+
+```bash
+dredge --cmd 'ss -s' --suffix .txt        # ss~web01.txt
+dredge /var/log/syslog --suffix .log      # web01~var~log~syslog.log
+```
+
+That is how a collection gets an extension the rest of your tooling
+recognises. A `--cmd` artifact has no path, so it has no extension at all, and
+an editor opening `ss~web01` is left guessing where `ss~web01.txt` is not.
+
+A bare word gains a dot — `--suffix log` and `--suffix .log` both mean
+`.log` — and one that already starts with `.`, `_`, `-`, `+` or `~` is
+appended as typed. A leading dash needs the joined spelling `--suffix=-raw`,
+because a separate `-raw` is something argparse has to read as an option. Like
+the tag, it is cleaned before it is used: anything outside `A-Za-z0-9._+-`
+folds to `-`, and a suffix with no letter or digit left in it is refused rather
+than put on the end of every name in the run.
+
+It is part of the name, so changing it between two `--follow` passes makes the
+local copy the last pass wrote unfindable, and that file is collected again from
+the start under the new name — reported as a `RESYNC` rather than silently, but
+worth knowing before changing a suffix mid-follow.
+
 ### The directory
 
 `-d DIR` names it yourself. Without it, every run gets one of its own,
@@ -534,6 +560,7 @@ not carry and nothing will bring back.
 |---|---|
 | `-c, --cmd CMD` | a bash command to run on each host; its output is the artifact |
 | `-t, --tag NAME` | label this run's artifacts so several runs can share a directory |
+| `--suffix EXT` | put EXT on the end of every file the run creates; a bare word gains a dot |
 | `-S, --server TOKEN` | servers, repeatable; ranges expand (`web[01-40]`) |
 | `--servers FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
 | `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
