@@ -10,7 +10,7 @@ Usage: skew.py                          check the configured time sources
        skew.py --explain RULE_ID        why one rule exists
 
 Options:
-  --server ADDR[:PORT]  ask this time source instead of the configured
+  -S, --server ADDR[:PORT]  ask this time source instead of the configured
                      list (repeatable)
   --timeout S        per-query timeout, seconds          (default 2.0)
   --attempts N       tries per query before giving up    (default 2)
@@ -128,7 +128,7 @@ import sys
 import time
 from collections import namedtuple
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 PROG = os.path.basename(sys.argv[0]) or "skew.py"
 
 CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"
@@ -1383,7 +1383,7 @@ def build_parser():
                        "This is free software: you are free to change and redistribute it.\n"
                        "There is no warranty, to the extent permitted by law."
                    ) % (PROG, VERSION))
-    p.add_argument("--server", action="append", dest="servers",
+    p.add_argument("-S", "--server", action="append", dest="servers",
                    metavar="ADDR[:PORT]",
                    default=(_env("SERVERS").split(",") if _env("SERVERS")
                             else None))

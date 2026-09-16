@@ -6,10 +6,10 @@ Runs a command across a fleet over ssh and reports the *consensus*: 47 hosts
 agree, 3 do not, here is the diff.
 
 ```bash
-agree -H 'node[01-24]' -- rpm -q openssl
+agree -S 'node[01-24]' -- rpm -q openssl
 agree --servers prod.txt --loose -- uname -r
 agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- --csv
-agree hosts -H 'rack[a-c]-node[01-04]'      # expand without running anything
+agree hosts -S 'rack[a-c]-node[01-04]'      # expand without running anything
 agree doctor --servers prod.txt               # can each host be reached and used?
 ```
 
@@ -37,7 +37,7 @@ agree -- 50 hosts, 3 groups, 47 agree      [normalized: trim, mask-times]
   WHAT TO DO NEXT
     * node31 and node47 differ from the other 47. If this is a CVE check,
       those are your two:
-      agree -H node31,node47 -- <the fix>
+      agree -S node31,node47 -- <the fix>
     * node09 never answered. That is not "fine because it produced no
       output" -- it is unknown. Fix it or take it out of the list.
 ```
@@ -185,9 +185,9 @@ tokens — so an existing fleet list works unchanged.
 ```bash
 agree --servers prod.txt -- uptime      # a file
 agree --servers - -- uptime             # stdin
-agree -H web01,web02,db01 -- uptime   # inline
-agree -H 'node[01-24]' -- uptime      # a range
-agree -H 'rack[a-c]-node[01-04]' -- uptime   # cartesian
+agree -S web01,web02,db01 -- uptime   # inline
+agree -S 'node[01-24]' -- uptime      # a range
+agree -S 'rack[a-c]-node[01-04]' -- uptime   # cartesian
 ```
 
 Ranges are worth the code: every real fleet is named this way, and typing

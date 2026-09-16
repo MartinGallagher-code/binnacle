@@ -26,7 +26,7 @@ FLEET_NORM=(--fleet-csv)
 fleet() {
     # fleet TOOL -- ARGS...  : push TOOL to node01..node03 and group them
     local tool="$1"; shift
-    "$PY" "$AG" script "$BINNACLE_DIR/$tool" -H node01,node02,node03 \
+    "$PY" "$AG" script "$BINNACLE_DIR/$tool" -S node01,node02,node03 \
         --quiet --remote-dir agreetmp "$@"
 }
 
@@ -169,7 +169,7 @@ t_fleet_csv_is_the_two_flags_and_says_so() {
               "$(printf '%s' "$spelt" | grep -c GROUP)"
     # It contradicts --strict, and says so rather than silently picking.
     set +e
-    out="$("$PY" "$AG" hosts -H node01 --strict --fleet-csv 2>&1)"; rc=$?
+    out="$("$PY" "$AG" hosts -S node01 --strict --fleet-csv 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "contradict"

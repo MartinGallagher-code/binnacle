@@ -10,7 +10,7 @@ Usage: agree.py [run] [OPTIONS] -- COMMAND...
        agree.py help                               every flag of every verb
 
 Examples:
-  agree.py -H web01,web02,db01 -- rpm -q openssl
+  agree.py -S web01,web02,db01 -- rpm -q openssl
   agree.py --servers prod.txt -- 'sysctl net.core.somaxconn'
   agree.py --servers 'node[01-24]' --loose -- uname -r
   agree.py script why-slow --servers prod.txt --fleet-csv -- --csv
@@ -18,7 +18,7 @@ Examples:
 Options:
   --servers FILE|SPEC server list: a file, a range like node[01-24], or -
                       for stdin                            (AGREE_SERVERS)
-  -H a,b,c            hosts inline, repeatable
+  -S, --server a,b,c  servers inline, repeatable
   --jobs N            hosts contacted at once                 (AGREE_JOBS)
   --timeout S         per-host command timeout, seconds       (AGREE_TIMEOUT)
   --max-output BYTES  per-host output cap; a host past it is
@@ -117,7 +117,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 PROG = os.path.basename(sys.argv[0]) or "agree.py"
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
@@ -401,7 +401,7 @@ def collect_hosts(args):
             tokens.extend(from_file)
         else:
             tokens.extend(split_commas(spec))
-    for spec in (args.H or []):
+    for spec in (args.server or []):
         tokens.extend(split_commas(spec))
     if not tokens:
         for default in ("hosts.txt", "servers.txt"):
@@ -411,7 +411,7 @@ def collect_hosts(args):
                 break
     if not tokens:
         die("no hosts given (use --servers FILE, --servers 'node[01-09]' or "
-            "-H a,b,c; hosts.txt and servers.txt are used if present)")
+            "-S a,b,c; hosts.txt and servers.txt are used if present)")
 
     expanded = []
     for tok in tokens:
@@ -961,7 +961,7 @@ def _hints(groups, args, meta):
                    % (" and ".join(g.hosts[:3]),
                       "differs" if g.size == 1 else "differ",
                       sum(x.size for x in ok_groups if x.baseline)))
-        out.append("      %s -H %s -- <the fix>"
+        out.append("      %s -S %s -- <the fix>"
                    % (PROG, ",".join(g.hosts[:3])))
     for g in bad[:2]:
         if g.outcome in (UNREACHABLE, TIMEOUT):
@@ -1311,7 +1311,8 @@ def _add_common(p):
     p.add_argument("--servers", "-f", dest="servers",
                    action="append",
                    default=([listed] if listed else None))
-    p.add_argument("-H", action="append")
+    p.add_argument("-S", "--server", dest="server", action="append",
+                   metavar="TOKEN")
     p.add_argument("--jobs", "-j", type=int,
                    default=int(_env("JOBS", min(32, 4 * (os.cpu_count() or 4)))))
     p.add_argument("--timeout", type=float, default=float(_env("TIMEOUT", 60)))

@@ -153,7 +153,7 @@ jobs:
           # Drive each one far enough to prove it actually runs.
           why-slow --interval 0 --quiet
           logtriage --mask 'Jan  7 12:34:56 h sshd[1]: fail from 10.0.0.1'
-          agree hosts -H 'node[01-03]'
+          agree hosts -S 'node[01-03]'
           netmesh selftest --for 3
           printf 'localhost\n' > hosts.txt
           reachable hosts.txt --dry-run
