@@ -55,27 +55,32 @@ t_host_file_comments_and_order() {
     assert_eq "$out" "$(printf 'node02\nnode01')"
 }
 
-t_the_old_hosts_spelling_still_works() {
-    # --hosts is what --servers was called, and AGREE_HOSTS what
-    # AGREE_SERVERS was. Both keep working, and the flag says once that
-    # it moved -- a rename nobody is told about is a breakage with a
-    # changelog.
-    printf 'node02\nnode01\n' > "$TEST_TMPDIR/hosts.txt"
-    err="$("$PY" "$AG" hosts --hosts "$TEST_TMPDIR/hosts.txt" 2>&1 >/dev/null)"
-    out="$("$PY" "$AG" hosts --hosts "$TEST_TMPDIR/hosts.txt" 2>/dev/null)"
+t_the_old_hosts_spelling_is_gone() {
+    # --hosts was this flag's name and briefly its alias, and AGREE_HOSTS
+    # the matching variable. Neither is read now: one name for one thing.
+    #
+    # The fixture is deliberately not called hosts.txt or servers.txt,
+    # and it runs somewhere neither exists. collect_hosts falls back to
+    # either of those in the working directory when nothing else names a
+    # fleet, so a test sitting next to one cannot tell "the flag was
+    # read" from "the fallback found it" -- which is how the first draft
+    # of this test passed the AGREE_HOSTS case it was written to fail.
+    mkdir -p "$TEST_TMPDIR/gone" && cd "$TEST_TMPDIR/gone" || return 1
+    printf 'node02\nnode01\n' > "$TEST_TMPDIR/fleet.txt"
+    rc=0; out="$("$PY" "$AG" hosts --hosts "$TEST_TMPDIR/fleet.txt" 2>&1)" || rc=$?
+    assert_status 2 "$rc" "an option that does not exist is a usage error"
+    assert_contains "$out" "--hosts"
+    # The name it does answer to works.
+    out="$("$PY" "$AG" hosts --servers "$TEST_TMPDIR/fleet.txt" 2>/dev/null)"
     assert_eq "$out" "$(printf 'node02\nnode01')"
-    assert_contains "$err" "--hosts is now --servers"
-    # The new spelling says nothing about it.
-    err="$("$PY" "$AG" hosts --servers "$TEST_TMPDIR/hosts.txt" 2>&1 >/dev/null)"
-    assert_not_contains "$err" "--hosts"
-    # The old environment variable is still read, and the new one wins.
-    out="$(AGREE_HOSTS="$TEST_TMPDIR/hosts.txt" "$PY" "$AG" hosts 2>/dev/null)"
+    # AGREE_SERVERS is read; AGREE_HOSTS is not, and does not quietly
+    # become a fleet of nothing either -- with no source at all, refuse.
+    out="$(AGREE_SERVERS="$TEST_TMPDIR/fleet.txt" "$PY" "$AG" hosts 2>/dev/null)"
     assert_eq "$out" "$(printf 'node02\nnode01')"
-    printf 'node09\n' > "$TEST_TMPDIR/newer.txt"
-    out="$(AGREE_HOSTS="$TEST_TMPDIR/hosts.txt" \
-           AGREE_SERVERS="$TEST_TMPDIR/newer.txt" \
-           "$PY" "$AG" hosts 2>/dev/null)"
-    assert_eq "$out" "node09"
+    rc=0; out="$(env -u AGREE_SERVERS AGREE_HOSTS="$TEST_TMPDIR/fleet.txt" \
+           "$PY" "$AG" hosts 2>&1)" || rc=$?
+    assert_status 2 "$rc" "AGREE_HOSTS is not read any more"
+    assert_contains "$out" "no hosts given"
 }
 
 t_majority_is_baseline_and_minority_is_diffed() {
@@ -661,7 +666,7 @@ echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
 run_test "host file: comments, order, dedup"   t_host_file_comments_and_order
-run_test "the old --hosts still works"         t_the_old_hosts_spelling_still_works
+run_test "the old --hosts is gone"             t_the_old_hosts_spelling_is_gone
 run_test "majority baseline, minority diffed"  t_majority_is_baseline_and_minority_is_diffed
 run_test "unreachable is a group"              t_unreachable_is_a_group_not_an_error
 run_test "unanimous exits 0"                   t_unanimous_exits_zero

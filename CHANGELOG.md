@@ -17,10 +17,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--servers` wins because the file it points at is a server list, and
   because `netmesh` was already calling it that.
 
-  **`--hosts` still works** -- `--help` lists it as an alias -- and says
-  once on stderr that it has moved; `AGREE_HOSTS` is still read, with `AGREE_SERVERS` preferred
-  when both are set. Nothing written against the old spelling breaks, and
-  nothing goes quietly.
+  **`--hosts` is gone, not deprecated** -- and so is `AGREE_HOSTS`. This
+  is a breaking change: `dredge --hosts f` and `agree --hosts f` now exit
+  2 with `unrecognized arguments: --hosts`, and `AGREE_HOSTS` is not read
+  at all. It briefly shipped as an alias that warned; one name for one
+  thing is worth more than a spelling that half-exists, and an alias
+  nobody removes is a rename that never finished. Change the flag and the
+  variable; there is nothing subtle to migrate.
 
   Two things deliberately keep their names. `resolve --hosts-file` is
   `/etc/hosts` -- the system's own file, not a fleet -- and renaming it
@@ -30,7 +33,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pass.
 
   This is the first test `dredge`'s list flag has ever had: every case in
-  its suite named hosts with `-H`.
+  its suite named hosts with `-H`. Writing the test that the old spelling
+  is refused turned up two things worth keeping: `collect_hosts` falls
+  back to `hosts.txt` or `servers.txt` in the working directory, which
+  can make a test of "was the flag read?" pass on the fallback instead;
+  and the suite's environment hygiene still unset `AGREE_HOSTS` rather
+  than `AGREE_SERVERS`, so the variable the tools actually read could
+  leak in from the caller's shell.
 
 ### Added
 

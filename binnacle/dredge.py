@@ -17,7 +17,6 @@ Options:
                       one directory and still be told apart
   -H, --host TOKEN    hosts, repeatable; ranges expand (`web[01-40]`)
       --servers FILE  a server list, one per line -- reachable's output works
-      --hosts FILE    the old name for --servers; still works
   -d, --dir DIR       where collected files land   (default: dredge-<stamp>)
       --head N        only the first N lines of each file
       --tail N        only the last N lines of each file
@@ -262,16 +261,6 @@ def die(msg, code=2):
 def note(msg, quiet=False):
     if not quiet:
         sys.stderr.write("[%s] %s\n" % (PROG, msg))
-
-
-def _typed(argv, flag):
-    """True if this exact long option was given, as `--flag` or `--flag=x`.
-
-    Reading the arguments again is the only way to tell which of two
-    spellings of one option was used: argparse folds them into a single
-    dest and then cannot say which arrived.
-    """
-    return any(a == flag or a.startswith(flag + "=") for a in argv)
 
 
 def _env(name, default=None):
@@ -1362,10 +1351,7 @@ def build_parser():
                    help="label this run's artifacts, so several runs can "
                         "share a directory and still be told apart")
     p.add_argument("-H", "--host", dest="H", action="append", metavar="TOKEN")
-    # --hosts is what this was called until the fleet-listing flag was
-    # made one name across the binnacle. It still works as an alias, so
-    # a script written against the old spelling does not break.
-    p.add_argument("--servers", "--hosts", dest="servers",
+    p.add_argument("--servers", dest="servers",
                    action="append", metavar="FILE")
     p.add_argument("-d", "--dir", default=_env("DIR"))
     p.add_argument("--head", type=int, metavar="N")
@@ -1421,8 +1407,6 @@ def main(argv=None):
         argv = sys.argv[1:]
     args = build_parser().parse_args(
         glue_relative_times(argv, ("--since",)))
-    if _typed(argv, "--hosts"):
-        note("--hosts is now --servers; the old spelling still works")
 
     if args.cmd and args.path:
         die("give a PATH or --cmd, not both: %r would be collected and %r "

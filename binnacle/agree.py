@@ -18,8 +18,6 @@ Examples:
 Options:
   --servers FILE|SPEC server list: a file, a range like node[01-24], or -
                       for stdin                            (AGREE_SERVERS)
-  --hosts             the old name for --servers; still works, and so
-                      does AGREE_HOSTS
   -H a,b,c            hosts inline, repeatable
   --jobs N            hosts contacted at once                 (AGREE_JOBS)
   --timeout S         per-host command timeout, seconds       (AGREE_TIMEOUT)
@@ -191,16 +189,6 @@ class _WriteGuard(object):
 def _env(name, default=None):
     v = os.environ.get("AGREE_" + name)
     return v if v not in (None, "") else default
-
-
-def _typed(argv, flag):
-    """True if this exact long option was given, as `--flag` or `--flag=x`.
-
-    Reading the arguments again is the only way to tell which of two
-    spellings of one option was used: argparse folds them into a single
-    dest and then cannot say which arrived.
-    """
-    return any(a == flag or a.startswith(flag + "=") for a in argv)
 
 
 def progress(msg):
@@ -1319,12 +1307,8 @@ def run_fleet(args, command, label=None):
 # ---------------------------------------------------------------------------
 
 def _add_common(p):
-    # --hosts/AGREE_HOSTS is what this was called until the
-    # fleet-listing flag was made one name across the binnacle. Both
-    # still work, so a script written against the old spelling does not
-    # break; the new name wins if both are set.
-    listed = _env("SERVERS") or _env("HOSTS")
-    p.add_argument("--servers", "--hosts", "-f", dest="servers",
+    listed = _env("SERVERS")
+    p.add_argument("--servers", "-f", dest="servers",
                    action="append",
                    default=([listed] if listed else None))
     p.add_argument("-H", action="append")
@@ -1526,9 +1510,6 @@ def main(argv=None):
         argv = ["run"] + argv
 
     args = parser.parse_args(argv)
-    if _typed(argv, "--hosts"):
-        sys.stderr.write("[%s] --hosts is now --servers; the old spelling "
-                         "still works\n" % PROG)
     args.command_argv = command_argv
     apply_presets(args)
     if getattr(args, "func", None) is None:
