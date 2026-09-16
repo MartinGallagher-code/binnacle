@@ -107,10 +107,25 @@ upstream is not pasted into a reader that was never the same function.
 
 ## Stateless
 
-No daemon, no dotdir, nothing left running and nothing left behind. State is
-re-derived by probing. The two exceptions are explicit and named by you:
-`logtriage --save-templates` and `reachable`'s edit of the file you passed
-it.
+No dotdir, nothing left running and nothing left behind. State is re-derived
+by probing. The exceptions are explicit and named by you: `logtriage
+--save-templates`, `reachable`'s edit of the file you passed it, and
+`dredge --follow`'s marks -- one file of byte offsets, in the collection
+directory you named with `-d`, which is why `--follow` refuses to run
+without one.
+
+That last is the shape the rule is really about. A follow cannot re-derive
+where it got to by probing: the far side does not know what you already
+have, and reading it off the local copy is only true until somebody uses
+`--prepend`, `--mark` or `--replace`. A mark that is wrong is a gap in a
+collected log or a page repeated, and neither announces itself -- so it is
+written down, in a file you can see and delete, rather than guessed.
+
+`dredge --daemon` is the one command that keeps going, and it is a loop in
+the foreground rather than a daemon in the Unix sense: no fork, no detach,
+no pidfile. `&`, `tmux` or a unit file is how it becomes a service, which
+is the arrangement where the thing supervising it is the thing that already
+supervises everything else.
 
 ## Nothing is destructive without saying so
 
@@ -159,7 +174,7 @@ it surfaces on a developer machine and all of it surfaces on the fleet.
 ## Testing
 
 ```bash
-bash tests/run_tests.sh              # all twelve suites, 348 checks
+bash tests/run_tests.sh              # all twelve suites, 503 checks
 bash tests/run_tests.sh agree        # one suite
 ```
 
