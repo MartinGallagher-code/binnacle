@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # dredge: collecting files off a fleet, naming them apart, and the two
 # transports (tar for whole files, framed base64 for a head or a tail).
 #

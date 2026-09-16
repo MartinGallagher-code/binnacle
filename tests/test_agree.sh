@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # agree: host lists, fan-out, consensus grouping, normalization, safety.
 #
 # Everything runs through the fake ssh/scp shim, so no network and no

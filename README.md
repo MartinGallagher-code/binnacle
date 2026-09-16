@@ -4,8 +4,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/binnacle.svg)](https://pypi.org/project/binnacle/)
 [![CI](https://github.com/MartinGallagher-code/binnacle/actions/workflows/ci.yml/badge.svg)](https://github.com/MartinGallagher-code/binnacle/actions/workflows/ci.yml)
 [![Docs](https://readthedocs.org/projects/binnacle/badge/?version=latest)](https://binnacle.readthedocs.io)
-[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
+[![REUSE status](https://api.reuse.software/badge/github.com/MartinGallagher-code/binnacle)](https://api.reuse.software/info/github.com/MartinGallagher-code/binnacle)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
 one holds eleven, for Linux boxes, the fleets they belong to, and the networks
@@ -257,4 +257,21 @@ tally.
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+Copyright (C) 2026 Martin J. Gallagher
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+Full text: [LICENSE](LICENSE) — SPDX identifier `GPL-3.0-or-later`. This
+repository follows the [REUSE Specification](https://reuse.software/): source
+files carry SPDX copyright and licence headers, and the licence text lives in
+[`LICENSES/`](LICENSES).

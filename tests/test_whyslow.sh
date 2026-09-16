@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # why-slow: the rules engine, driven entirely from fact files.
 #
 # No /proc, no root, no slow machine: every rule is a pure function of the
