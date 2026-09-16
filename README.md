@@ -29,7 +29,10 @@ between them.
 pip install binnacle
 ```
 
-No dependencies. Python 3.6+. No agents, no daemons, no dotdirs, no root.
+No dependencies. Python 3.6+. No agents, no dotdirs, no root, and
+nothing left running unless you ask for it by name --
+`dredge --daemon` is the one thing here that keeps going, and it
+stays in the foreground while it does.
 
 One more command comes with them, and it is the one to run first:
 
@@ -224,6 +227,21 @@ also `g01`, because a bare number ignores the letters -- it says so, and
 It reads the layout and nothing else: no ssh, no DNS, no inventory API, and
 the file is never written to.
 
+### dredge
+
+Brings one file -- or one command's answer -- back from every host, landed
+under a name that says which machine it came from: `dredge /var/log/syslog
+--servers hosts.txt` is forty `scp`s that do not all overwrite each other,
+because every one of them is called `syslog`. `--head`, `--tail` and
+`--since` cut on the far side, so what crosses the network is the two
+hundred lines you asked for rather than the four gigabytes they are in.
+**`--follow` is a remote tail**: each file is resumed from the byte the last
+pass stopped at, a rotated one is spotted and comes back whole, and a
+command's answer is compared with the last one so only the part that was
+added travels. `--daemon` does that on a timer -- a pass, a wait, another
+pass -- which is a fleet-wide `tail -F` that needed nothing installed on the
+fleet.
+
 ## Documentation
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
@@ -234,7 +252,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # twelve suites, 348 checks
+bash tests/run_tests.sh          # twelve suites, 497 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

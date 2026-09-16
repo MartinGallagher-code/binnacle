@@ -124,8 +124,12 @@ nothing else does it. See [Composing them](composing.md).
 
 Worth knowing before you install anything:
 
-- **No agents, no daemons, no dotdirs.** Nothing is left running and nothing
-  is left behind. State is re-derived by looking, not remembered.
+- **No agents, no dotdirs.** Nothing is left running and nothing is left
+  behind. State is re-derived by looking, not remembered. The exception is
+  asked for by name: `dredge --follow` keeps one file of byte offsets in the
+  collection directory you named, because "what did I already have?" cannot
+  be re-derived by looking, and `dredge --daemon` is the one command here
+  that keeps going -- in the foreground, until you stop it.
 - **No dependencies.** Standard library only, Python 3.6 and up. This is a
   hard constraint rather than a preference: `netmesh` copies itself to every
   host in the mesh and `agree script` pushes a tool to a fleet, so anything

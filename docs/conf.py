@@ -21,9 +21,9 @@ REPO_ROOT = os.path.dirname(DOCS_DIR)
 sys.path.insert(0, REPO_ROOT)
 
 import binnacle  # noqa: E402
-from binnacle import (agree, during, logtriage, manifest,  # noqa: E402
-                      muster, netmesh, reachable, resolve, skew,
-                      why_slow)
+from binnacle import (agree, dredge, during, logtriage,  # noqa: E402
+                      manifest, muster, netmesh, reachable, resolve,
+                      skew, why_slow)
 # Aliased: a bare `binnacle` here would rebind the package name above,
 # and `binnacle.VERSION` two lines down would then be the module's.
 from binnacle import binnacle as binnacle_cli  # noqa: E402
@@ -68,6 +68,7 @@ TOOLS = [
     ("skew", skew, False),
     ("muster", muster, True),
     ("manifest", manifest, False),
+    ("dredge", dredge, False),
 ]
 
 
@@ -135,7 +136,7 @@ def _generate_cli_reference():
         "| `why-slow` | `WHY_SLOW_INTERVAL`, `WHY_SLOW_TOP`, "
         "`WHY_SLOW_MIN_SEVERITY`, `WHY_SLOW_BOOT_WINDOW`, `WHY_SLOW_PROC`, "
         "`WHY_SLOW_SYS`, `NO_COLOR` |",
-        "| `agree` | `AGREE_HOSTS`, `AGREE_JOBS`, `AGREE_TIMEOUT`, "
+        "| `agree` | `AGREE_SERVERS`, `AGREE_JOBS`, `AGREE_TIMEOUT`, "
         "`AGREE_USER` (falls back to `SSH_USER`), `AGREE_SSH`, `AGREE_SCP`, "
         "`AGREE_REMOTE_DIR`, `AGREE_LIMIT` |",
         "| `logtriage` | `LOGTRIAGE_TOP`, `LOGTRIAGE_MAX_TEMPLATES`, "
@@ -151,6 +152,9 @@ def _generate_cli_reference():
         "| `muster` | `MUSTER_POOL`, `MUSTER_LEASE`, `MUSTER_AS`, "
         "`MUSTER_LOCK_TIMEOUT`, `MUSTER_STALE_LOCK` |",
         "| `manifest` | `MANIFEST_LAYOUT`, `MANIFEST_ROLE` |",
+        "| `dredge` | `DREDGE_DIR`, `DREDGE_JOBS`, `DREDGE_TIMEOUT`, "
+        "`DREDGE_USER`, `DREDGE_SSH`, `DREDGE_MAX_BYTES`, "
+        "`DREDGE_MAX_FILES`, `DREDGE_EVERY`, `DREDGE_STATE` |",
         "| `resolve` | `RESOLVE_SERVERS`, `RESOLVE_TYPES`, "
         "`RESOLVE_TIMEOUT`, `RESOLVE_ATTEMPTS`, `RESOLVE_MIN_SEVERITY`, "
         "`RESOLVE_CONF`, `RESOLVE_HOSTS`, `NO_COLOR` |",
