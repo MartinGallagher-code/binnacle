@@ -372,11 +372,17 @@ the end of the file:
 ```
 
 What did not fit is a hole in the local copy that will not fill, so it is named
-with its size and the run exits 1. It is deliberately not a refusal: refusing
-would leave the mark where it was, the next pass would have *more* to carry and
-would be refused for the same reason, and that artifact would never be
-collected again — losing the whole of the rest of the log to protect the part
-of it that did not fit.
+with its size. It is deliberately not a refusal: refusing would leave the mark
+where it was, the next pass would have *more* to carry and would be refused for
+the same reason, and that artifact would never be collected again — losing the
+whole of the rest of the log to protect the part of it that did not fit.
+
+**A gap does not change the exit status.** A log busy enough to outrun its
+ceiling does it on most passes, and a daemon whose every pass reported failure
+for working exactly as designed is a daemon whose exit status stops being read.
+`gap_bytes` in `--csv` is the machine-readable half of the finding, and it
+exists for that reason — read it, not `$?`, if a script needs to know that part
+of a log is missing.
 
 ## Daemon mode
 
@@ -512,14 +518,15 @@ dredge -- /var/log/syslog   [tail 200]
 ```
 
 `--csv PATH` writes one row per collected file —
-`host,source,local_path,bytes,outcome,exit_status,pass,unchanged` — including
-a row for the hosts that returned nothing, so the record says who was asked as
-well as what came back. `source` is the path that was collected, or the
+`host,source,local_path,bytes,outcome,exit_status,pass,unchanged,gap_bytes` —
+including a row for the hosts that returned nothing, so the record says who was
+asked as well as what came back. `source` is the path that was collected, or the
 command that was run; `exit_status` is that command's status, and empty for a
 file. `bytes` is what came **over the wire**, not the size of the local file
 after it landed. `pass` is 1 for a one-off run and counts up under `--daemon`,
 which appends its rows rather than replacing them; `unchanged` is what a
-`--follow` pass checked and did not have to carry.
+`--follow` pass checked and did not have to carry; `gap_bytes` is what it could
+not carry and nothing will bring back.
 
 ## Options
 
@@ -559,6 +566,7 @@ evidence and gathers none should stop, not carry on with an empty directory.
 Under `--follow` that one rule is inverted: a pass that brought nothing back
 exits **0**, because nothing new is the answer a tail spends most of its time
 giving, and a script that polls one would otherwise read a quiet fleet as a
-broken run. A `--daemon` stopped by a signal exits 0 as well — it was asked to
+broken run. A `GAP` is **0** as well — see above; `gap_bytes` in `--csv` is
+what says so instead. A `--daemon` stopped by a signal exits 0 as well — it was asked to
 stop — and one that ran out its `--passes` exits 1 if any pass in it had a
 failure.

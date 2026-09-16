@@ -252,7 +252,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # twelve suites, 499 checks
+bash tests/run_tests.sh          # twelve suites, 500 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

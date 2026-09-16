@@ -90,8 +90,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Under `--follow`, `--max-bytes` bounds a pass rather than ending
   one.** When more than the ceiling was added since the last pass, the
   newest `--max-bytes` come back and the follow resumes from the end of
-  the file, reporting what it could not carry as a `GAP` with its size
-  and exiting 1. It previously refused the file outright, which is the
+  the file, reporting what it could not carry as a `GAP` with its size.
+  It previously refused the file outright, which is the
   one way a followed artifact could stop being followed: the mark stayed
   where it was, so the next pass had *more* to carry and was refused for
   the same reason, for ever.
@@ -107,6 +107,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   followed exactly as the old one was -- but the report now says so
   (`this is a seam, not a stop`), because the warning read as an
   abandonment to more than one person.
+
+  **A gap does not change the exit status.** A log busy enough to outrun
+  its ceiling does it on most passes, and a daemon whose every pass
+  reported failure for working exactly as designed is a daemon whose
+  exit status stops being read. That leaves the report as the only place
+  the finding appears, which is the one thing this package's conventions
+  do not allow -- so `--csv` gained a `gap_bytes` column at the end of
+  the header, and that is what a script watches for a hole in a followed
+  log.
 
 - **`dredge` is in the generated CLI reference.** `docs/conf.py` carries
   an explicit tool list and `dredge` was never added to it, so the one

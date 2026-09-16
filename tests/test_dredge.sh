@@ -342,7 +342,7 @@ t_csv_carries_a_row_per_file() {
     dr logs -S web01 -d out --csv c.csv --quiet
     head="$(head -1 c.csv)"
     assert_eq "$head" \
-        "host,source,local_path,bytes,outcome,exit_status,pass,unchanged"
+        "host,source,local_path,bytes,outcome,exit_status,pass,unchanged,gap_bytes"
     assert_contains "$(cat c.csv)" "web01,logs,out/web01~logs~app.log"
 }
 
@@ -967,11 +967,12 @@ t_more_than_one_pass_can_carry_is_a_hole_not_a_stop() {
     "$PY" -c "
 import sys; open(sys.argv[1],'a').write('x' * 9000 + '\n')" \
         "$FAKE_ROOT/web01/logs/app.log"
-    set +e
-    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"; rc=$?
-    set -e
-    # Losing bytes is a finding, and it is said out loud with its size.
-    assert_status $rc 1
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"
+    # Losing bytes is a finding, and it is said out loud with its size --
+    # but not with the exit status. A log busy enough to outrun its
+    # ceiling does it on most passes, and a daemon that called that
+    # failure would have an exit status nobody reads.
+    assert_status $? 0
     assert_contains "$out" "GAP"
     assert_contains "$out" "not carried"
     # The newest 500 bytes came back, so they are in the local copy.
@@ -979,12 +980,34 @@ import sys; open(sys.argv[1],'a').write('x' * 9000 + '\n')" \
     # And the follow is at the end of the file rather than stuck: the
     # next pass carries what was added after it, and nothing else.
     printf 'after the hole\n' >> "$FAKE_ROOT/web01/logs/app.log"
-    set +e
-    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"; rc=$?
-    set -e
-    assert_status $rc 0
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"
+    assert_status $? 0
     assert_not_contains "$out" "GAP"
     assert_contains "$out" "15B"
+}
+
+t_a_gap_is_in_the_csv_because_it_is_not_in_the_status() {
+    # The exit status says nothing about a hole, so the CSV has to: this
+    # is the only thing automation can read to find out that part of a
+    # log is missing.
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --follow --quiet
+    "$PY" -c "
+import sys; open(sys.argv[1],'a').write('x' * 9000 + '\n')" \
+        "$FAKE_ROOT/web01/logs/app.log"
+    dr logs/app.log -S web01 -d out --follow --max-bytes 500 --csv c.csv \
+       --quiet
+    assert_status $? 0
+    # 9001 bytes added, 500 carried: the rest is the hole, on the row of
+    # the file it is a hole in.
+    row="$(grep 'web01~logs~app.log' c.csv)"
+    assert_contains "$row" ",8501"
+    # And a pass with no hole says 0 rather than leaving it to be guessed.
+    printf 'small\n' >> "$FAKE_ROOT/web01/logs/app.log"
+    dr logs/app.log -S web01 -d out --follow --max-bytes 500 --csv c2.csv \
+       --quiet
+    assert_contains "$(grep 'web01~logs~app.log' c2.csv)" ",0"
 }
 
 t_a_rotation_is_a_seam_not_a_stop() {
@@ -1001,19 +1024,16 @@ t_a_rotation_is_a_seam_not_a_stop() {
     "$PY" -c "
 import sys; open(sys.argv[1],'w').write('n' * 4000 + '\n')" \
         "$FAKE_ROOT/web01/logs/app.log"
-    set +e
-    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"; rc=$?
-    set -e
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"
+    assert_status $? 0
     assert_contains "$out" "ROTATED"
     assert_contains "$out" "seam, not a stop"
     # Still being read: the newest bytes of the new file are here.
     assert_contains "$(cat "out/web01~logs~app.log")" "nnn"
     # And still being read on the next pass, from the new file.
     printf 'still following\n' >> "$FAKE_ROOT/web01/logs/app.log"
-    set +e
-    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"; rc=$?
-    set -e
-    assert_status $rc 0
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"
+    assert_status $? 0
     assert_not_contains "$out" "ROTATED"
     assert_contains "$(cat "out/web01~logs~app.log")" "still following"
 }
@@ -1198,6 +1218,7 @@ run_test "a nonsense mark is dropped"          t_a_mark_that_makes_no_sense_is_d
 run_test "a dry run shows the resume table"    t_a_dry_run_of_a_follow_shows_the_resume_table
 run_test "a follow's ceiling is the new part"  t_the_ceiling_of_a_follow_is_the_new_part
 run_test "too much for one pass is a hole"     t_more_than_one_pass_can_carry_is_a_hole_not_a_stop
+run_test "a gap is in the csv, not the status" t_a_gap_is_in_the_csv_because_it_is_not_in_the_status
 run_test "a rotation is a seam not a stop"     t_a_rotation_is_a_seam_not_a_stop
 run_test "a rotation brings the new file"      t_a_rotation_under_no_ceiling_brings_the_whole_new_file
 run_test "a daemon stops after its passes"     t_a_daemon_stops_after_the_passes_it_was_given

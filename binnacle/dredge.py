@@ -221,11 +221,17 @@ A remote tail
   come back and the follow resumes from the end of the file.
 
   What did not fit is a hole in the local copy that will not fill, so it
-  is reported as a GAP naming the bytes and the file, and the run exits
-  1.  It is deliberately not a refusal: refusing would leave the mark
-  where it was, the next pass would have even more to carry, and that
-  artifact would never be collected again -- losing the whole of the
-  rest of the log to protect the part of it that did not fit.
+  is reported as a GAP naming the bytes and the file, and it is a column
+  in `--csv`.  It is deliberately not a refusal: refusing would leave
+  the mark where it was, the next pass would have even more to carry,
+  and that artifact would never be collected again -- losing the whole
+  of the rest of the log to protect the part of it that did not fit.
+
+  A gap does not change the exit status.  A log busy enough to outrun
+  its ceiling does it on most passes, and a daemon whose every pass
+  reported failure for working exactly as designed is a daemon whose
+  exit status stops being read.  `gap_bytes` in `--csv` is what a script
+  watches instead, and it is there for that reason.
 
 Daemon mode
   `--daemon` does that on a timer: a pass, a wait, another pass, until
@@ -289,10 +295,11 @@ Exit status
 
   Under `--follow` a pass that brought nothing back is a 0: nothing new
   is the answer a tail spends most of its time giving, and a script that
-  polls one would otherwise read a quiet fleet as a broken run.  A
-  `--daemon` stopped by a signal exits 0 as well -- it was asked to
-  stop -- and one that ran out its `--passes` exits 1 if any pass in it
-  had a failure.
+  polls one would otherwise read a quiet fleet as a broken run.  A GAP
+  is a 0 as well, for the reason under it above -- `gap_bytes` in
+  `--csv` is the machine-readable half of that finding.  A `--daemon`
+  stopped by a signal exits 0 -- it was asked to stop -- and one that
+  ran out its `--passes` exits 1 if any pass in it had a failure.
 """
 
 import argparse
@@ -2111,9 +2118,17 @@ def _render_findings(out, results, args, compact=False):
 # column that moves breaks every reader of every CSV already written.
 # `pass` is 1 for a single run and counts up under --daemon; `unchanged`
 # is what a follow checked and did not have to carry, which is the number
-# that says the tail is working.
+# that says the tail is working; `gap_bytes` is what a pass could not
+# carry and nothing will bring back.
+#
+# That last one is load-bearing rather than decorative. A gap does not
+# change the exit status -- a busy log under a tight ceiling would make
+# every pass of a perfectly healthy daemon look like a failure -- so this
+# column is the only thing a script can read to learn that part of the
+# log is missing. A finding that is in the report and not in the CSV is a
+# finding automation cannot see.
 CSV_FIELDS = ["host", "source", "local_path", "bytes", "outcome",
-              "exit_status", "pass", "unchanged"]
+              "exit_status", "pass", "unchanged", "gap_bytes"]
 
 
 def write_csv(results, args, path, append=False):
@@ -2135,15 +2150,25 @@ def write_csv(results, args, path, append=False):
         for r in results:
             source = args.cmd if args.cmd else args.path
             st = "" if r.exit_status is None else r.exit_status
+            # Keyed by the local name, because that is what the rows are
+            # keyed by -- the remote path is rebuilt into one here and is
+            # never read back off the far side.
+            holes = {}
+            for n, remote in r.gapped:
+                where = local_path(args, r.host, remote)
+                holes[where] = holes.get(where, 0) + n
             row = {"host": r.host.name, "source": source,
                    "outcome": r.outcome, "exit_status": st,
-                   "pass": args.passno or 1, "unchanged": r.unchanged}
+                   "pass": args.passno or 1, "unchanged": r.unchanged,
+                   "gap_bytes": 0}
             if not r.files:
-                row.update({"local_path": "", "bytes": 0})
+                row.update({"local_path": "", "bytes": 0,
+                            "gap_bytes": sum(holes.values())})
                 w.writerow(row)
                 continue
             for p, n in r.files:
-                row.update({"local_path": p, "bytes": n})
+                row.update({"local_path": p, "bytes": n,
+                            "gap_bytes": holes.pop(p, 0)})
                 w.writerow(row)
     finally:
         if fh is not sys.stdout:
@@ -2181,13 +2206,6 @@ def pass_failed(args, results):
     """
     if any(r.outcome != OK or r.collisions or r.truncated
            or r.exit_status not in (None, 0) for r in results):
-        return True
-    if any(r.gapped for r in results):
-        # A hole in a followed copy. The follow itself is fine -- it is at
-        # the end of the file and carrying on -- but bytes that existed
-        # are not here and never will be, and a run that quietly returns
-        # 0 having lost some of the log is the failure this whole tool is
-        # built not to be.
         return True
     return not args.follow and not sum(len(r.files) for r in results)
 
