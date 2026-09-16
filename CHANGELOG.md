@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-09-15
+## [0.8.0] - 2026-09-16
 
 ### Changed
 
@@ -25,12 +25,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nobody removes is a rename that never finished. Change the flag and the
   variable; there is nothing subtle to migrate.
 
+- **The inline flag is `-S`/`--server` everywhere too.** Naming a machine
+  on the command line took three spellings depending on the instrument:
+  `agree -H`, `dredge -H`/`--host`, and `skew`/`resolve --server`. It is
+  `-S`/`--server` in all four now -- the singular of `--servers`, which
+  is what it always meant. **Breaking:** `-H` and `--host` are gone from
+  `agree` and `dredge`, with no alias, for the same reason `--hosts` is.
+  `skew` and `resolve` only gained the `-S` short form; their `--server`
+  is unchanged.
+
   Two things deliberately keep their names. `resolve --hosts-file` is
   `/etc/hosts` -- the system's own file, not a fleet -- and renaming it
-  would have been the opposite of clearer. `-H`/`--host` and `--server`,
-  which name machines inline rather than pointing at a list, are a
-  different question with a different answer and are left for a separate
-  pass.
+  would have been the opposite of clearer. `netmesh agent --host` is the
+  agent saying which machine it *is*, not which to contact; calling that
+  `--server` would describe the wrong thing. `find -H` inside `dredge`
+  is `find`'s own option and is not ours to rename.
+
+  There is no 0.7.0. It was cut here, never tagged and never published,
+  and folding it into 0.8.0 beat shipping a version whose changelog
+  described an alias that had already been removed.
 
   This is the first test `dredge`'s list flag has ever had: every case in
   its suite named hosts with `-H`. Writing the test that the old spelling
@@ -1769,8 +1782,8 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
-[Unreleased]: https://github.com/MartinGallagher-code/binnacle/compare/v0.7.0...HEAD
-[0.7.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.6.0...v0.7.0
+[Unreleased]: https://github.com/MartinGallagher-code/binnacle/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.6.0...v0.8.0
 [0.6.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.3.0...v0.4.0

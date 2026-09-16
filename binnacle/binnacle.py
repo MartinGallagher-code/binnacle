@@ -82,7 +82,7 @@ import io
 import os
 import sys
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 PROG = os.path.basename(sys.argv[0]) or "binnacle.py"
 
 HERE = os.path.dirname(os.path.abspath(__file__))

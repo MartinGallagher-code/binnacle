@@ -115,7 +115,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 PROG = os.path.basename(sys.argv[0]) or "netmesh.py"
 
 # ---------------------------------------------------------------------------

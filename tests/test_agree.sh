@@ -40,9 +40,9 @@ t_top_level_flags_survive_verb_defaulting() {
 }
 
 t_ranges_expand() {
-    out="$("$PY" "$AG" hosts -H 'node[01-03]')"
+    out="$("$PY" "$AG" hosts -S 'node[01-03]')"
     assert_eq "$out" "$(printf 'node01\nnode02\nnode03')"
-    out="$("$PY" "$AG" hosts -H 'rack[a-b]-n[1,3]')"
+    out="$("$PY" "$AG" hosts -S 'rack[a-b]-n[1,3]')"
     assert_contains "$out" "racka-n1"
     assert_contains "$out" "rackb-n3"
 }
@@ -53,6 +53,23 @@ t_host_file_comments_and_order() {
     out="$("$PY" "$AG" hosts --servers "$TEST_TMPDIR/hosts.txt")"
     # Input order preserved, duplicates dropped.
     assert_eq "$out" "$(printf 'node02\nnode01')"
+}
+
+t_the_old_inline_spelling_is_gone() {
+    # -H named a machine inline; --server is that flag now, so that one
+    # word covers naming a machine on the command line whichever
+    # instrument you picked up. -H is not kept as a short form: it is the
+    # spelling being retired, and -S is the one that matches --servers.
+    mkdir -p "$TEST_TMPDIR/inline" && cd "$TEST_TMPDIR/inline" || return 1
+    rc=0; out="$("$PY" "$AG" hosts -H node01 2>&1)" || rc=$?
+    assert_status 2 "$rc" "-H is not an option any more"
+    rc=0; out="$("$PY" "$AG" hosts --host node01 2>&1)" || rc=$?
+    assert_status 2 "$rc" "--host never was agree's and still is not"
+    # Both spellings it does answer to.
+    out="$("$PY" "$AG" hosts -S node01,node02 2>/dev/null)"
+    assert_eq "$out" "$(printf 'node01\nnode02')"
+    out="$("$PY" "$AG" hosts --server 'node[01-02]' 2>/dev/null)"
+    assert_eq "$out" "$(printf 'node01\nnode02')"
 }
 
 t_the_old_hosts_spelling_is_gone() {
@@ -86,7 +103,7 @@ t_the_old_hosts_spelling_is_gone() {
 t_majority_is_baseline_and_minority_is_diffed() {
     seed
     set +e
-    out="$(ag -H 'node[01-03],node31,node47' --quiet -- cat answer)"
+    out="$(ag -S 'node[01-03],node31,node47' --quiet -- cat answer)"
     rc=$?
     set -e
     assert_status $rc 1                      # divergence, no failures
@@ -100,7 +117,7 @@ t_majority_is_baseline_and_minority_is_diffed() {
 t_unreachable_is_a_group_not_an_error() {
     seed
     set +e
-    out="$(ag -H 'node[01-03],node09' --quiet -- cat answer)"
+    out="$(ag -S 'node[01-03],node09' --quiet -- cat answer)"
     rc=$?
     set -e
     assert_status $rc 3                      # a failure outranks divergence
@@ -112,7 +129,7 @@ t_unreachable_is_a_group_not_an_error() {
 t_unanimous_exits_zero() {
     seed
     set +e
-    ag -H 'node[01-03]' --quiet -- cat answer >/dev/null
+    ag -S 'node[01-03]' --quiet -- cat answer >/dev/null
     rc=$?
     set -e
     assert_status $rc 0
@@ -125,7 +142,7 @@ t_same_output_different_exit_codes_split() {
     printf 'echo same\n' > "$FAKE_ROOT/a/run.sh"
     printf 'echo same; exit 3\n' > "$FAKE_ROOT/b/run.sh"
     set +e
-    out="$(ag -H a,b --quiet -- sh run.sh)"
+    out="$(ag -S a,b --quiet -- sh run.sh)"
     set -e
     assert_contains "$out" "GROUP 1"
     assert_contains "$out" "GROUP 2"
@@ -138,8 +155,8 @@ t_order_is_host_list_order_not_completion() {
     printf 'sleep 0.4; echo x\n' > "$FAKE_ROOT/slow/run.sh"
     printf 'echo x\n'            > "$FAKE_ROOT/fast/run.sh"
     # Run it twice; only the recorded order is under test.
-    ag -H slow,fast --quiet --csv "$TEST_TMPDIR/1.csv" -- sh run.sh >/dev/null
-    ag -H slow,fast --quiet --csv "$TEST_TMPDIR/2.csv" -- sh run.sh >/dev/null
+    ag -S slow,fast --quiet --csv "$TEST_TMPDIR/1.csv" -- sh run.sh >/dev/null
+    ag -S slow,fast --quiet --csv "$TEST_TMPDIR/2.csv" -- sh run.sh >/dev/null
     assert_eq "$(cut -d, -f1 < "$TEST_TMPDIR/1.csv")" \
               "$(cut -d, -f1 < "$TEST_TMPDIR/2.csv")"
     assert_contains "$(cat "$TEST_TMPDIR/1.csv")" "slow"
@@ -153,18 +170,18 @@ t_mask_hosts_makes_hostname_output_agree() {
     # The single quotes are the point: $PWD must expand on the
     # far side, not here.
     # shellcheck disable=SC2016
-    strict="$(ag -H n1,n2 --quiet --strict -- 'echo $(basename $PWD)')"
+    strict="$(ag -S n1,n2 --quiet --strict -- 'echo $(basename $PWD)')"
     set -e
     assert_contains "$strict" "GROUP 2"
     # shellcheck disable=SC2016
-    loose="$(ag -H n1,n2 --quiet --mask-hosts -- 'echo $(basename $PWD)')"
+    loose="$(ag -S n1,n2 --quiet --mask-hosts -- 'echo $(basename $PWD)')"
     assert_not_contains "$loose" "GROUP 2"
     assert_contains "$loose" "%HOST%"
 }
 
 t_normalizations_are_disclosed() {
     seed
-    out="$(ag -H node01 --quiet --loose -- cat answer)"
+    out="$(ag -S node01 --quiet --loose -- cat answer)"
     assert_contains "$out" "normalized:"
     assert_contains "$out" "mask-numbers"
     # And the report warns that masking numbers can manufacture agreement.
@@ -177,17 +194,17 @@ t_sort_lines_ignores_order() {
     printf 'printf "x\\ny\\n"\n' > "$FAKE_ROOT/a/run.sh"
     printf 'printf "y\\nx\\n"\n' > "$FAKE_ROOT/b/run.sh"
     set +e
-    plain="$(ag -H a,b --quiet -- sh run.sh)"
+    plain="$(ag -S a,b --quiet -- sh run.sh)"
     set -e
     assert_contains "$plain" "GROUP 2"
-    sorted="$(ag -H a,b --quiet --sort-lines -- sh run.sh)"
+    sorted="$(ag -S a,b --quiet --sort-lines -- sh run.sh)"
     assert_not_contains "$sorted" "GROUP 2"
 }
 
 t_danger_guard_refuses_without_yes() {
     seed
     set +e
-    out="$(ag -H node01 -- rm -rf /var/log 2>&1)"
+    out="$(ag -S node01 -- rm -rf /var/log 2>&1)"
     rc=$?
     set -e
     assert_status $rc 2
@@ -198,20 +215,20 @@ t_danger_guard_refuses_without_yes() {
 
 t_dry_run_contacts_nobody() {
     seed
-    out="$(ag -H 'node[01-03]' --dry-run -- uname -r)"
+    out="$(ag -S 'node[01-03]' --dry-run -- uname -r)"
     assert_contains "$out" "BatchMode=yes"
     assert_eq "$(ssh_calls)" "0"
 }
 
 t_first_limits_the_blast_radius() {
     seed
-    ag -H 'node[01-03]' --first 2 --quiet -- cat answer >/dev/null 2>&1 || true
+    ag -S 'node[01-03]' --first 2 --quiet -- cat answer >/dev/null 2>&1 || true
     assert_eq "$(ssh_calls)" "2"
 }
 
 t_sudo_is_always_non_interactive() {
     seed
-    ag -H node01 --sudo --dry-run -- id > "$TEST_TMPDIR/out" 2>&1
+    ag -S node01 --sudo --dry-run -- id > "$TEST_TMPDIR/out" 2>&1
     assert_contains "$(cat "$TEST_TMPDIR/out")" "sudo -n id"
 }
 
@@ -220,7 +237,7 @@ t_script_pushes_runs_and_cleans_up() {
     fake_host a
     printf '#!/bin/sh\necho hello from script\n' > "$TEST_TMPDIR/s.sh"
     chmod +x "$TEST_TMPDIR/s.sh"
-    out="$(ag_verb script "$TEST_TMPDIR/s.sh" -H a --quiet --remote-dir agreetmp -- )"
+    out="$(ag_verb script "$TEST_TMPDIR/s.sh" -S a --quiet --remote-dir agreetmp -- )"
     assert_contains "$out" "hello from script"
     log="$(cat "$FAKE_SSH_LOG")"
     assert_contains "$log" "scp a agreetmp"
@@ -235,7 +252,7 @@ t_script_resolves_a_bundled_tool_name() {
     # The name is looked up next to agree.py itself, hyphens normalized.
     install_fake_ssh
     fake_host a
-    out="$(ag_verb script why-slow -H a --quiet --remote-dir agreetmp \
+    out="$(ag_verb script why-slow -S a --quiet --remote-dir agreetmp \
         -- --explain SWAP_THRASH)"
     assert_contains "$out" "SWAP_THRASH"
     log="$(cat "$FAKE_SSH_LOG")"
@@ -249,7 +266,7 @@ t_script_unknown_name_lists_the_bundled_tools() {
     install_fake_ssh
     fake_host a
     set +e
-    out="$(ag_verb script no-such-tool -H a --quiet -- 2>&1)"
+    out="$(ag_verb script no-such-tool -S a --quiet -- 2>&1)"
     rc=$?
     set -e
     assert_status $rc 2
@@ -257,7 +274,7 @@ t_script_unknown_name_lists_the_bundled_tools() {
     assert_contains "$out" "why-slow"
     # An explicit path never falls back to the bundle lookup.
     set +e
-    out="$(ag_verb script ./no/such/dir/why-slow -H a --quiet -- 2>&1)"
+    out="$(ag_verb script ./no/such/dir/why-slow -S a --quiet -- 2>&1)"
     rc=$?
     set -e
     assert_status $rc 2
@@ -277,7 +294,7 @@ SHIM
     chmod +x "$TEST_TMPDIR/ssh_flood"
     rc=0
     out="$("$PY" "$AG" run --ssh "$TEST_TMPDIR/ssh_flood" \
-             -H node01 --max-output 100000 --timeout 30 -- uname 2>&1)" || rc=$?
+             -S node01 --max-output 100000 --timeout 30 -- uname 2>&1)" || rc=$?
     assert_status $rc 3
     assert_contains "$out" "exceeded --max-output"
     # the captured prefix must not appear as a group's output
@@ -290,11 +307,11 @@ t_a_bad_argument_is_refused_before_the_fan_out() {
     # typo'd --servers path fell through to being a hostname -- a fleet of
     # one bogus host that then failed as "unreachable", blaming the
     # network for a typo.
-    rc=0; out="$(ag -H n1 --grep '([unclosed' --quiet -- x 2>&1)" || rc=$?
+    rc=0; out="$(ag -S n1 --grep '([unclosed' --quiet -- x 2>&1)" || rc=$?
     assert_status $rc 2
     assert_contains "$out" "bad --grep"
     assert_not_contains "$out" "Traceback"
-    rc=0; out="$(ag -H n1 --scrub '*bad' --quiet -- x 2>&1)" || rc=$?
+    rc=0; out="$(ag -S n1 --scrub '*bad' --quiet -- x 2>&1)" || rc=$?
     assert_status $rc 2
     assert_contains "$out" "bad --scrub"
     rc=0; out="$(ag_verb hosts --servers ./no/such/hosts.txt 2>&1)" || rc=$?
@@ -321,7 +338,7 @@ exit 0
 SHIM
     chmod +x "$TEST_TMPDIR/ssh_junk"
     rc=0
-    out="$("$PY" "$AG" run -H node01,node02 --ssh "$TEST_TMPDIR/ssh_junk" \
+    out="$("$PY" "$AG" run -S node01,node02 --ssh "$TEST_TMPDIR/ssh_junk" \
              --merge-csv "$TEST_TMPDIR/junk.csv" --quiet -- x --csv 2>&1)" || rc=$?
     assert_contains "$out" "not this CSV"
     assert_contains "$out" "node02"
@@ -346,7 +363,7 @@ esac
 SHIM
     chmod +x "$TEST_TMPDIR/ssh_skew"
     rc=0
-    out="$("$PY" "$AG" run -H node01,node02 --ssh "$TEST_TMPDIR/ssh_skew" \
+    out="$("$PY" "$AG" run -S node01,node02 --ssh "$TEST_TMPDIR/ssh_skew" \
              --merge-csv "$TEST_TMPDIR/skew.csv" --quiet -- x --csv 2>&1)" || rc=$?
     assert_contains "$out" "column skew"
     assert_contains "$out" "node02"
@@ -363,7 +380,7 @@ t_merge_csv_stacks_and_prefixes_ssh_host() {
         printf 'printf "host,rule\\n%s,OK\\n"\n' "$h" > "$FAKE_ROOT/$h/run.sh"
     done
     # Hosts a and b give different answers, so agree exits 1 by design.
-    ag -H a,b --quiet --merge-csv "$TEST_TMPDIR/m.csv" -- sh run.sh \
+    ag -S a,b --quiet --merge-csv "$TEST_TMPDIR/m.csv" -- sh run.sh \
         >/dev/null 2>&1 || true
     body="$(cat "$TEST_TMPDIR/m.csv")"
     assert_eq "$(head -1 "$TEST_TMPDIR/m.csv")" "ssh_host,host,rule"
@@ -384,7 +401,7 @@ t_mask_hosts_masks_names_not_substrings() {
         printf 'echo "postgresql restarted on %s, adb loaded"\n' "$h" \
             > "$FAKE_ROOT/$h/run.sh"
     done
-    out="$(ag -H sql,db --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
+    out="$(ag -S sql,db --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
     assert_contains "$out" "postgresql"
     assert_contains "$out" "adb"
     assert_contains "$out" "%HOST%"
@@ -401,7 +418,7 @@ t_mask_hosts_handles_addresses_and_fqdns() {
         printf 'echo "%s.example.com bound ::1 and 10.0.0.9"\n' "$h" \
             > "$FAKE_ROOT/$h/run.sh"
     done
-    out="$(ag -H node01,node02 --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
+    out="$(ag -S node01,node02 --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
     assert_contains "$out" "%HOST%.example.com"
     assert_not_contains "$out" "node01.example.com"
     # The two hosts differ only in their own name, so they must now agree.
@@ -412,7 +429,7 @@ t_mask_hosts_handles_addresses_and_fqdns() {
     fake_host 10.0.0.9
     printf 'echo "peers 10.0.0.9 and 192.10.0.0.9"\n' \
         > "$FAKE_ROOT/10.0.0.9/run.sh"
-    frag="$(ag -H 10.0.0.9 --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
+    frag="$(ag -S 10.0.0.9 --quiet --mask-hosts -- sh run.sh 2>&1 || true)"
     assert_contains "$frag" "peers %HOST% and 192.10.0.0.9"
 }
 
@@ -420,20 +437,20 @@ t_ipv6_is_parsed_not_mangled() {
     # Splitting on the last colon turned "::1" into the address ":" on port
     # 1, so every v6 host in a list collapsed to the same nonsense entry.
     # The bracket form carries a port; a bare literal has none.
-    assert_eq "$("$PY" "$AG" hosts -H '::1')" "::1"
-    assert_eq "$("$PY" "$AG" hosts -H 'v6=[fe80::1]:2222')" "v6=[fe80::1]:2222"
-    assert_eq "$("$PY" "$AG" hosts -H '10.0.0.9:2222')" "10.0.0.9=10.0.0.9:2222"
+    assert_eq "$("$PY" "$AG" hosts -S '::1')" "::1"
+    assert_eq "$("$PY" "$AG" hosts -S 'v6=[fe80::1]:2222')" "v6=[fe80::1]:2222"
+    assert_eq "$("$PY" "$AG" hosts -S '10.0.0.9:2222')" "10.0.0.9=10.0.0.9:2222"
     # This verb exists to be fed to something else, so its output has to
     # read back as the same host -- "fe80::1:2222" would be a different
     # address, and a valid one.
-    out="$("$PY" "$AG" hosts -H 'v6=[fe80::1]:2222')"
-    assert_eq "$("$PY" "$AG" hosts -H "$out")" "$out"
+    out="$("$PY" "$AG" hosts -S 'v6=[fe80::1]:2222')"
+    assert_eq "$("$PY" "$AG" hosts -S "$out")" "$out"
     # A bracketed address is not a range, however much it looks like one.
-    assert_eq "$("$PY" "$AG" hosts -H '[::1]')" "::1"
-    assert_eq "$("$PY" "$AG" hosts -H 'node[01-02]')" "$(printf 'node01\nnode02')"
+    assert_eq "$("$PY" "$AG" hosts -S '[::1]')" "::1"
+    assert_eq "$("$PY" "$AG" hosts -S 'node[01-02]')" "$(printf 'node01\nnode02')"
     # Garbage is refused where it is written, not where it fails to connect.
     set +e
-    out="$("$PY" "$AG" hosts -H '2001:db8::1::2' 2>&1)"; rc=$?
+    out="$("$PY" "$AG" hosts -S '2001:db8::1::2' 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "not a valid IPv6 address"
@@ -446,7 +463,7 @@ t_ipv6_reaches_ssh_bare_and_scp_bracketed() {
     fake_host "::1"
     printf '#!/bin/sh\necho v6 ok\n' > "$TEST_TMPDIR/s.sh"
     chmod +x "$TEST_TMPDIR/s.sh"
-    out="$(ag_verb script "$TEST_TMPDIR/s.sh" -H '::1' --quiet \
+    out="$(ag_verb script "$TEST_TMPDIR/s.sh" -S '::1' --quiet \
              --remote-dir agreetmp -- )"
     assert_contains "$out" "v6 ok"
     log="$(cat "$FAKE_SSH_LOG")"
@@ -462,13 +479,13 @@ t_mask_times_covers_the_machine_readable_one() {
     printf 'echo "node,1786741765,OK"\n' > "$FAKE_ROOT/a/run.sh"
     fake_host b
     printf 'echo "node,1786741766,OK"\n' > "$FAKE_ROOT/b/run.sh"
-    out="$(ag -H a,b --quiet --mask-times -- sh run.sh 2>&1 || true)"
+    out="$(ag -S a,b --quiet --mask-times -- sh run.sh 2>&1 || true)"
     assert_contains "$out" "1 group"
     assert_contains "$out" "<TS>"
     # An ordinary ten-digit number is not a date and must survive.
     fake_host c
     printf 'echo "bytes 9876543210"\n' > "$FAKE_ROOT/c/run.sh"
-    plain="$(ag -H c --quiet --mask-times -- sh run.sh 2>&1 || true)"
+    plain="$(ag -S c --quiet --mask-times -- sh run.sh 2>&1 || true)"
     assert_contains "$plain" "9876543210"
 }
 
@@ -477,12 +494,12 @@ t_a_port_outside_the_range_is_refused() {
     # connection error naming the wrong cause, and a port of 0 or 70000 is
     # no more a port than "2001:db8::1::2" is an address.
     set +e
-    out="$("$PY" "$AG" hosts -H 'web01=10.0.0.1:99999' 2>&1)"; rc=$?
+    out="$("$PY" "$AG" hosts -S 'web01=10.0.0.1:99999' 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "out of range"
     # ...and a real one still parses.
-    out="$("$PY" "$AG" hosts -H 'web01=10.0.0.1:2222')"
+    out="$("$PY" "$AG" hosts -S 'web01=10.0.0.1:2222')"
     assert_contains "$out" "2222"
 }
 
@@ -498,7 +515,7 @@ t_a_pull_that_brings_nothing_back_is_reported() {
     mkdir -p "$FAKE_ROOT/web02/var/tmp/agree"
     printf 'the answer\n' > "$FAKE_ROOT/web02/var/tmp/agree/out.csv"
     set +e
-    out="$(ag -H web01,web02 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
+    out="$(ag -S web01,web02 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
         --quiet -- echo hi 2>&1)"
     rc=$?
     set -e
@@ -516,7 +533,7 @@ t_a_pull_that_works_is_not_a_finding() {
         mkdir -p "$FAKE_ROOT/$h/var/tmp/agree"
         printf 'the answer\n' > "$FAKE_ROOT/$h/var/tmp/agree/out.csv"
     done
-    out="$(ag -H web01,web02 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
+    out="$(ag -S web01,web02 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
         --quiet -- echo hi 2>&1)"
     assert_status $? 0
     assert_not_contains "$out" "PULL FAILED"
@@ -536,7 +553,7 @@ t_an_unmakeable_pull_dir_does_not_end_the_run() {
     mkdir -p "$TEST_TMPDIR/got"
     printf 'in the way\n' > "$TEST_TMPDIR/got/web01"
     set +e
-    out="$(ag -H web01 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
+    out="$(ag -S web01 --pull 'out.csv' --pull-dir "$TEST_TMPDIR/got" \
         --quiet -- echo hi 2>&1)"
     rc=$?
     set -e
@@ -556,14 +573,14 @@ t_a_guard_that_reads_zero_as_unset_is_not_a_guard() {
     for h in web01 web02 web03; do fake_host "$h"; done
     for v in 0 -1; do
         set +e
-        out="$(ag -H web01,web02,web03 --first "$v" --quiet -- echo hi 2>&1)"
+        out="$(ag -S web01,web02,web03 --first "$v" --quiet -- echo hi 2>&1)"
         rc=$?
         set -e
         assert_status $rc 2
         assert_contains "$out" "--first wants at least 1"
     done
     set +e
-    out="$(ag -H web01,web02,web03 --limit 0 --quiet -- echo hi 2>&1)"
+    out="$(ag -S web01,web02,web03 --limit 0 --quiet -- echo hi 2>&1)"
     rc=$?
     set -e
     assert_status $rc 2
@@ -573,11 +590,11 @@ t_a_guard_that_reads_zero_as_unset_is_not_a_guard() {
 t_the_canary_still_limits_when_it_is_given_a_number() {
     install_fake_ssh
     for h in web01 web02 web03; do fake_host "$h"; done
-    out="$(ag -H web01,web02,web03 --first 2 --quiet -- echo hi 2>&1)"
+    out="$(ag -S web01,web02,web03 --first 2 --quiet -- echo hi 2>&1)"
     assert_contains "$out" "2 hosts"
     # And the wide-run guard still refuses above its number.
     set +e
-    out="$(ag -H web01,web02,web03 --limit 2 --quiet -- echo hi 2>&1)"
+    out="$(ag -S web01,web02,web03 --limit 2 --quiet -- echo hi 2>&1)"
     rc=$?
     set -e
     assert_status $rc 2
@@ -590,7 +607,7 @@ t_other_numbers_that_cannot_mean_anything_are_refused() {
     for pair in "--jobs 0" "--max-output 0" "--timeout 0"; do
         set +e
         # shellcheck disable=SC2086  # deliberate: a flag and its value
-        out="$(ag -H web01 $pair --quiet -- echo hi 2>&1)"
+        out="$(ag -S web01 $pair --quiet -- echo hi 2>&1)"
         rc=$?
         set -e
         assert_status $rc 2
@@ -614,12 +631,12 @@ t_hosts_that_agree_on_nothing_are_not_unanimous() {
     # Without the filter they genuinely disagree: three groups. That is
     # exit 1 on its own, so it must not abort the case.
     set +e
-    out="$(ag -H web01,web02,web03 --quiet -- cat who 2>&1)"
+    out="$(ag -S web01,web02,web03 --quiet -- cat who 2>&1)"
     set -e
     assert_contains "$out" "3 groups"
 
     set +e
-    out="$(ag -H web01,web02,web03 --grep zzz-absent --quiet -- cat who 2>&1)"
+    out="$(ag -S web01,web02,web03 --grep zzz-absent --quiet -- cat who 2>&1)"
     rc=$?
     set -e
     assert_contains "$out" "NOTHING LEFT"
@@ -634,7 +651,7 @@ t_a_fleet_that_really_is_silent_still_agrees() {
     # counts as a comparison that did not happen.
     install_fake_ssh
     for h in web01 web02 web03; do fake_host "$h"; done
-    out="$(ag -H web01,web02,web03 --quiet -- true 2>&1)"
+    out="$(ag -S web01,web02,web03 --quiet -- true 2>&1)"
     assert_status $? 0
     assert_contains "$out" "Nothing to chase here"
     assert_not_contains "$out" "NOTHING LEFT"
@@ -650,14 +667,14 @@ t_slices_that_can_only_empty_the_comparison_are_refused() {
     for pair in "--field 0" "--field -1" "--tail -1" "--head -1" "--tail 0"; do
         set +e
         # shellcheck disable=SC2086  # deliberate: a flag and its value
-        out="$(ag -H web01 $pair --quiet -- hostname 2>&1)"
+        out="$(ag -S web01 $pair --quiet -- hostname 2>&1)"
         rc=$?
         set -e
         assert_status $rc 2
         assert_contains "$out" "wants at least 1"
     done
     # The real thing still slices.
-    out="$(ag -H web01 --tail 1 --full --quiet -- 'printf "a\nb\n"' 2>&1)"
+    out="$(ag -S web01 --tail 1 --full --quiet -- 'printf "a\nb\n"' 2>&1)"
     assert_contains "$out" "b"
     assert_not_contains "$out" "    a"
 }
@@ -667,6 +684,7 @@ run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_de
 run_test "ranges expand"                       t_ranges_expand
 run_test "host file: comments, order, dedup"   t_host_file_comments_and_order
 run_test "the old --hosts is gone"             t_the_old_hosts_spelling_is_gone
+run_test "the old -H is gone too"              t_the_old_inline_spelling_is_gone
 run_test "majority baseline, minority diffed"  t_majority_is_baseline_and_minority_is_diffed
 run_test "unreachable is a group"              t_unreachable_is_a_group_not_an_error
 run_test "unanimous exits 0"                   t_unanimous_exits_zero

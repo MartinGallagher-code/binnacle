@@ -12,7 +12,8 @@ Usage: resolve.py                        check the configured resolvers
        resolve.py --explain RULE_ID      why one rule exists
 
 Options:
-  --server ADDR[:PORT]  ask this resolver instead of resolv.conf (repeatable)
+  -S, --server ADDR[:PORT]  ask this resolver instead of resolv.conf
+                      (repeatable)
   --type LIST        record types to ask for            (default A,AAAA)
   --timeout S        per-query timeout, seconds         (default 2.0)
   --attempts N       tries per query before giving up   (default 1)
@@ -94,7 +95,7 @@ import sys
 import time
 from collections import namedtuple
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 PROG = os.path.basename(sys.argv[0]) or "resolve.py"
 
 CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"
@@ -1565,7 +1566,7 @@ def build_parser():
                        "This is free software: you are free to change and redistribute it.\n"
                        "There is no warranty, to the extent permitted by law."
                    ) % (PROG, VERSION))
-    p.add_argument("--server", action="append", dest="servers",
+    p.add_argument("-S", "--server", action="append", dest="servers",
                    metavar="ADDR[:PORT]",
                    default=(_env("SERVERS").split(",") if _env("SERVERS")
                             else None))

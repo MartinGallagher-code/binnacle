@@ -5,7 +5,7 @@
 ```bash
 dredge /var/log/syslog --servers hosts.txt          # one file from every host
 dredge --cmd 'ss -s' --servers hosts.txt            # what a command says, instead
-dredge /var/log/syslog --tail 200 -H 'web[01-40]' # only the last 200 lines
+dredge /var/log/syslog --tail 200 -S 'web[01-40]' # only the last 200 lines
 dredge /etc/nginx --servers hosts.txt               # a whole directory each
 dredge /var/log/app.log --since -1h --append      # only what changed, added on
 dredge --cmd uptime --tag before -d audit         # labelled, to share a directory
@@ -330,7 +330,7 @@ run; `exit_status` is that command's status, and empty for a file.
 |---|---|
 | `-c, --cmd CMD` | a bash command to run on each host; its output is the artifact |
 | `-t, --tag NAME` | label this run's artifacts so several runs can share a directory |
-| `-H, --host TOKEN` | hosts, repeatable; ranges expand (`web[01-40]`) |
+| `-S, --server TOKEN` | servers, repeatable; ranges expand (`web[01-40]`) |
 | `--servers FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
 | `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
 | `--head N` / `--tail N` | only that many lines, cut on the far side |

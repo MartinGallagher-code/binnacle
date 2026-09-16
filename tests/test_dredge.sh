@@ -31,7 +31,7 @@ seed() {
 t_a_file_comes_back_under_the_name_of_its_host() {
     seed
     cd "$TEST_TMPDIR"
-    dr logs/app.log -H web01,web02,web03 -d out --quiet
+    dr logs/app.log -S web01,web02,web03 -d out --quiet
     assert_status $? 0
     for h in web01 web02 web03; do
         assert_file_exists "out/$h~logs~app.log"
@@ -77,7 +77,7 @@ t_a_directory_comes_back_as_named_files() {
     # badly: the next command is `grep -l oom *`, not a walk.
     seed
     cd "$TEST_TMPDIR"
-    dr logs -H web01 -d out --quiet
+    dr logs -S web01 -d out --quiet
     assert_no_file "out/web01"
     assert_file_exists "out/web01~logs~app.log"
     assert_file_exists "out/web01~logs~sub~other.log"
@@ -90,13 +90,13 @@ t_a_run_gets_a_directory_of_its_own() {
     # top of the last one.
     seed
     cd "$TEST_TMPDIR"
-    dr logs/app.log -H web01 --quiet
+    dr logs/app.log -S web01 --quiet
     first="$(find . -maxdepth 1 -type d -name 'dredge-*' | head -1)"
     if [ -z "$first" ]; then
         _fail "no dredge-<stamp> directory was made"
     fi
     assert_file_exists "$first/web01~logs~app.log"
-    dr logs/app.log -H web01 --quiet
+    dr logs/app.log -S web01 --quiet
     n="$(find . -maxdepth 1 -type d -name 'dredge-*' | wc -l | tr -d ' ')"
     assert_eq "$n" "2"
 }
@@ -104,7 +104,7 @@ t_a_run_gets_a_directory_of_its_own() {
 t_the_name_carries_the_host_and_the_path() {
     seed
     cd "$TEST_TMPDIR"
-    dr logs -H web01,web02 -d out --quiet
+    dr logs -S web01,web02 -d out --quiet
     assert_file_exists "out/web01~logs~app.log"
     assert_file_exists "out/web02~logs~sub~other.log"
     assert_eq "$(cat "out/web01~logs~app.log")" "hello from web01"
@@ -119,7 +119,7 @@ t_two_hosts_of_one_name_are_refused() {
     seed
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs/app.log -H web01,web01 -d out 2>&1)"; rc=$?
+    out="$(dr logs/app.log -S web01,web01 -d out 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "named twice"
@@ -138,7 +138,7 @@ with open(sys.argv[1], 'w') as fh:
     for i in range(1, 5001):
         fh.write('line %d\n' % i)" "$FAKE_ROOT/web01/logs/big.log"
     cd "$TEST_TMPDIR"
-    dr logs/big.log -H web01 -d out --tail 3 --quiet
+    dr logs/big.log -S web01 -d out --tail 3 --quiet
     assert_eq "$(cat "out/web01~logs~big.log")" \
               "$(printf 'line 4998\nline 4999\nline 5000')"
 }
@@ -149,7 +149,7 @@ t_head_brings_back_only_the_start() {
     mkdir -p "$FAKE_ROOT/web01/logs"
     printf 'one\ntwo\nthree\nfour\n' > "$FAKE_ROOT/web01/logs/a.log"
     cd "$TEST_TMPDIR"
-    dr logs/a.log -H web01 -d out --head 2 --quiet
+    dr logs/a.log -S web01 -d out --head 2 --quiet
     assert_eq "$(cat "out/web01~logs~a.log")" "$(printf 'one\ntwo')"
 }
 
@@ -157,7 +157,7 @@ t_head_and_tail_are_opposite_ends() {
     seed
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs/app.log -H web01 --head 2 --tail 2 2>&1)"; rc=$?
+    out="$(dr logs/app.log -S web01 --head 2 --tail 2 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "pick one"
@@ -174,7 +174,7 @@ import sys
 open(sys.argv[1], 'wb').write(b'===dredge FILE\n\x00\x01\x02binary\xff\n')" \
         "$FAKE_ROOT/web01/logs/odd.log"
     cd "$TEST_TMPDIR"
-    dr logs/odd.log -H web01 -d out --tail 5 --quiet
+    dr logs/odd.log -S web01 -d out --tail 5 --quiet
     assert_file_exists "out/web01~logs~odd.log"
     got="$("$PY" -c "
 import sys; sys.stdout.write(repr(open(sys.argv[1],'rb').read()))" \
@@ -193,7 +193,7 @@ t_since_selects_by_modification_time() {
     printf 'new\n' > "$FAKE_ROOT/web01/logs/new.log"
     touch -d "2001-01-01 00:00:00" "$FAKE_ROOT/web01/logs/old.log"
     cd "$TEST_TMPDIR"
-    dr logs -H web01 -d out --since -1h --quiet
+    dr logs -S web01 -d out --since -1h --quiet
     assert_file_exists "out/web01~logs~new.log"
     assert_no_file "out/web01~logs~old.log"
 }
@@ -204,10 +204,10 @@ t_the_relative_form_of_since_is_accepted_unglued() {
     # exactly that spelling in its own error message.
     seed
     cd "$TEST_TMPDIR"
-    out="$(dr logs/app.log -H web01 --since -1h --dry-run)"
+    out="$(dr logs/app.log -S web01 --since -1h --dry-run)"
     assert_contains "$out" "newermt"
     # ...and the joined spelling still works.
-    out="$(dr logs/app.log -H web01 --since=-1h --dry-run)"
+    out="$(dr logs/app.log -S web01 --since=-1h --dry-run)"
     assert_contains "$out" "newermt"
 }
 
@@ -219,7 +219,7 @@ t_a_host_with_nothing_new_is_named_not_silent() {
     touch -d "2001-01-01 00:00:00" "$FAKE_ROOT/web01/logs/old.log"
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs -H web01 -d out --since -1h 2>&1)"; rc=$?
+    out="$(dr logs -S web01 -d out --since -1h 2>&1)"; rc=$?
     set -e
     assert_status $rc 1                 # nothing came back: worth seeing
     assert_contains "$out" "EMPTY"
@@ -230,8 +230,8 @@ t_a_host_with_nothing_new_is_named_not_silent() {
 t_append_adds_to_what_is_already_here() {
     seed
     cd "$TEST_TMPDIR"
-    dr logs/app.log -H web01 -d out --quiet
-    dr logs/app.log -H web01 -d out --append --quiet
+    dr logs/app.log -S web01 -d out --quiet
+    dr logs/app.log -S web01 -d out --append --quiet
     assert_eq "$(cat "out/web01~logs~app.log")" \
               "$(printf 'hello from web01\nhello from web01')"
 }
@@ -239,9 +239,9 @@ t_append_adds_to_what_is_already_here() {
 t_prepend_puts_it_at_the_other_end() {
     seed
     cd "$TEST_TMPDIR"
-    dr logs/app.log -H web01 -d out --quiet
+    dr logs/app.log -S web01 -d out --quiet
     printf 'second run\n' > "$FAKE_ROOT/web01/logs/app.log"
-    dr logs/app.log -H web01 -d out --prepend --quiet
+    dr logs/app.log -S web01 -d out --prepend --quiet
     assert_eq "$(cat "out/web01~logs~app.log")" \
               "$(printf 'second run\nhello from web01')"
 }
@@ -249,8 +249,8 @@ t_prepend_puts_it_at_the_other_end() {
 t_a_mark_shows_where_old_meets_new() {
     seed
     cd "$TEST_TMPDIR"
-    dr logs/app.log -H web01 -d out --quiet
-    dr logs/app.log -H web01 -d out --append --mark --quiet
+    dr logs/app.log -S web01 -d out --quiet
+    dr logs/app.log -S web01 -d out --append --mark --quiet
     assert_contains "$(cat "out/web01~logs~app.log")" "web01"
     assert_contains "$(cat "out/web01~logs~app.log")" "====="
 }
@@ -259,7 +259,7 @@ t_a_mark_without_a_seam_is_refused() {
     seed
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs/app.log -H web01 --mark 2>&1)"; rc=$?
+    out="$(dr logs/app.log -S web01 --mark 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "--append"
@@ -268,8 +268,8 @@ t_a_mark_without_a_seam_is_refused() {
 t_replacing_is_the_default() {
     seed
     cd "$TEST_TMPDIR"
-    dr logs/app.log -H web01 -d out --quiet
-    dr logs/app.log -H web01 -d out --quiet
+    dr logs/app.log -S web01 -d out --quiet
+    dr logs/app.log -S web01 -d out --quiet
     assert_eq "$(cat "out/web01~logs~app.log")" "hello from web01"
 }
 
@@ -280,7 +280,7 @@ t_an_unreachable_host_is_named_and_the_rest_still_land() {
     fake_host_unreachable web09
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs/app.log -H web01,web09 -d out 2>&1)"; rc=$?
+    out="$(dr logs/app.log -S web01,web09 -d out 2>&1)"; rc=$?
     set -e
     assert_status $rc 1
     assert_contains "$out" "web09"
@@ -291,7 +291,7 @@ t_a_missing_path_says_so() {
     seed
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs/nope.log -H web01 -d out 2>&1)"; rc=$?
+    out="$(dr logs/nope.log -S web01 -d out 2>&1)"; rc=$?
     set -e
     assert_status $rc 1
     assert_contains "$out" "MISSING"
@@ -307,7 +307,7 @@ import sys; open(sys.argv[1],'wb').write(b'x' * 20000)" \
     printf 'small\n' > "$FAKE_ROOT/web01/logs/small.log"
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs -H web01 -d out --max-bytes 1000 2>&1)"
+    out="$(dr logs -S web01 -d out --max-bytes 1000 2>&1)"
     set -e
     assert_contains "$out" "OVERSIZE"
     assert_contains "$out" "big.log"
@@ -339,7 +339,7 @@ EOF
 t_csv_carries_a_row_per_file() {
     seed
     cd "$TEST_TMPDIR"
-    dr logs -H web01 -d out --csv c.csv --quiet
+    dr logs -S web01 -d out --csv c.csv --quiet
     head="$(head -1 c.csv)"
     assert_eq "$head" "host,source,local_path,bytes,outcome,exit_status"
     assert_contains "$(cat c.csv)" "web01,logs,out/web01~logs~app.log"
@@ -349,7 +349,7 @@ t_a_dry_run_contacts_nothing() {
     seed
     cd "$TEST_TMPDIR"
     : > "$FAKE_SSH_LOG"
-    out="$(dr logs/app.log -H web01,web02 --dry-run)"
+    out="$(dr logs/app.log -S web01,web02 --dry-run)"
     assert_contains "$out" "2 host(s)"
     assert_contains "$out" "tar"
     assert_eq "$(wc -l < "$FAKE_SSH_LOG" | tr -d ' ')" "0"
@@ -379,7 +379,7 @@ t_max_files_stops_without_calling_it_a_failure() {
         head -c 100000 /dev/zero | tr '\0' "$i" > "$FAKE_ROOT/web01/many/f$i.log"
     done
     set +e
-    out="$(dr many -H web01 -d out --max-files 3 2>&1)"; rc=$?
+    out="$(dr many -S web01 -d out --max-files 3 2>&1)"; rc=$?
     set -e
     assert_status $rc 1
     assert_contains "$out" "3 files from 1 of 1 host"
@@ -398,7 +398,7 @@ t_max_files_is_not_a_failure_on_a_slice_either() {
         printf 'file %s\n' "$i" > "$FAKE_ROOT/web01/many/f$i.log"
     done
     set +e
-    out="$(dr many -H web01 -d out --max-files 3 --tail 1 2>&1)"
+    out="$(dr many -S web01 -d out --max-files 3 --tail 1 2>&1)"
     set -e
     assert_contains "$out" "TRUNCATED"
     assert_not_contains "$out" "FAILED"
@@ -413,7 +413,7 @@ t_a_symlinked_path_is_the_file_it_points_at() {
     seed
     cd "$TEST_TMPDIR"
     ln -s logs/app.log "$FAKE_ROOT/web01/current.log"
-    out="$(dr current.log -H web01 -d out 2>&1)"
+    out="$(dr current.log -S web01 -d out 2>&1)"
     assert_status $? 0
     assert_not_contains "$out" "EMPTY"
     assert_file_exists "out/web01~current.log"
@@ -421,13 +421,13 @@ t_a_symlinked_path_is_the_file_it_points_at() {
 }
 
 t_a_link_inside_a_tree_is_still_not_collected() {
-    # -H follows only what was named on the command line. A link inside
+    # -S follows only what was named on the command line. A link inside
     # a collected tree is not evidence, and recreating one here is how a
     # collection directory grows a link out of itself.
     seed
     cd "$TEST_TMPDIR"
     ln -s ../app.log "$FAKE_ROOT/web01/logs/sub/link.log"
-    dr logs -H web01 -d out --quiet
+    dr logs -S web01 -d out --quiet
     assert_file_exists "out/web01~logs~app.log"
     assert_no_file "out/web01~logs~sub~link.log"
 }
@@ -442,7 +442,7 @@ t_a_local_write_failure_is_one_hosts_failure() {
     # A directory where web01's file has to land, and nothing in web02's way.
     mkdir -p "out/web01~logs~app.log"
     set +e
-    out="$(dr logs/app.log -H web01,web02 -d out 2>&1)"; rc=$?
+    out="$(dr logs/app.log -S web01,web02 -d out 2>&1)"; rc=$?
     set -e
     assert_status $rc 1
     assert_contains "$out" "FAILED"
@@ -461,7 +461,7 @@ t_two_paths_folding_onto_one_name_are_not_silently_merged() {
     printf 'first\n' > "$FAKE_ROOT/web01/t/a~b/c"
     printf 'second\n' > "$FAKE_ROOT/web01/t/a/b/c"
     set +e
-    out="$(dr t -H web01 -d out 2>&1)"; rc=$?
+    out="$(dr t -S web01 -d out 2>&1)"; rc=$?
     set -e
     assert_status $rc 1
     assert_contains "$out" "COLLISION"
@@ -490,7 +490,7 @@ t_a_transfer_that_stalls_mid_stream_is_bounded() {
     stall_ssh "half a line and then nothing"
     start="$(date +%s)"
     set +e
-    out="$(timeout 40 "$PY" "$DR" logs -H web01 -d out --tail 1 \
+    out="$(timeout 40 "$PY" "$DR" logs -S web01 -d out --tail 1 \
         --ssh "$FAKE_BIN/ssh-stall" --timeout 3 2>&1)"
     rc=$?
     set -e
@@ -522,7 +522,7 @@ LINGER
     chmod +x "$FAKE_BIN/ssh-linger"
     start="$(date +%s)"
     set +e
-    out="$(timeout 40 "$PY" "$DR" logs -H web01 -d out \
+    out="$(timeout 40 "$PY" "$DR" logs -S web01 -d out \
         --ssh "$FAKE_BIN/ssh-linger" --timeout 3 2>&1)"
     rc=$?
     set -e
@@ -538,12 +538,12 @@ t_ceilings_that_cannot_mean_anything_are_refused() {
     seed
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr logs -H web01 --max-bytes -1 2>&1)"; rc=$?
+    out="$(dr logs -S web01 --max-bytes -1 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "--max-bytes"
     set +e
-    out="$(dr logs -H web01 --timeout 0 2>&1)"; rc=$?
+    out="$(dr logs -S web01 --timeout 0 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "--timeout"
@@ -556,7 +556,7 @@ t_a_command_comes_back_as_that_hosts_artifact() {
     seed
     cd "$TEST_TMPDIR"
     for h in web01 web02; do printf 'i am %s\n' "$h" > "$FAKE_ROOT/$h/who"; done
-    dr --cmd 'cat who' -H web01,web02 -d out --quiet
+    dr --cmd 'cat who' -S web01,web02 -d out --quiet
     assert_status $? 0
     # Named for the command, because nobody passed --tag.
     assert_file_exists "out/cat~web01"
@@ -571,28 +571,28 @@ t_a_command_arrives_exactly_as_typed() {
     # they catch is the naive version that interpolates the command in.
     seed
     cd "$TEST_TMPDIR"
-    dr --cmd "echo 'it'\''s here'" -H web01 -d q1 --quiet
+    dr --cmd "echo 'it'\''s here'" -S web01 -d q1 --quiet
     assert_eq "$(cat "q1/echo~web01")" "it's here"
 
-    dr --cmd 'echo "a \"quoted\" word"' -H web01 -d q2 --quiet
+    dr --cmd 'echo "a \"quoted\" word"' -S web01 -d q2 --quiet
     assert_eq "$(cat "q2/echo~web01")" 'a "quoted" word'
 
     # A literal backslash in the output, not printf's own escape: the
     # point is that the backslash reaches the far side, and `printf
     # "a\b\n"` would be printf eating it there rather than us losing it
     # here.
-    dr --cmd 'printf "%s\n" "a\b"' -H web01 -d q3 --quiet
+    dr --cmd 'printf "%s\n" "a\b"' -S web01 -d q3 --quiet
     assert_eq "$(cat "q3/printf~web01")" 'a\b'
 
     # A command substitution is the far side's to run, not ours -- which
     # is exactly why it must not expand here.
     # shellcheck disable=SC2016
-    dr --cmd 'echo "$(echo nested)"' -H web01 -d q4 --quiet
+    dr --cmd 'echo "$(echo nested)"' -S web01 -d q4 --quiet
     assert_eq "$(cat "q4/echo~web01")" "nested"
 
     # And a command spanning lines is one command.
     dr --cmd 'echo one
-echo two' -H web01 -d q5 --quiet
+echo two' -S web01 -d q5 --quiet
     assert_eq "$(printf '%s' "$(cat "q5/echo~web01")" | tr '\n' '|')" "one|two"
 }
 
@@ -602,7 +602,7 @@ t_a_command_that_says_nothing_in_words_still_says_it() {
     # only true for text.
     seed
     cd "$TEST_TMPDIR"
-    dr --cmd 'printf "\x00\x01\xff\xfe"' -H web01 -d b --quiet
+    dr --cmd 'printf "\x00\x01\xff\xfe"' -S web01 -d b --quiet
     printf '\x00\x01\xff\xfe' > want.bin
     cmp -s want.bin "b/printf~web01"
     assert_status $? 0
@@ -614,7 +614,7 @@ t_stderr_comes_back_with_stdout_in_order() {
     # answer, not two.
     seed
     cd "$TEST_TMPDIR"
-    dr --cmd 'echo out; echo err >&2; echo more' -H web01 -d e --quiet
+    dr --cmd 'echo out; echo err >&2; echo more' -S web01 -d e --quiet
     assert_eq "$(tr '\n' '|' < "e/echo~web01")" "out|err|more|"
 }
 
@@ -625,7 +625,7 @@ t_a_command_that_failed_is_a_finding_not_a_lost_host() {
     seed
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr --cmd 'echo before; exit 7' -H web01 -d f --csv f.csv 2>&1)"
+    out="$(dr --cmd 'echo before; exit 7' -S web01 -d f --csv f.csv 2>&1)"
     rc=$?
     set -e
     assert_status $rc 1
@@ -641,7 +641,7 @@ t_a_command_that_failed_is_a_finding_not_a_lost_host() {
 t_a_command_that_worked_is_quiet_about_it() {
     seed
     cd "$TEST_TMPDIR"
-    out="$(dr --cmd 'echo fine' -H web01 -d g 2>&1)"
+    out="$(dr --cmd 'echo fine' -S web01 -d g 2>&1)"
     assert_status $? 0
     assert_not_contains "$out" "NONZERO"
 }
@@ -649,8 +649,8 @@ t_a_command_that_worked_is_quiet_about_it() {
 t_the_tag_leads_the_name_so_runs_can_share_a_directory() {
     seed
     cd "$TEST_TMPDIR"
-    dr --cmd 'echo alive' -H web01 -d shared --tag probe --quiet
-    dr logs/app.log -H web01 -d shared --tag before-restart --quiet
+    dr --cmd 'echo alive' -S web01 -d shared --tag probe --quiet
+    dr logs/app.log -S web01 -d shared --tag before-restart --quiet
     # Two runs, one directory, told apart at a glance -- and sorted by run.
     assert_file_exists "shared/probe~web01"
     assert_file_exists "shared/before-restart~web01~logs~app.log"
@@ -660,7 +660,7 @@ t_a_tag_cannot_smuggle_a_path_into_the_name() {
     # The tag is the one part of the name the caller writes freely.
     seed
     cd "$TEST_TMPDIR"
-    dr --cmd 'echo hi' -H web01 -d odd --tag 'a/b c:d' --quiet
+    dr --cmd 'echo hi' -S web01 -d odd --tag 'a/b c:d' --quiet
     assert_file_exists "odd/a-b-c-d~web01"
     assert_eq "$(find odd -type d | wc -l | tr -d ' ')" "1"
 }
@@ -669,20 +669,20 @@ t_a_command_and_a_path_are_not_both_the_artifact() {
     seed
     cd "$TEST_TMPDIR"
     set +e
-    out="$(dr --cmd 'echo x' logs/app.log -H web01 -d r1 2>&1)"; rc=$?
+    out="$(dr --cmd 'echo x' logs/app.log -S web01 -d r1 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "not both"
 
     set +e
-    out="$(dr -H web01 -d r2 2>&1)"; rc=$?
+    out="$(dr -S web01 -d r2 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "nothing to collect"
 
     # --since picks among files; a command has no files to pick from.
     set +e
-    out="$(dr --cmd 'echo x' --since -1h -H web01 -d r3 2>&1)"; rc=$?
+    out="$(dr --cmd 'echo x' --since -1h -S web01 -d r3 2>&1)"; rc=$?
     set -e
     assert_status $rc 2
     assert_contains "$out" "--since selects among files"
@@ -691,9 +691,9 @@ t_a_command_and_a_path_are_not_both_the_artifact() {
 t_head_and_tail_cut_a_commands_output_too() {
     seed
     cd "$TEST_TMPDIR"
-    dr --cmd 'printf "a\nb\nc\nd\n"' -H web01 -d h1 --tail 2 --quiet
+    dr --cmd 'printf "a\nb\nc\nd\n"' -S web01 -d h1 --tail 2 --quiet
     assert_eq "$(tr '\n' '|' < "h1/printf~web01")" "c|d|"
-    dr --cmd 'printf "a\nb\nc\nd\n"' -H web01 -d h2 --head 1 --quiet
+    dr --cmd 'printf "a\nb\nc\nd\n"' -S web01 -d h2 --head 1 --quiet
     assert_eq "$(tr '\n' '|' < "h2/printf~web01")" "a|"
 }
 

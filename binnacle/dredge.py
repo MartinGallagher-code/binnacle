@@ -5,7 +5,7 @@
 
 Usage: dredge /var/log/syslog --servers hosts.txt    one file from every host
        dredge --cmd 'ss -s' --servers hosts.txt      what a command says, instead
-       dredge /var/log/syslog --tail 200 -H 'web[01-40]'   only the last 200 lines
+       dredge /var/log/syslog --tail 200 -S 'web[01-40]'   only the last 200 lines
        dredge /etc/nginx --servers hosts.txt         a whole directory each
        dredge /var/log/app.log --since -1h           only what changed lately
        dredge --cmd 'uptime' --tag before --servers h  labelled, to keep runs apart
@@ -15,7 +15,7 @@ Options:
                       back as the artifact, in place of a file
   -t, --tag NAME      label this run's artifacts, so several runs can share
                       one directory and still be told apart
-  -H, --host TOKEN    hosts, repeatable; ranges expand (`web[01-40]`)
+  -S, --server TOKEN  servers, repeatable; ranges expand (`web[01-40]`)
       --servers FILE  a server list, one per line -- reachable's output works
   -d, --dir DIR       where collected files land   (default: dredge-<stamp>)
       --head N        only the first N lines of each file
@@ -187,7 +187,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 PROG = os.path.basename(sys.argv[0]) or "dredge.py"
 
 DEFAULT_JOBS = 20
@@ -480,7 +480,7 @@ def collect_hosts(args):
             tokens.extend(from_file)
         else:
             tokens.extend(split_commas(spec))
-    for spec in (args.H or []):
+    for spec in (args.server or []):
         tokens.extend(split_commas(spec))
     if not tokens:
         for default in ("hosts.txt", "servers.txt"):
@@ -490,7 +490,7 @@ def collect_hosts(args):
                 break
     if not tokens:
         die("no hosts given (use --servers FILE, --servers 'node[01-09]' or "
-            "-H a,b,c; hosts.txt and servers.txt are used if present)")
+            "-S a,b,c; hosts.txt and servers.txt are used if present)")
 
     hosts, seen = [], {}
     for tok in tokens:
@@ -1350,7 +1350,8 @@ def build_parser():
     p.add_argument("-t", "--tag", metavar="NAME",
                    help="label this run's artifacts, so several runs can "
                         "share a directory and still be told apart")
-    p.add_argument("-H", "--host", dest="H", action="append", metavar="TOKEN")
+    p.add_argument("-S", "--server", dest="server", action="append",
+                   metavar="TOKEN")
     p.add_argument("--servers", dest="servers",
                    action="append", metavar="FILE")
     p.add_argument("-d", "--dir", default=_env("DIR"))
