@@ -321,14 +321,20 @@ pointed at is the event `--follow` exists to avoid.
 
 A log that was rotated is not a log that was truncated, and neither is a log
 that grew. A file whose **inode changed**, or whose **size went backwards**,
-comes back whole from byte zero and is reported:
+comes back from byte zero and is reported:
 
 ```text
-  ROTATED   1 file was not the file it was and came back whole:
+  ROTATED   1 file was not the file it was and came back as a new one:
             web02        /var/log/app.log
             A new inode, or a size that went backwards: resuming at the old
             offset would have handed you the middle of a different file.
+            The follow carries on from the new one -- this is a seam, not a stop.
 ```
+
+**A rotation is a seam, not a stop.** The new file is followed from there
+exactly as the old one was, and the next pass carries only what was added to
+it. The warning explains the seam in the local copy; it does not mean that
+file was abandoned.
 
 Both halves matter: `logrotate` moving the file aside changes the inode, and
 its `copytruncate` mode keeps the inode and puts the size back to zero.
@@ -349,12 +355,28 @@ directory — the mark goes with it rather than being believed:
 "Nothing new" about a file that is no longer here is the most confidently
 wrong thing this could say, so it does not say it.
 
-`--max-bytes` means **the new part** under `--follow`, not the whole file: a
-log that grows past the ceiling is still a log being followed, and what the
-ceiling catches is a single pass that would carry more than it. Under
-`--follow` that is a finding and exits 1, because the mark stays where it
-was — so the next pass has *more* to carry and is refused for the same
-reason, and the follow of that artifact is stuck until the ceiling moves.
+### When more arrives than one pass can carry
+
+`--max-bytes` means **the new part** under `--follow`, not the whole file, and
+it bounds a pass rather than ending one. When more than the ceiling was added
+since the last pass — a busy log, or a rotation, where the whole new file *is*
+the new part — the newest `--max-bytes` come back and the follow resumes from
+the end of the file:
+
+```text
+  GAP       1 artifact grew by more than --max-bytes (500B) in one pass:
+            web01           2.4KB not carried  logs/app.log
+            The newest 500B came back and the follow is at the end of the file
+            again, so this is one hole rather than a stop.  Raise --max-bytes,
+            or pass more often, to stop it happening again.
+```
+
+What did not fit is a hole in the local copy that will not fill, so it is named
+with its size and the run exits 1. It is deliberately not a refusal: refusing
+would leave the mark where it was, the next pass would have *more* to carry and
+would be refused for the same reason, and that artifact would never be
+collected again — losing the whole of the rest of the log to protect the part
+of it that did not fit.
 
 ## Daemon mode
 

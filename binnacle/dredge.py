@@ -200,21 +200,32 @@ A remote tail
   When the file is not the file it was
     A log that was rotated is not a log that was truncated to nothing,
     and neither is a log that grew.  A file whose inode changed, or whose
-    size went *backwards*, is reported as rotated and comes back whole
-    from byte zero, because resuming at the old offset would hand you the
+    size went *backwards*, is reported as rotated and comes back from
+    byte zero, because resuming at the old offset would hand you the
     middle of the new file.
+
+    A rotation is a seam, never a stop: the new file is followed from
+    there exactly as the old one was, and the next pass carries only what
+    was added to it.  The warning is there to explain the seam in the
+    local copy, not to say that something was abandoned.
 
     What that cannot see is a file replaced in place, keeping its inode
     and ending up longer than the old one -- the same blind spot `tail
     -f` has, and the reason `logrotate`'s `copytruncate` is visible here
     (the size goes backwards) while an in-place rewrite is not.
 
-  `--max-bytes` means the new part under `--follow`, not the whole file:
-  a log that grows past the ceiling is still followed, and a single pass
-  that would carry more than the ceiling is what gets left behind.  That
-  is a finding rather than a note -- the mark stays where it was, so the
-  next pass has more to carry and is refused for the same reason, and
-  the follow of that one artifact is stuck until the ceiling moves.
+  `--max-bytes` means the new part under `--follow`, not the whole file,
+  and it bounds a pass rather than ending one.  When more than the
+  ceiling was added since the last pass -- a busy log, or a rotation,
+  where the whole new file is the new part -- the newest `--max-bytes`
+  come back and the follow resumes from the end of the file.
+
+  What did not fit is a hole in the local copy that will not fill, so it
+  is reported as a GAP naming the bytes and the file, and the run exits
+  1.  It is deliberately not a refusal: refusing would leave the mark
+  where it was, the next pass would have even more to carry, and that
+  artifact would never be collected again -- losing the whole of the
+  rest of the log to protect the part of it that did not fit.
 
 Daemon mode
   `--daemon` does that on a timer: a pass, a wait, another pass, until
@@ -1127,8 +1138,8 @@ elif [ "$TAILN" -gt 0 ]; then mode=tail
 fi
 if [ "$mode" != same ] && [ "$mode" != tail ] && [ "$MAXB" -gt 0 ] \
    && [ $((size - start)) -gt "$MAXB" ]; then
-  echo "dredge-skip: $((size - start)) $f" >&2
-  exit 0
+  echo "dredge-gap: $((size - start - MAXB)) $f" >&2
+  start=$((size - MAXB))
 fi
 printf "%%s FILE\n" "$MARK"
 printf "%%s" "$f" | base64 | tr -d "\n"
@@ -1468,7 +1479,7 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
 class Result(object):
     __slots__ = ("host", "outcome", "detail", "files", "bytes", "skipped",
                  "collisions", "truncated", "exit_status", "duration",
-                 "unchanged", "rotated", "resynced")
+                 "unchanged", "rotated", "resynced", "gapped")
 
     def __init__(self, host):
         self.host = host
@@ -1500,6 +1511,11 @@ class Result(object):
         # believed. Nothing is more confidently wrong than a follow
         # reporting "nothing new" about a file that is no longer here.
         self.resynced = []
+        # (bytes, path) for each artifact that grew by more than the
+        # ceiling in one pass. The newest --max-bytes came back and the
+        # rest did not: a hole in the collected copy, said out loud,
+        # rather than a follow that stops.
+        self.gapped = []
 
 
 def ssh_argv(args, host, command):
@@ -1525,18 +1541,29 @@ def _drain(stream, into):
 
 
 SKIP_RE = re.compile(r"^dredge-skip:\s+(\d+)\s+(.*)$")
+GAP_RE = re.compile(r"^dredge-gap:\s+(\d+)\s+(.*)$")
 
 
 def _parse_stderr(text):
-    """(skipped, other) -- the oversize list, and anything else it said."""
-    skipped, other = [], []
+    """(skipped, gapped, other) -- what was left behind, and anything else.
+
+    Two different things, and they must not be confused: a *skipped* file
+    was not carried at all, and a *gapped* one was carried from further
+    along than it should have been.  The first can be come back for; the
+    second is a hole that will not fill.
+    """
+    skipped, gapped, other = [], [], []
     for line in (text or "").splitlines():
         m = SKIP_RE.match(line.strip())
         if m:
             skipped.append((int(m.group(1)), m.group(2)))
+            continue
+        m = GAP_RE.match(line.strip())
+        if m:
+            gapped.append((int(m.group(1)), m.group(2)))
         elif line.strip():
             other.append(line.strip())
-    return skipped, other
+    return skipped, gapped, other
 
 
 def _run(args, host, command, consume):
@@ -1631,7 +1658,7 @@ def _run(args, host, command, consume):
             except OSError:
                 pass
     err = (errbuf[0] if errbuf else b"").decode("utf-8", "replace")
-    r.skipped, other = _parse_stderr(err)
+    r.skipped, r.gapped, other = _parse_stderr(err)
     r.duration = time.monotonic() - t0
     if r.outcome != OK:
         return r
@@ -1969,9 +1996,12 @@ def _render_findings(out, results, args, compact=False):
             out.append("            the command printed nothing there")
     turned = [(r.host, x) for r in results for x in r.rotated]
     if turned:
+        # Not "came back whole": a rotated file over the ceiling comes
+        # back from part way in, and the GAP block below says so. The two
+        # blocks must not contradict each other.
         out.append("  ROTATED   %d file%s was not the file it was and came "
-                   "back whole:" % (len(turned),
-                                    "" if len(turned) == 1 else "s"))
+                   "back as a new one:" % (len(turned),
+                                           "" if len(turned) == 1 else "s"))
         for host, remote in turned[:5]:
             out.append("            %-12s %s" % (host.name, remote))
         if len(turned) > 5:
@@ -1980,6 +2010,25 @@ def _render_findings(out, results, args, compact=False):
                    "resuming at the old")
         out.append("            offset would have handed you the middle of "
                    "a different file.")
+        out.append("            The follow carries on from the new one -- "
+                   "this is a seam, not a stop.")
+    holes = [(r.host, n, x) for r in results for n, x in r.gapped]
+    if holes:
+        out.append("  GAP       %d artifact%s grew by more than --max-bytes "
+                   "(%s) in one pass:"
+                   % (len(holes), "" if len(holes) == 1 else "s",
+                      fmt_bytes(args.max_bytes)))
+        for host, n, remote in holes[:5]:
+            out.append("            %-12s %8s not carried  %s"
+                       % (host.name, fmt_bytes(n), remote))
+        if len(holes) > 5:
+            out.append("            ... and %d more" % (len(holes) - 5))
+        out.append("            The newest %s came back and the follow is at "
+                   "the end of the file" % fmt_bytes(args.max_bytes))
+        out.append("            again, so this is one hole rather than a "
+                   "stop.  Raise --max-bytes,")
+        out.append("            or pass more often, to stop it happening "
+                   "again.")
     lost = [(r.host, x) for r in results for x in r.resynced]
     if lost:
         out.append("  RESYNC    %d local cop%s gone, so the mark went with "
@@ -2042,15 +2091,10 @@ def _render_findings(out, results, args, compact=False):
                        % (host.name, fmt_bytes(size), path))
         if len(skipped) > 5:
             out.append("            ... and %d more" % (len(skipped) - 5))
-        if args.follow:
-            out.append("            That is what one pass would carry, not "
-                       "the size of the file -- and the")
-            out.append("            next pass would carry more.  Raise "
-                       "--max-bytes: the follow is stuck here.")
-        else:
-            out.append("            --tail N brings back the end of one "
-                       "without the rest of it.")
-    if empty or bad or skipped or clashed or cut or angry or turned or lost:
+        out.append("            --tail N brings back the end of one "
+                   "without the rest of it.")
+    if empty or bad or skipped or clashed or cut or angry or turned \
+            or lost or holes:
         out.append("")
 
     if good and not args.quiet and not compact:
@@ -2138,13 +2182,12 @@ def pass_failed(args, results):
     if any(r.outcome != OK or r.collisions or r.truncated
            or r.exit_status not in (None, 0) for r in results):
         return True
-    if args.follow and any(r.skipped for r in results):
-        # Under --follow a file left behind for being over the ceiling is
-        # not a file you can come back for: the mark stays where it was,
-        # so the next pass has *more* to carry than this one did and will
-        # be refused for the same reason. The follow of that artifact is
-        # stuck until the ceiling moves, which is not something to find
-        # out from a directory listing a week later.
+    if any(r.gapped for r in results):
+        # A hole in a followed copy. The follow itself is fine -- it is at
+        # the end of the file and carrying on -- but bytes that existed
+        # are not here and never will be, and a run that quietly returns
+        # 0 having lost some of the log is the failure this whole tool is
+        # built not to be.
         return True
     return not args.follow and not sum(len(r.files) for r in results)
 

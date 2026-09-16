@@ -174,7 +174,7 @@ it surfaces on a developer machine and all of it surfaces on the fleet.
 ## Testing
 
 ```bash
-bash tests/run_tests.sh              # all twelve suites, 497 checks
+bash tests/run_tests.sh              # all twelve suites, 499 checks
 bash tests/run_tests.sh agree        # one suite
 ```
 

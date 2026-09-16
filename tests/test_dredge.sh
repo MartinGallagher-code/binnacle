@@ -955,11 +955,12 @@ import sys; open(sys.argv[1],'a').write('y' * 2000 + '\n')" \
     assert_contains "$(cat "out/web01~logs~app.log")" "yyy"
 }
 
-t_a_follow_that_is_stuck_says_so() {
-    # One pass over the ceiling leaves the mark where it was, so the next
-    # pass has *more* to carry and is refused for the same reason. That
-    # is a follow that has quietly stopped following, and it has to be a
-    # finding rather than a line to scroll past.
+t_more_than_one_pass_can_carry_is_a_hole_not_a_stop() {
+    # The ceiling bounds a pass; it does not end one. Refusing the pass
+    # would leave the mark where it was, the next pass would have *more*
+    # to carry and would be refused for the same reason, and that file
+    # would never be collected again -- the whole of the rest of the log
+    # lost to protect the part of it that did not fit.
     seed
     cd "$TEST_TMPDIR"
     dr logs/app.log -S web01 -d out --follow --quiet
@@ -969,12 +970,65 @@ import sys; open(sys.argv[1],'a').write('x' * 9000 + '\n')" \
     set +e
     out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"; rc=$?
     set -e
+    # Losing bytes is a finding, and it is said out loud with its size.
     assert_status $rc 1
-    assert_contains "$out" "OVERSIZE"
-    assert_contains "$out" "stuck"
-    # And raising it unsticks the same pass, from the same mark.
-    dr logs/app.log -S web01 -d out --follow --quiet
+    assert_contains "$out" "GAP"
+    assert_contains "$out" "not carried"
+    # The newest 500 bytes came back, so they are in the local copy.
     assert_contains "$(cat "out/web01~logs~app.log")" "xxx"
+    # And the follow is at the end of the file rather than stuck: the
+    # next pass carries what was added after it, and nothing else.
+    printf 'after the hole\n' >> "$FAKE_ROOT/web01/logs/app.log"
+    set +e
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 500)"; rc=$?
+    set -e
+    assert_status $rc 0
+    assert_not_contains "$out" "GAP"
+    assert_contains "$out" "15B"
+}
+
+t_a_rotation_is_a_seam_not_a_stop() {
+    # The complaint this came from: a file that rotates has to go on
+    # being followed. It always came back; what could stop it was the
+    # ceiling, because after a rotation the whole new file is the new
+    # part -- so this drives a rotation *through* the ceiling and then
+    # asks for the pass after it.
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --follow --quiet
+    # Rotated aside, and what replaces it is over the ceiling.
+    mv "$FAKE_ROOT/web01/logs/app.log" "$FAKE_ROOT/web01/logs/app.log.1"
+    "$PY" -c "
+import sys; open(sys.argv[1],'w').write('n' * 4000 + '\n')" \
+        "$FAKE_ROOT/web01/logs/app.log"
+    set +e
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"; rc=$?
+    set -e
+    assert_contains "$out" "ROTATED"
+    assert_contains "$out" "seam, not a stop"
+    # Still being read: the newest bytes of the new file are here.
+    assert_contains "$(cat "out/web01~logs~app.log")" "nnn"
+    # And still being read on the next pass, from the new file.
+    printf 'still following\n' >> "$FAKE_ROOT/web01/logs/app.log"
+    set +e
+    out="$(dr logs/app.log -S web01 -d out --follow --max-bytes 900)"; rc=$?
+    set -e
+    assert_status $rc 0
+    assert_not_contains "$out" "ROTATED"
+    assert_contains "$(cat "out/web01~logs~app.log")" "still following"
+}
+
+t_a_rotation_under_no_ceiling_brings_the_whole_new_file() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr logs/app.log -S web01 -d out --follow --replace --quiet
+    mv "$FAKE_ROOT/web01/logs/app.log" "$FAKE_ROOT/web01/logs/app.log.1"
+    printf 'brand new\nsecond line\n' > "$FAKE_ROOT/web01/logs/app.log"
+    out="$(dr logs/app.log -S web01 -d out --follow --replace)"
+    assert_contains "$out" "ROTATED"
+    assert_eq "$(cat "out/web01~logs~app.log")" \
+              "$(printf 'brand new\nsecond line')"
+    assert_not_contains "$out" "GAP"
 }
 
 # --- daemon mode -----------------------------------------------------------
@@ -1143,7 +1197,9 @@ run_test "unreadable marks are refused"        t_marks_that_cannot_be_read_are_r
 run_test "a nonsense mark is dropped"          t_a_mark_that_makes_no_sense_is_dropped_not_obeyed
 run_test "a dry run shows the resume table"    t_a_dry_run_of_a_follow_shows_the_resume_table
 run_test "a follow's ceiling is the new part"  t_the_ceiling_of_a_follow_is_the_new_part
-run_test "a stuck follow says so"              t_a_follow_that_is_stuck_says_so
+run_test "too much for one pass is a hole"     t_more_than_one_pass_can_carry_is_a_hole_not_a_stop
+run_test "a rotation is a seam not a stop"     t_a_rotation_is_a_seam_not_a_stop
+run_test "a rotation brings the new file"      t_a_rotation_under_no_ceiling_brings_the_whole_new_file
 run_test "a daemon stops after its passes"     t_a_daemon_stops_after_the_passes_it_was_given
 run_test "a daemon picks up what appeared"     t_a_daemon_picks_up_what_appeared_between_passes
 run_test "a daemon asked to stop stops"        t_a_daemon_that_was_asked_to_stop_stops_cleanly

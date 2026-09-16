@@ -87,6 +87,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one would otherwise read a quiet fleet as a broken run. Everywhere
   else, an empty collection still exits 1.
 
+- **Under `--follow`, `--max-bytes` bounds a pass rather than ending
+  one.** When more than the ceiling was added since the last pass, the
+  newest `--max-bytes` come back and the follow resumes from the end of
+  the file, reporting what it could not carry as a `GAP` with its size
+  and exiting 1. It previously refused the file outright, which is the
+  one way a followed artifact could stop being followed: the mark stayed
+  where it was, so the next pass had *more* to carry and was refused for
+  the same reason, for ever.
+
+  **A rotation is how you fall into that**, which is what this came from:
+  after a rotation the whole new file is the new part, so a log that had
+  been following incrementally under the ceiling blows through it in one
+  pass. Losing the rest of the log to protect the part of it that did not
+  fit is the wrong trade in every case, so the hole is reported and the
+  follow goes on.
+
+  Rotation itself was never a stop and still is not -- the new file is
+  followed exactly as the old one was -- but the report now says so
+  (`this is a seam, not a stop`), because the warning read as an
+  abandonment to more than one person.
+
 - **`dredge` is in the generated CLI reference.** `docs/conf.py` carries
   an explicit tool list and `dredge` was never added to it, so the one
   page that cannot drift from the parsers did not mention the tool at
