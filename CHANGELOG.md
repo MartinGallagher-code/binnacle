@@ -156,6 +156,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`dredge --cmd` wrote a zero-byte file for a command that said
+  nothing.** `dredge --cmd ls --servers hosts.txt` over a fleet whose
+  login directories hold nothing visible landed one empty artifact per
+  host and reported them as a successful collection, which looks exactly
+  like a broken transport -- and is what sent somebody looking for one.
+  The frame a command comes back in is emitted whether or not it printed
+  anything, because it also carries the exit status, and landing it
+  unconditionally turned silence into an artifact.
+
+  Silence is not an artifact now: no file is written for a host whose
+  command printed nothing on stdout or stderr, and the host is reported
+  as empty -- `the command printed nothing there, on stdout or stderr, so
+  there was no artifact to keep`. That message already existed and could
+  never fire, because a `--cmd` run always produced a file. A run where
+  no host said anything exits 1, which is what "nothing was collected"
+  has always meant. The host keeps its `--csv` row and its exit status:
+  a command that failed silently is still a finding.
+
+  A zero-byte *file* is unaffected. It exists on the far side and a
+  faithful copy of it is empty; only a command has nothing to land when
+  it says nothing. `--follow` is unaffected too, and deliberately: there
+  an empty pass is what `UNCHANGED` already means, the mark has to be
+  kept either way for the next pass to resume from, and a stream that is
+  empty the first time it is looked at is a stream, not a failed
+  collection.
+
+- **What the far side said on stderr was thrown away whenever the run
+  succeeded.** It was only ever read to explain a non-zero ssh exit, so a
+  host that came back with nothing came back with no reason either --
+  `base64: command not found` from a remote profile, or a login shell
+  dying quietly, left an empty collection and no clue. It is now shown
+  for the hosts that sent nothing, which is the only run with no other
+  explanation in it. Hosts that did send something stay quiet, so a
+  fleet-wide `stdin: is not a tty` is not printed forty times.
+
+
 - **The numeric-option audit was not auditing `dredge`.** Its entry in
   `tests/check_numeric_args.py` invoked the tool with `-H h1`, a flag
   `dredge` has never had under that spelling, so argparse rejected every

@@ -93,6 +93,41 @@ A command that failed still has an answer worth keeping — its error text *is*
 the artifact — so the collection is not a failed host, it is a finding. The
 status is also a column in `--csv`, and a non-zero one makes the run exit 1.
 
+### Silence is not an artifact
+
+A command that printed nothing at all — on stdout or stderr — has said nothing
+to collect, so no file is written for that host and it is reported as empty
+instead:
+
+```text
+  EMPTY     2 hosts had nothing to send: web04 web18
+            the command printed nothing there, on stdout or stderr, so there was no artifact to keep
+```
+
+`dredge --cmd ls --servers hosts.txt` across a fleet whose login directories
+hold nothing visible collects nothing, and one line saying so is worth more
+than forty zero-byte files that look like a broken transport. The host still
+has a row in `--csv`, carrying its exit status, and a run where *no* host said
+anything exits 1 — nothing was collected.
+
+A zero-byte *file* is the other way round: it exists on the far side, and a
+faithful copy of it is empty. Only a command has nothing to land when it says
+nothing.
+
+[`--follow`](#a-remote-tail) is left to its own accounting. There an empty
+pass is what `UNCHANGED` already means, the mark has to be kept either way for
+the next pass to resume from, and a stream that is empty the first time it is
+looked at is a stream rather than a failed collection.
+
+Where a host came back with nothing and its ssh wrote something on stderr,
+that line is shown too — for an empty host it is usually the whole answer:
+
+```text
+  EMPTY     1 host had nothing to send: web04
+            the command printed nothing there, on stdout or stderr, so there was no artifact to keep
+            web04        stderr: bash: base64: command not found
+```
+
 `--head` and `--tail` cut a command's output the same way they cut a file's,
 on the far side. `--since`, `--max-bytes` and `--max-files` select among files
 and have nothing to select from here; `--since` is refused rather than
@@ -246,6 +281,9 @@ A host with nothing to send is reported rather than left blank:
   EMPTY     3 hosts had nothing to send: web04 web18 web22
             nothing under /var/log changed since -1h there
 ```
+
+A `--cmd` run that printed nothing counts as the same thing — see [Silence is
+not an artifact](#silence-is-not-an-artifact).
 
 `--max-files` (500 by default) is the other ceiling, per host. Hitting it is
 reported rather than silently truncating the collection:

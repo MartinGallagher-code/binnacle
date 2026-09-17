@@ -734,6 +734,88 @@ t_a_command_and_a_path_are_not_both_the_artifact() {
     assert_contains "$out" "--since selects among files"
 }
 
+t_a_command_that_printed_nothing_is_an_empty_host() {
+    # The reported bug: `dredge --cmd ls --servers hosts` over a fleet
+    # whose login directories hold nothing visible landed one zero-byte
+    # file per host and called it a collection. Silence is not an
+    # artifact, and forty empty files look exactly like a broken
+    # transport -- which is what sent somebody looking for one.
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr --cmd 'true' -S web01,web02 -d n1 2>&1)"; rc=$?
+    set -e
+    # Nothing came back, so nothing was collected.
+    assert_status $rc 1
+    assert_no_file "n1/true~web01"
+    assert_no_file "n1/true~web02"
+    assert_contains "$out" "EMPTY"
+    assert_contains "$out" "the command printed nothing there"
+    assert_contains "$out" "web01"
+    assert_contains "$out" "web02"
+}
+
+t_a_silent_command_is_still_a_row_with_its_status() {
+    # The frame still carries the exit status, and losing the host from
+    # the report would lose that with it: a command that said nothing and
+    # failed is a finding, not an absence.
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr --cmd 'exit 3' -S web01 -d n2 --csv n2.csv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_no_file "n2/exit~web01"
+    assert_contains "$out" "NONZERO"
+    assert_contains "$out" "exit 3"
+    # One row for the host, no local file, status kept.
+    assert_contains "$(cat n2.csv)" "web01,exit 3,,0,ok,3"
+}
+
+t_one_silent_host_does_not_empty_the_run() {
+    # A fleet where half the hosts have something to say is a successful
+    # collection of that half, not a failure.
+    seed
+    printf 'i am web01\n' > "$FAKE_ROOT/web01/who"
+    cd "$TEST_TMPDIR"
+    out="$(dr --cmd 'cat who 2>/dev/null || true' -S web01,web02 -d n3 2>&1)"
+    assert_status $? 0
+    assert_file_exists "n3/cat~web01"
+    assert_no_file "n3/cat~web02"
+    assert_contains "$out" "EMPTY"
+    assert_contains "$out" "web02"
+}
+
+t_a_zero_byte_file_is_still_collected() {
+    # The other side of it: a file that is empty exists on the far side,
+    # and a faithful copy of it is empty. Only a *command* has nothing to
+    # land when it says nothing.
+    seed
+    cd "$TEST_TMPDIR"
+    : > "$FAKE_ROOT/web01/logs/empty.log"
+    dr logs/empty.log -S web01 -d z --quiet
+    assert_status $? 0
+    assert_file_exists "z/web01~logs~empty.log"
+    # And through the other transport, where the frame is the same one
+    # --cmd uses.
+    dr logs/empty.log -S web01 -d z2 --tail 5 --quiet
+    assert_file_exists "z2/web01~logs~empty.log"
+}
+
+t_what_the_far_side_said_survives_an_empty_host() {
+    # A host that sent nothing is the one run with no explanation in it,
+    # so the stderr that used to be thrown away on a successful exit is
+    # the only clue there will ever be.
+    seed
+    cd "$TEST_TMPDIR"
+    out="$(dr --cmd 'echo mumbling >&2 1>&2; true' -S web01 -d n4 2>&1)"
+    # stderr is merged into the artifact, so that one is not empty.
+    assert_file_exists "n4/echo~web01"
+    # But a wrapper-level complaint, outside the merged pair, is not.
+    out="$(dr --cmd 'true' -S web01 -d n5 2>&1)" || true
+    assert_contains "$out" "EMPTY"
+}
+
 t_head_and_tail_cut_a_commands_output_too() {
     seed
     cd "$TEST_TMPDIR"
@@ -884,6 +966,26 @@ t_a_commands_answer_follows_too() {
     assert_eq "$(cat "out/cat~web01")" "$(printf 'one\ntwo')"
     # Four bytes of answer, not eight: the part that was added.
     assert_contains "$out" "4B"
+}
+
+t_a_silent_command_under_follow_is_still_a_stream() {
+    # The silence rule is for a one-shot collection, where a zero-byte
+    # artifact is noise with nothing behind it. Under --follow it would
+    # be a different claim: an empty first pass is what UNCHANGED already
+    # means on every pass after it, and the mark has to be kept either
+    # way or the next pass has nothing to resume from. A stream that is
+    # empty the first time it is looked at is a stream, not a failed
+    # collection.
+    seed
+    cd "$TEST_TMPDIR"
+    : > "$FAKE_ROOT/web01/logs/growing"
+    dr --cmd 'cat logs/growing' -S web01 -d out --follow --quiet
+    assert_status $? 0
+    assert_file_exists "out/cat~web01"
+    # And the follow resumes from it rather than starting over.
+    printf 'late\n' >> "$FAKE_ROOT/web01/logs/growing"
+    dr --cmd 'cat logs/growing' -S web01 -d out --follow --quiet
+    assert_eq "$(cat "out/cat~web01")" "late"
 }
 
 t_an_answer_that_changed_from_the_start_comes_back_whole() {
@@ -1244,6 +1346,11 @@ run_test "a suffix goes on every file"         t_a_suffix_goes_on_the_end_of_eve
 run_test "a bare suffix gains a dot"           t_a_bare_suffix_gains_a_dot
 run_test "a suffix cannot smuggle a path"      t_a_suffix_cannot_smuggle_a_path
 run_test "a command and a path are not both"   t_a_command_and_a_path_are_not_both_the_artifact
+run_test "a silent command is an empty host"   t_a_command_that_printed_nothing_is_an_empty_host
+run_test "a silent command keeps its status"  t_a_silent_command_is_still_a_row_with_its_status
+run_test "one silent host is not the run"     t_one_silent_host_does_not_empty_the_run
+run_test "a zero-byte file is still a file"   t_a_zero_byte_file_is_still_collected
+run_test "an empty host's stderr survives"    t_what_the_far_side_said_survives_an_empty_host
 run_test "head and tail cut a command too"     t_head_and_tail_cut_a_commands_output_too
 run_test "the server list comes from a file"   t_the_server_list_comes_from_a_file
 run_test "the old --hosts is gone"             t_the_old_hosts_spelling_is_gone
@@ -1257,6 +1364,7 @@ run_test "a directory follows growth"          t_a_directory_follows_what_grew_a
 run_test "tail says where a first sight starts" t_tail_says_where_a_first_sight_starts
 run_test "head and follow are opposites"       t_head_and_follow_are_opposite_ideas
 run_test "a command's answer follows too"      t_a_commands_answer_follows_too
+run_test "a silent follow is a stream"         t_a_silent_command_under_follow_is_still_a_stream
 run_test "a changed answer comes back whole"   t_an_answer_that_changed_from_the_start_comes_back_whole
 run_test "a missing local copy drops the mark" t_the_local_copy_going_missing_drops_the_mark
 run_test "where new bytes land is yours"       t_where_the_new_bytes_land_is_still_yours_to_say

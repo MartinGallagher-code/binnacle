@@ -108,6 +108,13 @@ A file or a command, the same way round
   that failed still has an answer worth keeping -- its error text is the
   artifact -- so the collection is not a failure, it is a finding.
 
+  A command that printed nothing at all is the other way round: there is
+  no artifact in silence, so no file is written for that host and it is
+  reported as empty instead.  `--cmd ls` across a fleet whose login
+  directories hold nothing visible collects nothing, and one line saying
+  so is worth more than forty zero-byte files that look like a broken
+  run.  The host still has a row in `--csv`, carrying its exit status.
+
 Names that stay apart
   One directory per run, and everything in it is told apart by its *name*
   rather than by where it sits:
@@ -1545,7 +1552,8 @@ def write_file(args, host, path, data, taken, collisions=None, remote=""):
 class Result(object):
     __slots__ = ("host", "outcome", "detail", "files", "bytes", "skipped",
                  "collisions", "truncated", "exit_status", "duration",
-                 "unchanged", "rotated", "resynced", "gapped")
+                 "unchanged", "rotated", "resynced", "gapped",
+                 "remote_says")
 
     def __init__(self, host):
         self.host = host
@@ -1564,6 +1572,11 @@ class Result(object):
         # separately rather than folded into the outcome.
         self.exit_status = None
         self.duration = 0.0
+        # What the far side wrote on stderr and this tool has no other
+        # name for.  Kept even when the run succeeded: a host that sent
+        # nothing back is the case where the only explanation there will
+        # ever be is the line the remote shell printed on its way past.
+        self.remote_says = []
         # What --follow found and did not have to carry. Unchanged is a
         # count rather than a list because it is the ordinary answer and
         # naming four hundred untouched files is not a report.
@@ -1725,6 +1738,7 @@ def _run(args, host, command, consume):
                 pass
     err = (errbuf[0] if errbuf else b"").decode("utf-8", "replace")
     r.skipped, r.gapped, other = _parse_stderr(err)
+    r.remote_says = other
     r.duration = time.monotonic() - t0
     if r.outcome != OK:
         return r
@@ -1909,7 +1923,24 @@ def _frame_consumer(args, host):
                     except (binascii.Error, ValueError):
                         r.detail = "undecodable payload for %s" % path
                         data = None
-                    if data is not None:
+                    # A command that printed nothing said nothing, and
+                    # there is no artifact in that.  The frame arrives
+                    # either way -- it carries the exit status, which is
+                    # worth having -- so landing it would write a
+                    # zero-byte file per host and call the run a
+                    # collection, which is how `--cmd ls` over a fleet of
+                    # empty login directories comes back looking broken
+                    # rather than empty.  A *file* that is zero bytes is a
+                    # different thing: it exists on the far side, and a
+                    # faithful copy of it is empty.
+                    #
+                    # --follow is left to its own accounting.  There an
+                    # empty pass is what SAME already means, the mark has
+                    # to be kept either way, and a stream that is empty
+                    # the first time it is seen is a stream, not a
+                    # failed collection.
+                    silent = args.cmd and not args.follow and not data
+                    if data is not None and not silent:
                         if args.follow and meta is None:
                             r.detail = ("the far side sent no follow frame "
                                         "for %s" % path)
@@ -2059,7 +2090,23 @@ def _render_findings(out, results, args, compact=False):
             out.append("            nothing under %s changed since %s there"
                        % (args.path, args.since))
         elif args.cmd:
-            out.append("            the command printed nothing there")
+            out.append("            the command printed nothing there, on "
+                       "stdout or stderr, so there was no artifact to keep")
+        # Whatever came back on that host's stderr, but only for the
+        # hosts that sent nothing: that is the run with no other
+        # explanation in it, and a shell complaining on the way past --
+        # `base64: command not found`, a profile that died -- is usually
+        # the whole answer.  On a host that did send something the same
+        # line is noise, every `stdin: is not a tty` in the fleet, so it
+        # stays unsaid there.  Not attributed to the command: ssh writes
+        # here too, and which of them spoke is not ours to guess.
+        said = [(r.host, r.remote_says[0]) for r in empty if r.remote_says]
+        for host, line in said[:5]:
+            out.append("            %-12s stderr: %s"
+                       % (host.name, line[:100]))
+        if len(said) > 5:
+            out.append("            ... and %d more wrote to stderr"
+                       % (len(said) - 5))
     turned = [(r.host, x) for r in results for x in r.rotated]
     if turned:
         # Not "came back whole": a rotated file over the ceiling comes
@@ -2121,7 +2168,14 @@ def _render_findings(out, results, args, compact=False):
                                                       r.exit_status))
         if len(angry) > 6:
             out.append("            ... and %d more" % (len(angry) - 6))
-        out.append("            What it said is collected either way.")
+        # "either way" is about the exit status, not about there being
+        # something to keep: a command can fail and print nothing, and
+        # then the EMPTY line above is the one telling the truth.
+        if all(r.files for r in angry):
+            out.append("            What it said is collected either way.")
+        else:
+            out.append("            What it said is collected either way, "
+                       "where it said anything.")
     cut = [r for r in results if r.truncated]
     if cut:
         names = " ".join(r.host.name for r in cut[:6])
