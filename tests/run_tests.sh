@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # run_tests.sh -- run every test_*.sh in this directory.
 #
 # Usage: run_tests.sh [NAME...]     e.g. run_tests.sh agree logtriage

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # compose: the claim on the front page, actually run.
 #
 # "44 healthy, 4 agree they are swapping, 2 unreachable -- in one command"
