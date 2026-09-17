@@ -9,6 +9,8 @@ dredge /var/log/syslog --tail 200 -S 'web[01-40]' # only the last 200 lines
 dredge /etc/nginx --servers hosts.txt               # a whole directory each
 dredge /var/log/app.log --since -1h --append      # only what changed, added on
 dredge --cmd uptime --tag before -d audit         # labelled, to share a directory
+dredge /var/log/app.log --follow -d out           # only what is new since last time
+dredge /var/log/app.log --daemon -d out           # ... and again every five minutes
 ```
 
 ## The problem it solves
@@ -112,6 +114,11 @@ A zero-byte *file* is the other way round: it exists on the far side, and a
 faithful copy of it is empty. Only a command has nothing to land when it says
 nothing.
 
+[`--follow`](#a-remote-tail) is left to its own accounting. There an empty
+pass is what `UNCHANGED` already means, the mark has to be kept either way for
+the next pass to resume from, and a stream that is empty the first time it is
+looked at is a stream rather than a failed collection.
+
 Where a host came back with nothing and its ssh wrote something on stderr,
 that line is shown too — for an empty host it is usually the whole answer:
 
@@ -165,6 +172,32 @@ have called it anyway.
 The tag is the one part of the name the caller writes freely, so it is the one
 part that could carry a slash and quietly mean a directory: anything outside
 `A-Za-z0-9._+-` folds to `-`, and `--tag 'a/b c:d'` lands as `a-b-c-d~web01`.
+
+### The suffix
+
+`--suffix EXT` goes on the end of every file a run creates:
+
+```bash
+dredge --cmd 'ss -s' --suffix .txt        # ss~web01.txt
+dredge /var/log/syslog --suffix .log      # web01~var~log~syslog.log
+```
+
+That is how a collection gets an extension the rest of your tooling
+recognises. A `--cmd` artifact has no path, so it has no extension at all, and
+an editor opening `ss~web01` is left guessing where `ss~web01.txt` is not.
+
+A bare word gains a dot — `--suffix log` and `--suffix .log` both mean
+`.log` — and one that already starts with `.`, `_`, `-`, `+` or `~` is
+appended as typed. A leading dash needs the joined spelling `--suffix=-raw`,
+because a separate `-raw` is something argparse has to read as an option. Like
+the tag, it is cleaned before it is used: anything outside `A-Za-z0-9._+-`
+folds to `-`, and a suffix with no letter or digit left in it is refused rather
+than put on the end of every name in the run.
+
+It is part of the name, so changing it between two `--follow` passes makes the
+local copy the last pass wrote unfindable, and that file is collected again from
+the start under the new name — reported as a `RESYNC` rather than silently, but
+worth knowing before changing a suffix mid-follow.
 
 ### The directory
 
@@ -276,9 +309,201 @@ hello from web01
 **Nothing is de-duplicated.** Appending a whole file twice gives you it twice.
 The pairing that makes sense is `--tail` or `--since` with `--append`, where
 each run brings back a slice the last one did not have — and even then two
-runs an hour apart with `--tail 200` will repeat whatever both ends saw. If
-you need exactly-once continuation, this is the wrong shape of tool: see
-**Why this pulls** below.
+runs an hour apart with `--tail 200` will repeat whatever both ends saw.
+
+`--follow`, the next section, is that pairing without the overlap.
+
+## A remote tail
+
+`--follow` brings back only what is new. Each file is resumed from the byte
+the last pass stopped at, so a second pass over a log that has grown by forty
+lines carries forty lines — not the file, and not a `--tail 200` window that
+repeats whatever the last pass already had.
+
+```bash
+dredge /var/log/app.log --follow -d out --servers hosts.txt
+dredge /var/log/nginx   --follow -d out --servers hosts.txt
+dredge --cmd 'dmesg -T' --follow -d out --servers hosts.txt
+```
+
+A **file** is resumed at its offset. A **directory** brings back the files
+that grew, and a file that appeared since the last pass comes back whole —
+that is what new means. A **command** has no byte offset to resume from, so
+what it says is compared against what it said last time:
+
+| What the command said this time | What comes back |
+|---|---|
+| the same thing | nothing |
+| the same thing and more | the part that was added |
+| something different from the first byte | all of it |
+
+The comparison is a `cksum` of exactly the bytes we already have, run on the
+far side against the same prefix of this answer — POSIX, on every box this
+will land on, and asked only whether what we carried is still the start of
+what is there now. A host with no `cksum` sends the whole answer every pass,
+which is the safe way to be wrong.
+
+### Where it lands is still yours to say
+
+What arrives lands as `--append`, `--prepend` or `--replace` says. Under
+`--follow` the default is `--append` — the local file is the log, growing here
+as it grows there. `--replace` under `--follow` is the other useful shape: the
+local file holds only what the last pass brought back.
+
+```bash
+dredge /var/log/app.log --follow --append  -d out   # the log, accumulating here
+dredge /var/log/app.log --follow --replace -d out   # only the latest slice
+dredge /var/log/app.log --follow --mark    -d out   # a line at every seam
+```
+
+`--tail N` decides where a *first* sight starts: the last N lines, exactly as
+`tail -n N -f` does. Without it a file that has not been seen before comes
+back whole. `--head` cannot mean anything here — the first N lines of a file
+never change — and is refused rather than quietly ignored.
+
+### Where the marks live
+
+A pass has to know where the last one stopped, so `--follow` keeps a small
+JSON file — one offset per host per file — in the collection directory:
+
+```bash
+dredge /var/log/app.log --follow -d out     # marks in out/dredge-state.json
+```
+
+This is the one piece of state this package keeps on its own, and it is named
+by you. No `-d` means a new stamped directory every run and nothing to resume
+from, so `--follow` **asks for one** rather than quietly starting over.
+`--state FILE` puts the marks somewhere else; deleting the file starts the
+follow again from scratch. Several collections can share one directory and one
+state file — each stream is kept apart by its tag and by what it collects.
+
+A state file that cannot be read is refused rather than started over: starting
+over means every host sending every file again, which on the fleet this is
+pointed at is the event `--follow` exists to avoid.
+
+### When the file is not the file it was
+
+A log that was rotated is not a log that was truncated, and neither is a log
+that grew. A file whose **inode changed**, or whose **size went backwards**,
+comes back from byte zero and is reported:
+
+```text
+  ROTATED   1 file was not the file it was and came back as a new one:
+            web02        /var/log/app.log
+            A new inode, or a size that went backwards: resuming at the old
+            offset would have handed you the middle of a different file.
+            The follow carries on from the new one -- this is a seam, not a stop.
+```
+
+**A rotation is a seam, not a stop.** The new file is followed from there
+exactly as the old one was, and the next pass carries only what was added to
+it. The warning explains the seam in the local copy; it does not mean that
+file was abandoned.
+
+Both halves matter: `logrotate` moving the file aside changes the inode, and
+its `copytruncate` mode keeps the inode and puts the size back to zero.
+
+What this cannot see is a file replaced **in place**, keeping its inode and
+ending up longer than the old one. That is the same blind spot `tail -f` has,
+and it is worth knowing rather than being surprised by.
+
+If the local copy is gone — you deleted it, or something cleaned the
+directory — the mark goes with it rather than being believed:
+
+```text
+  RESYNC    1 local copy is gone, so the mark went with it:
+            web01        /var/log/app.log
+            The next pass brings each of them back whole.
+```
+
+"Nothing new" about a file that is no longer here is the most confidently
+wrong thing this could say, so it does not say it.
+
+### When more arrives than one pass can carry
+
+`--max-bytes` means **the new part** under `--follow`, not the whole file, and
+it bounds a pass rather than ending one. When more than the ceiling was added
+since the last pass — a busy log, or a rotation, where the whole new file *is*
+the new part — the newest `--max-bytes` come back and the follow resumes from
+the end of the file:
+
+```text
+  GAP       1 artifact grew by more than --max-bytes (500B) in one pass:
+            web01           2.4KB not carried  logs/app.log
+            The newest 500B came back and the follow is at the end of the file
+            again, so this is one hole rather than a stop.  Raise --max-bytes,
+            or pass more often, to stop it happening again.
+```
+
+What did not fit is a hole in the local copy that will not fill, so it is named
+with its size. It is deliberately not a refusal: refusing would leave the mark
+where it was, the next pass would have *more* to carry and would be refused for
+the same reason, and that artifact would never be collected again — losing the
+whole of the rest of the log to protect the part of it that did not fit.
+
+**A gap does not change the exit status.** A log busy enough to outrun its
+ceiling does it on most passes, and a daemon whose every pass reported failure
+for working exactly as designed is a daemon whose exit status stops being read.
+`gap_bytes` in `--csv` is the machine-readable half of the finding, and it
+exists for that reason — read it, not `$?`, if a script needs to know that part
+of a log is missing.
+
+## Daemon mode
+
+`--daemon` does that on a timer: a pass, a wait, another pass, until something
+stops it.
+
+```bash
+dredge /var/log/app.log --daemon -d out --servers hosts.txt
+dredge --cmd 'systemctl --failed' --daemon --every 30s -d out -S 'web[01-40]'
+```
+
+```text
+17:50:46  pass 1    1 new, 33B from 1 of 1 host in 0.0s
+17:50:47  pass 2    0 new, 0B from 0 of 1 host in 0.0s
+  UNCHANGED 1 host had nothing new: web01
+            1 artifact checked and unchanged there
+
+17:50:48  pass 3    1 new, 16B from 1 of 1 host in 0.0s
+```
+
+Each pass prints one line, and anything worth reading — a host that failed, a
+file that rotated, a command that exited non-zero — prints its findings under
+it in the same words the one-off report uses. A pass whose hosts all failed is
+still just a pass: the loop keeps going, because a fleet that is unreachable
+for ten minutes is not a reason to stop watching it.
+
+`--every` takes `30s`, `5m`, `2h` or a plain number of seconds and defaults to
+**five minutes**. It is the gap between the end of one pass and the start of
+the next, so a pass that runs long cannot stack up behind itself — one that
+outlasts the interval is reported and the next begins immediately.
+
+`--daemon` implies `--follow`, because a timer that re-fetched every file in
+full every five minutes would be a denial of service against the fleet it is
+watching.
+
+`--passes N` stops after N of them. Without it the run continues until SIGINT
+or SIGTERM, which are answered by finishing the pass in hand — hosts already
+contacted are finished and their marks written — and then saying what the run
+did. Asked twice, it is not asked a third time: the second signal puts the
+default handler back.
+
+It does **not** fork, detach, write a pidfile or leave anything behind but the
+files it collected and its state file. `&`, `tmux` or a systemd unit is how it
+becomes a background service:
+
+```ini
+[Service]
+Environment=DREDGE_EVERY=2m
+ExecStart=/usr/local/bin/dredge /var/log/app.log --daemon -d /srv/collected \
+          --servers /etc/fleet.txt --quiet
+Restart=on-failure
+```
+
+`--quiet` there means the same thing it means everywhere else: say nothing
+unless something went wrong. A failed host is still a finding and still
+printed, because a daemon that swallows an unreachable host is a daemon you
+cannot leave running.
 
 ## How it goes over the wire
 
@@ -332,10 +557,15 @@ for this job:
   handle. Two hundred hosts pushing at once can bury both the collector and the
   link being diagnosed.
 
-Where an agent genuinely wins is *following* a file live, with a byte offset
-remembered so nothing is duplicated. That is a different tool and it does not
-need a new port either: `ssh host 'tail -F file'` is a pusher that runs over
-the connection already open.
+Following a file live, with a byte offset remembered so nothing is
+duplicated, is the thing an agent is usually installed for — and `--follow`
+does it by pulling, because the offset is the only state involved and there is
+no reason it has to live on the far side. It lives here, in the collection
+directory, and each pass carries it over and asks for the rest. What an agent
+would still win is *latency*: a pass is as fresh as `--every`, where a process
+sitting on the far side can push a line the moment it is written. `ssh host
+'tail -F file'` is that pusher, over the connection already open, for the one
+host you are watching right now.
 
 ## Reading the result
 
@@ -352,10 +582,15 @@ dredge -- /var/log/syslog   [tail 200]
 ```
 
 `--csv PATH` writes one row per collected file —
-`host,source,local_path,bytes,outcome,exit_status` — including a row for the
-hosts that returned nothing, so the record says who was asked as well as what
-came back. `source` is the path that was collected, or the command that was
-run; `exit_status` is that command's status, and empty for a file.
+`host,source,local_path,bytes,outcome,exit_status,pass,unchanged,gap_bytes` —
+including a row for the hosts that returned nothing, so the record says who was
+asked as well as what came back. `source` is the path that was collected, or the
+command that was run; `exit_status` is that command's status, and empty for a
+file. `bytes` is what came **over the wire**, not the size of the local file
+after it landed. `pass` is 1 for a one-off run and counts up under `--daemon`,
+which appends its rows rather than replacing them; `unchanged` is what a
+`--follow` pass checked and did not have to carry; `gap_bytes` is what it could
+not carry and nothing will bring back.
 
 ## Options
 
@@ -363,13 +598,19 @@ run; `exit_status` is that command's status, and empty for a file.
 |---|---|
 | `-c, --cmd CMD` | a bash command to run on each host; its output is the artifact |
 | `-t, --tag NAME` | label this run's artifacts so several runs can share a directory |
+| `--suffix EXT` | put EXT on the end of every file the run creates; a bare word gains a dot |
 | `-S, --server TOKEN` | servers, repeatable; ranges expand (`web[01-40]`) |
 | `--servers FILE` | a server list — [`reachable`](reachable.md)'s output works, its comments included |
 | `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
 | `--head N` / `--tail N` | only that many lines, cut on the far side |
 | `--since T` | only files modified since T |
-| `--append` / `--prepend` | add to what is here rather than replacing it |
+| `--append` / `--prepend` / `--replace` | where the new bytes land; `--replace` is the default, except under `--follow` |
 | `--mark` | write a marker line where old meets new |
+| `-f, --follow` | only what is new since the last pass |
+| `--daemon` | keep going, a pass at a time (implies `--follow`) |
+| `--every T` | how long between passes: `30s`, `5m`, `2h` (default 5m) |
+| `--passes N` | stop after N passes (`0`: until stopped) |
+| `--state FILE` | where a `--follow` run keeps its marks |
 | `--max-bytes N` / `--max-files N` | ceilings, per file and per host; hitting either is reported |
 | `--timeout S` | bounds the whole transfer per host (default 120s) |
 | `-j, --jobs N` | hosts contacted at once (default 20) |
@@ -386,3 +627,11 @@ run; `exit_status` is that command's status, and empty for a file.
 
 Exit 1 on an empty collection is deliberate: a script that fans out to gather
 evidence and gathers none should stop, not carry on with an empty directory.
+
+Under `--follow` that one rule is inverted: a pass that brought nothing back
+exits **0**, because nothing new is the answer a tail spends most of its time
+giving, and a script that polls one would otherwise read a quiet fleet as a
+broken run. A `GAP` is **0** as well — see above; `gap_bytes` in `--csv` is
+what says so instead. A `--daemon` stopped by a signal exits 0 as well — it was asked to
+stop — and one that ran out its `--passes` exits 1 if any pass in it had a
+failure.

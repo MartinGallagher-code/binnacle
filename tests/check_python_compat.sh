@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # check_python_compat.sh -- hold the Python 3.6 floor.
 #
 # The floor is load-bearing rather than nostalgic: netmesh copies itself to

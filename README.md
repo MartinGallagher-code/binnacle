@@ -4,8 +4,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/binnacle.svg)](https://pypi.org/project/binnacle/)
 [![CI](https://github.com/MartinGallagher-code/binnacle/actions/workflows/ci.yml/badge.svg)](https://github.com/MartinGallagher-code/binnacle/actions/workflows/ci.yml)
 [![Docs](https://readthedocs.org/projects/binnacle/badge/?version=latest)](https://binnacle.readthedocs.io)
-[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![REUSE](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
+[![REUSE status](https://api.reuse.software/badge/github.com/MartinGallagher-code/binnacle)](https://api.reuse.software/info/github.com/MartinGallagher-code/binnacle)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
 one holds eleven, for Linux boxes, the fleets they belong to, and the networks
@@ -29,7 +29,10 @@ between them.
 pip install binnacle
 ```
 
-No dependencies. Python 3.6+. No agents, no daemons, no dotdirs, no root.
+No dependencies. Python 3.6+. No agents, no dotdirs, no root, and
+nothing left running unless you ask for it by name --
+`dredge --daemon` is the one thing here that keeps going, and it
+stays in the foreground while it does.
 
 One more command comes with them, and it is the one to run first:
 
@@ -224,6 +227,21 @@ also `g01`, because a bare number ignores the letters -- it says so, and
 It reads the layout and nothing else: no ssh, no DNS, no inventory API, and
 the file is never written to.
 
+### dredge
+
+Brings one file -- or one command's answer -- back from every host, landed
+under a name that says which machine it came from: `dredge /var/log/syslog
+--servers hosts.txt` is forty `scp`s that do not all overwrite each other,
+because every one of them is called `syslog`. `--head`, `--tail` and
+`--since` cut on the far side, so what crosses the network is the two
+hundred lines you asked for rather than the four gigabytes they are in.
+**`--follow` is a remote tail**: each file is resumed from the byte the last
+pass stopped at, a rotated one is spotted and comes back whole, and a
+command's answer is compared with the last one so only the part that was
+added travels. `--daemon` does that on a timer -- a pass, a wait, another
+pass -- which is a fleet-wide `tail -F` that needed nothing installed on the
+fleet.
+
 ## Documentation
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
@@ -234,7 +252,7 @@ so the two cannot drift.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # twelve suites, 348 checks
+bash tests/run_tests.sh          # twelve suites, 503 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim
@@ -257,4 +275,22 @@ tally.
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+Copyright (C) 2026 Martin J. Gallagher
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+Full text: the `LICENSE` file at the repository root, or
+<https://www.gnu.org/licenses/gpl-3.0.html> — SPDX identifier
+`GPL-3.0-or-later`. This repository follows the
+[REUSE Specification](https://reuse.software/): source files carry SPDX
+copyright and licence headers, and the licence text lives in `LICENSES/`.
