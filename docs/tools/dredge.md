@@ -505,6 +505,186 @@ unless something went wrong. A failed host is still a finding and still
 printed, because a daemon that swallows an unreachable host is a daemon you
 cannot leave running.
 
+## A table of what the fleet said
+
+`--csv` answers "did the collection work" — a row per file, how big it was,
+how it went. `--tsv` answers the other question, the one you actually pointed
+dredge at the fleet to ask: **what were the numbers?**
+
+```bash
+dredge --cmd 'echo "load1=$(cut -d" " -f1 /proc/loadavg)"
+              echo "procs=$(ls /proc | grep -c "^[0-9]")"' \
+       --servers hosts.txt --tsv metrics.tsv
+```
+
+```text
+date                   host    load1   procs
+2026-09-18T09:14:02    web01   0.41    212
+2026-09-18T09:14:02    web02   1.93    318
+```
+
+One row per host per pass: the time the pass ran, the host it came from, then
+a column per variable. Appended to one file across runs, because that is the
+shape a week of passes has to have for a spreadsheet, a plot or an `awk`
+one-liner to read it as a time series rather than as forty files.
+
+The date is the clock **here** — `%Y-%m-%dT%H:%M:%S`, local, no offset and no
+fraction, sortable as text. Every row in a pass carries the same stamp however
+far apart the hosts' own clocks are; [`skew`](skew.md) is the instrument for
+the question of whose clock is wrong, and this column deliberately does not
+pretend to answer it.
+
+### The shape the variables arrive in
+
+`--parse` says how to read what the command printed. Four shapes, because
+different probes already speak different ones:
+
+| `--parse` | The command prints | Notes |
+|---|---|---|
+| `kv` (default) | `name=value` per line | Self-describing: `sysctl -a`, `/etc/os-release`, most probes. Blank lines and `#` comments are skipped; the first `=` separates |
+| `json` | `{"name": value}` | One level deep — a nested object or list has no column to go in and is refused by name |
+| `row` | a header line, then a values line | The command names its own columns. Tabs where there are tabs, whitespace where there are not |
+| `values` | bare values in a fixed order | The one shape that is not self-describing, so `--columns` is required |
+
+`kv` is the default because it is the shape that describes itself. The columns
+come from the data rather than from a flag you have to keep in step with it,
+and a host missing one is a visible blank rather than a row whose columns have
+all shifted along by one.
+
+`--parse values` is refused without `--columns`: `3 41 0.7` says nothing about
+which is which. A host that prints a different *number* of values is refused
+too, rather than filled in — a short row there is not a missing value, it is
+every column after the gap holding the wrong one.
+
+### The header does not move
+
+The header is written when the file is created, and every row after it is
+counted from that header. Rebuilding it from each pass would renumber every
+column the first time a host answered differently, and the week of rows behind
+it would quietly start meaning something else.
+
+So a name that shows up later has nowhere to go, and that is said rather than
+dropped:
+
+```text
+  NEWVAR    1 name the table has no column for: swap_free
+            The header was written when metrics.tsv was created and every row since
+            is counted from it.  Start a new table, or name the columns
+            up front with --columns.
+```
+
+`--columns a,b,c` pins the header up front, which is how you leave room for a
+variable a host is not printing yet. Without it the header is the names the
+fleet actually used, first-seen order — and host order is fixed by the server
+list, so two runs over one list build the same header.
+
+A variable a host does not have is an empty cell. A host whose answer will not
+parse gets **no row**, and a `UNPARSED` line saying which host and what was
+wrong with what it printed — a host quietly missing from a table reads as a
+machine that was fine. Its answer is still collected whole either way; only its
+row is missing. A host that printed nothing gets no row for the same reason: an
+empty line under a timestamp claims the fleet reported zero, which is a
+different and much worse claim than saying nothing.
+
+Values are escaped, not truncated: a tab ends a column and a newline ends a
+row, so either would turn one row into two or shift every column after it.
+They travel as `\t` and `\n`.
+
+### A time series
+
+```bash
+dredge --cmd 'cat /proc/pressure/cpu | head -1' --servers hosts.txt \
+       --tsv pressure.tsv --parse kv --daemon --every 5m
+```
+
+`--daemon` normally implies [`--follow`](#a-remote-tail), so a timer cannot
+re-fetch every file in full every five minutes. With `--tsv` it does not: a
+table wants the whole answer each pass, and re-running a command is not a
+re-transfer. `--follow` and `--tsv` together are refused outright — a pass
+where nothing changed would write no row, which reads as a host that was down.
+
+
+## A jump box
+
+The fleet is behind a bastion: **A** can reach **B**, and only B can reach
+**C–Z**.
+
+```bash
+dredge --cmd 'uptime' --servers hosts.txt --relay bastion -d out
+```
+
+```text
+A  --ssh-->  B  --ssh--> C, D, E ... Z
+   <--tar--     <--------
+```
+
+The tunnelling answer is `ssh -J`, and it works — `--ssh 'ssh -J bastion'`
+needs nothing from dredge at all. This is the other answer, and the one that
+**depends on no configuration**: `--relay` sends *this file* to B, runs the
+whole collection from there, and brings it back.
+
+B needs a Python and a shell. It does not need dredge installed, an agent, a
+package, a cron entry or a line of config, because the copy that runs there is
+the copy that was running here — sent over the same connection that carries
+the answer back, and removed when the run ends.
+
+One transfer crosses the A–B link instead of forty, which is the reason to
+prefer this over a tunnel when that link is the slow one. The fan-out, and the
+connections it opens, happen on B.
+
+The names the collection lands under are the ones dredge would have built
+without a jump box in the way, so `grep -l oom *` reads the same either way.
+The server list goes over **already expanded** — `web[01-40]` became forty
+names here — so B collects from exactly the fleet that was asked for rather
+than re-expanding a range against its own idea of the syntax.
+
+### What it leaves behind
+
+Nothing, by default. The spool is a **named path** rather than a `mktemp -d`,
+specifically so that it can be removed even when the run that made it was
+killed: `--timeout` ends the session with `SIGKILL`, and a killed shell runs no
+`trap`. `--keep-relay` leaves it, for when the question is what went wrong over
+there:
+
+```bash
+dredge --cmd 'uptime' --servers hosts.txt --relay bastion -d out --keep-relay
+# then: ssh bastion 'cat /var/tmp/dredge-relay-*/errors'
+```
+
+The cost is worth saying plainly: **the collection exists on B, in the clear,
+for as long as the run lasts.** On a bastion somebody else owns, that is a
+disclosure — and `--ssh 'ssh -J bastion'` is the shape that does not make it,
+because there the bytes pass through B's sshd encrypted end to end and B cannot
+read them.
+
+### The far side's report is the report
+
+The run that actually happened is the one over there, so its report is what is
+shown, indented under one line of this side's own. Rewriting it here would be
+one more place for the two to disagree. Its exit status is this run's exit
+status.
+
+```text
+dredge.py -- 12 hosts via bastion, 12 files (1.4MB) in 6.2s
+  dredge.py -- [uptime] uptime
+          12 files from 12 of 12 hosts, 1.4MB in 5.8s -> collect/
+```
+
+### What a relay cannot do
+
+[`--follow`](#a-remote-tail) is refused. Its marks would live in the spool,
+which is removed when the run ends, so every pass would be a first sight and
+would carry the whole collection again. `--daemon` with `--cmd` and
+[`--tsv`](#a-table-of-what-the-fleet-said) repeats the command rather than
+resuming a file, and that does work — the timer stays on this side, one round
+trip per pass:
+
+```bash
+dredge --cmd 'echo "load1=$(cut -d" " -f1 /proc/loadavg)"' \
+       --servers hosts.txt --relay bastion --tsv metrics.tsv \
+       --daemon --every 5m -d out
+```
+
 ## How it goes over the wire
 
 One ssh per host, and one round trip. A `find` on the far side selects the
@@ -607,14 +787,21 @@ not carry and nothing will bring back.
 | `--append` / `--prepend` / `--replace` | where the new bytes land; `--replace` is the default, except under `--follow` |
 | `--mark` | write a marker line where old meets new |
 | `-f, --follow` | only what is new since the last pass |
-| `--daemon` | keep going, a pass at a time (implies `--follow`) |
+| `--daemon` | keep going, a pass at a time (implies `--follow`, except with `--tsv`) |
 | `--every T` | how long between passes: `30s`, `5m`, `2h` (default 5m) |
 | `--passes N` | stop after N passes (`0`: until stopped) |
 | `--state FILE` | where a `--follow` run keeps its marks |
 | `--max-bytes N` / `--max-files N` | ceilings, per file and per host; hitting either is reported |
 | `--timeout S` | bounds the whole transfer per host (default 120s) |
 | `-j, --jobs N` | hosts contacted at once (default 20) |
+| `--relay HOST` | a jump box: send this file there, run the collection from there, bring it back |
+| `--relay-dir DIR` | where the copy and the collection live on the jump box while the run lasts |
+| `--relay-python P` | the python to run it with over there (default: `python3`, then `python`) |
+| `--keep-relay` | leave the spool on the jump box instead of removing it |
 | `--csv [PATH]` | one row per file |
+| `--tsv [PATH]` | a table: one row per host per pass, of the variables its command printed |
+| `--parse HOW` | the shape those variables arrive in: `kv` (default), `json`, `row`, `values` |
+| `--columns A,B,C` | name the variable columns; required by `--parse values`, elsewhere it pins the header |
 | `--dry-run` | print the remote command and stop |
 
 ## Exit status

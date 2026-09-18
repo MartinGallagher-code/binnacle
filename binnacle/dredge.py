@@ -11,6 +11,8 @@ Usage: dredge /var/log/syslog --servers hosts.txt    one file from every host
        dredge --cmd 'uptime' --tag before --servers h  labelled, to keep runs apart
        dredge /var/log/app.log --follow -d out       only what is new since last time
        dredge /var/log/app.log --daemon -d out       ... and again every five minutes
+       dredge --cmd probe --tsv m.tsv --servers h     a table of what each one said
+       dredge --cmd uptime --relay bastion --servers h  through a jump box
 
 Options:
   -c, --cmd CMD       a bash command to run on each host; what it says comes
@@ -30,7 +32,7 @@ Options:
   -f, --follow        only what is new since the last pass: each file is
                       resumed from the byte it stopped at
       --daemon        keep going -- a pass, a wait, another pass, until you
-                      stop it                          (implies --follow)
+                      stop it            (implies --follow, not with --tsv)
       --every T       how long between passes: 30s, 5m, 2h  (DREDGE_EVERY, 5m)
       --passes N      stop after N passes                  (0: until stopped)
       --state FILE    where a --follow run keeps its marks
@@ -48,6 +50,23 @@ Options:
       --ssh CMD       ssh command                           (DREDGE_SSH)
       --csv [PATH]    host,source,local_path,bytes,outcome,exit_status,
                       pass,unchanged  (appended to under --daemon)
+      --tsv [PATH]    a table of the variables --cmd printed: date, host,
+                      then a column each, one row per host per pass,
+                      appended across runs                 (DREDGE_TSV)
+      --parse HOW     the shape they arrive in: kv (name=value, the
+                      default), json, row (a header line then a values
+                      line), values (bare, named by --columns)
+                                                          (DREDGE_PARSE)
+      --columns A,B,C name the variable columns in order; --parse values
+                      needs it, elsewhere it pins the header
+                                                        (DREDGE_COLUMNS)
+      --relay HOST    a jump box: send this file to HOST, run the whole
+                      collection from there, bring it back (DREDGE_RELAY)
+      --relay-dir DIR where the copy and the collection live there while
+                      the run lasts               (DREDGE_RELAY_DIR)
+      --relay-python P  the python to run it with over there
+                                               (DREDGE_RELAY_PYTHON)
+      --keep-relay    leave the spool on the jump box, to look at
       --dry-run       print the remote command and stop
       --quiet         no progress and no summary, just the findings
 
@@ -114,6 +133,92 @@ A file or a command, the same way round
   directories hold nothing visible collects nothing, and one line saying
   so is worth more than forty zero-byte files that look like a broken
   run.  The host still has a row in `--csv`, carrying its exit status.
+
+A jump box
+  The fleet is behind a bastion: this box can reach B, and only B can
+  reach C-Z.  `--relay B` sends *this file* to B, runs the whole
+  collection from there, and brings it back:
+
+      A  --ssh-->  B  --ssh--> C, D, E ... Z
+         <--tar--     <--------
+
+  The tunnelling answer is `ssh -J`, and it works.  This is the other
+  answer, and the one that depends on no configuration at all: B needs a
+  Python and a shell and nothing else -- no dredge installed, no agent,
+  no package, no cron entry, no line of config -- because the copy that
+  runs there is the copy that was running here, sent over the same
+  connection that carries the answer back.  It is removed when the run
+  ends.
+
+  One transfer crosses the A-B link instead of forty, which is the
+  reason to prefer this over a tunnel when that link is the slow one.
+  The fan-out, and the connections it opens, happen on B.
+
+  The copy and the server list travel on *stdin*, as a tar: this file is
+  three thousand lines, and base64 of it in an argv is past ARG_MAX
+  before ssh ever sees it.  The list goes over already expanded, so B
+  collects from exactly the fleet that was asked for here rather than
+  re-expanding a range against its own idea of the syntax.
+
+  The spool is a named path rather than a `mktemp -d`, so it can be
+  removed even when the run that made it was killed: `--timeout` ends
+  the session with SIGKILL, and a killed shell runs no trap.
+  `--keep-relay` leaves it, for when the question is what went wrong
+  over there.
+
+  The cost is worth saying plainly: the collection exists on B, in the
+  clear, for as long as the run lasts.  On a bastion somebody else owns
+  that is a disclosure, and `ssh -J` through `--ssh` is the shape that
+  does not make it.
+
+  `--follow` is refused through a relay.  Its marks would live in the
+  spool, which is removed when the run ends, so every pass would be a
+  first sight and would carry the whole collection again.  `--daemon`
+  with `--cmd` and `--tsv` repeats the command rather than resuming a
+  file, and that does work: the timer stays on this side, one round trip
+  per pass.
+
+A table of what the fleet said
+  `--csv` answers "did the collection work".  `--tsv` answers the other
+  question, the one you pointed this at the fleet to ask -- what were
+  the numbers:
+
+      date                   host    load1   procs
+      2026-09-18T09:14:02    web01   0.41    212
+      2026-09-18T09:14:02    web02   1.93    318
+
+  One row per host per pass -- the time the pass ran, the host, then a
+  column per variable the command printed -- appended to one file across
+  runs.  That is the shape a week of `--daemon` passes has to have for a
+  spreadsheet, a plot or an awk one-liner to read it as a time series
+  rather than as forty files.
+
+  The date is the clock *here*, to the second, sortable as text.  Every
+  row in a pass carries the same stamp however far apart the hosts' own
+  clocks are; `skew` is the instrument for whose clock is wrong, and this
+  column deliberately does not pretend to answer it.
+
+  `--parse` says what shape the variables arrive in: `kv` (`name=value`
+  per line, and the default because it is the shape that describes
+  itself), `json`, `row` (a header line then a values line), or `values`
+  (bare, in a fixed order, named by `--columns` -- which is required
+  there, because nothing in `3 41 0.7` says which is which).
+
+  The header is written once, when the file is created, and every row
+  after it is counted from that header: rebuilding it each pass would
+  renumber every column the first time a host answered differently, and
+  the rows behind it would quietly start meaning something else.  A name
+  that appears later therefore has nowhere to go, and is reported rather
+  than dropped.  `--columns` pins the header up front, which is how you
+  leave room for a variable nothing is printing yet.
+
+  A variable a host does not have is an empty cell.  A host whose answer
+  will not parse gets no row and a finding saying so -- a host quietly
+  missing from a table reads as a machine that was fine -- and its answer
+  is collected whole either way.  A host that printed nothing gets no row
+  for the same reason: an empty line under a timestamp claims the fleet
+  reported zero, which is a different and much worse claim than saying
+  nothing.
 
 Names that stay apart
   One directory per run, and everything in it is told apart by its *name*
@@ -1553,7 +1658,8 @@ class Result(object):
     __slots__ = ("host", "outcome", "detail", "files", "bytes", "skipped",
                  "collisions", "truncated", "exit_status", "duration",
                  "unchanged", "rotated", "resynced", "gapped",
-                 "remote_says")
+                 "remote_says", "answer", "variables", "unknown_vars",
+                 "parse_error")
 
     def __init__(self, host):
         self.host = host
@@ -1595,6 +1701,19 @@ class Result(object):
         # rest did not: a hole in the collected copy, said out loud,
         # rather than a follow that stops.
         self.gapped = []
+        # What --cmd's command said, and what --tsv made of it. The raw
+        # bytes are kept because the parse happens once, on the main
+        # thread, after every host is in: a table whose columns depend on
+        # what the fleet said cannot be written a row at a time from
+        # inside a worker.
+        self.answer = None
+        self.variables = {}
+        # Names this host had that the table's header does not. Not
+        # dropped quietly: a column that appeared halfway through a
+        # week of passes is a finding, not a formatting detail.
+        self.unknown_vars = []
+        # Why this host has no row, when it had an answer to parse.
+        self.parse_error = ""
 
 
 def ssh_argv(args, host, command):
@@ -1645,7 +1764,27 @@ def _parse_stderr(text):
     return skipped, gapped, other
 
 
-def _run(args, host, command, consume):
+def _feed(stream, payload):
+    """Push SEND down the child's stdin, in a thread of its own.
+
+    Writing it inline would deadlock the moment it outgrew the pipe
+    buffer: this side would block on the write while the far side blocked
+    on a stdout nobody was reading yet.  A far side that gave up early
+    closes the pipe, and that is an ordinary end to a transfer rather
+    than a failure -- its exit status says what happened.
+    """
+    try:
+        stream.write(payload)
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        pass
+
+
+def _run(args, host, command, consume, send=None):
     """ssh once, hand the stdout stream to CONSUME, and classify the end."""
     r = Result(host)
     t0 = time.monotonic()
@@ -1658,7 +1797,9 @@ def _run(args, host, command, consume):
         # BatchMode=yes means nothing here wants a terminal.
         p = subprocess.Popen(ssh_argv(args, host, command),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             stdin=subprocess.DEVNULL, start_new_session=True)
+                             stdin=(subprocess.PIPE if send is not None
+                                    else subprocess.DEVNULL),
+                             start_new_session=True)
     except OSError as exc:
         r.outcome, r.detail = FAILED, str(exc)
         return r
@@ -1667,6 +1808,10 @@ def _run(args, host, command, consume):
     t = threading.Thread(target=_drain, args=(p.stderr, errbuf))
     t.daemon = True
     t.start()
+    if send is not None:
+        feeder = threading.Thread(target=_feed, args=(p.stdin, send))
+        feeder.daemon = True
+        feeder.start()
 
     # --timeout has to bound the transfer, not just the wait after it.
     # Waiting on the child only starts once consume() has read the stream
@@ -1940,6 +2085,13 @@ def _frame_consumer(args, host):
                     # the first time it is seen is a stream, not a
                     # failed collection.
                     silent = args.cmd and not args.follow and not data
+                    if args.cmd and data is not None:
+                        # What the command said, kept for --tsv to read
+                        # variables out of.  Taken here rather than read
+                        # back off the landed file: --tsv is the parsed
+                        # view of this answer, and a silent command
+                        # lands no file to read back at all.
+                        r.answer = data
                     if data is not None and not silent:
                         if args.follow and meta is None:
                             r.detail = ("the far side sent no follow frame "
@@ -2152,6 +2304,41 @@ def _render_findings(out, results, args, compact=False):
             out.append("            ... and %d more" % (len(lost) - 5))
         out.append("            The next pass brings each of them back "
                    "whole.")
+    unparsed = [r for r in results if r.parse_error]
+    if unparsed:
+        # A host whose answer would not parse has no row, and a table
+        # with a host quietly missing from it is a table that reads as
+        # "that machine was fine" -- so this is said every time, and
+        # says which host and what was wrong with what it printed.
+        out.append("  UNPARSED  %d host%s printed something --parse %s "
+                   "could not read:"
+                   % (len(unparsed), "" if len(unparsed) == 1 else "s",
+                      args.parse))
+        for r in unparsed[:5]:
+            out.append("            %-12s %s" % (r.host.name,
+                                                 r.parse_error))
+        if len(unparsed) > 5:
+            out.append("            ... and %d more" % (len(unparsed) - 5))
+        out.append("            Its answer is still collected whole -- "
+                   "only its row is missing.")
+    fresh = []
+    for r in results:
+        for name in r.unknown_vars:
+            if name not in fresh:
+                fresh.append(name)
+    if fresh:
+        # The header is fixed by the file, so a name that appeared later
+        # has nowhere to go. Dropping it silently is how a week of
+        # passes quietly stops recording the thing you added.
+        out.append("  NEWVAR    %d name%s the table has no column for: %s"
+                   % (len(fresh), "" if len(fresh) == 1 else "s",
+                      " ".join(fresh[:8])
+                      + ("" if len(fresh) <= 8 else " ...")))
+        out.append("            The header was written when %s was "
+                   "created and every row since" % args.tsv)
+        out.append("            is counted from it.  Start a new table, "
+                   "or name the columns")
+        out.append("            up front with --columns.")
     for r in bad:
         out.append("  %-9s %s: %s" % (r.outcome.upper(), r.host.name,
                                       r.detail or "?"))
@@ -2289,6 +2476,268 @@ def write_csv(results, args, path, append=False):
 
 
 # ---------------------------------------------------------------------------
+# A table of what the fleet said
+# ---------------------------------------------------------------------------
+#
+# `--csv` is a row per file: what was collected, how big it was, how it
+# went.  This is the other question -- not "did the collection work" but
+# "what were the numbers" -- and it wants a different shape:
+#
+#     date                   host    load1   procs   uptime_s
+#     2026-09-18T09:14:02    web01   0.41    212     884411
+#     2026-09-18T09:14:02    web02   1.93    318     12904
+#
+# One row per host per pass, stamped with the time the pass ran, appended
+# to one file across runs.  That is the shape a week of `--daemon` passes
+# has to have for anything downstream -- a spreadsheet, a plot, an awk
+# one-liner -- to read it as a time series rather than as forty files.
+
+TSV_META = ("date", "host")
+
+# What a name is allowed to be. A variable that arrives called `load 1`
+# or `a\tb` would put a tab or a space where a column boundary goes, so
+# it is refused by name rather than quietly making the table unreadable.
+VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
+
+
+def tsv_stamp(when=None):
+    """The date column: local time, to the second, sortable as text.
+
+    `%Y-%m-%dT%H:%M:%S` and nothing else -- no offset, no fraction.  It
+    is the clock *here*, the one machine in the run whose time is not in
+    question, so every row in a pass carries the same stamp however far
+    apart the hosts' own clocks are.  `skew` is the instrument for the
+    question of whose clock is wrong; this column deliberately does not
+    pretend to answer it.
+    """
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(when))
+
+
+def _tsv_escape(value):
+    """A value that cannot break the row it is in.
+
+    A tab ends a column and a newline ends a row, so a value carrying
+    either would silently turn one row into two or shift every column
+    after it.  They travel as `\\t` and `\\n` instead, which is what awk,
+    a spreadsheet import and a human reader all expect to see.
+    """
+    return (str(value).replace("\\", "\\\\").replace("\t", "\\t")
+            .replace("\r", "\\r").replace("\n", "\\n"))
+
+
+def parse_kv(text):
+    """`name=value` per line: `sysctl -a`, `/etc/os-release`, most probes.
+
+    The default because it is the one shape that describes itself.  The
+    command names its own variables, so the table's columns come from
+    the data rather than from a flag that has to be kept in step with
+    it, and a host that is missing one is a visible blank rather than a
+    row whose columns have all shifted along by one.
+
+    Blank lines and `#` comments are skipped, whitespace around the `=`
+    is not part of either side, and the first `=` is the separator so a
+    value may contain more.
+    """
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            return None, "not name=value: %r" % line[:60]
+        name, _, value = line.partition("=")
+        out[name.strip()] = value.strip()
+    return out, None
+
+
+def parse_json(text):
+    """A JSON object, one level deep.
+
+    Nesting has no column to go in, so an object or a list inside is
+    refused by name rather than landing as a Python repr that nothing
+    downstream can read.  A command with nested data can flatten it
+    itself -- it knows what the names should be, and this does not.
+    """
+    try:
+        obj = json.loads(text)
+    except ValueError as exc:
+        return None, "not JSON: %s" % exc
+    if not isinstance(obj, dict):
+        return None, ("JSON is a %s, and a row wants an object of "
+                      "name/value pairs" % type(obj).__name__)
+    out = {}
+    for name, value in obj.items():
+        if isinstance(value, (dict, list)):
+            return None, ("%r is a %s, and there is no column for one -- "
+                          "flatten it on the far side"
+                          % (name, type(value).__name__))
+        if value is None:
+            value = ""
+        elif value is True:
+            value = "true"
+        elif value is False:
+            value = "false"
+        out[str(name)] = value
+    return out, None
+
+
+def parse_row(text):
+    """A header line, then a values line: the command names its own columns.
+
+    Split on tabs where there is a tab, and on runs of whitespace where
+    there is not, so `printf 'a\\tb\\n1\\t2\\n'` and `echo a b; echo 1 2`
+    both work and a value with a space in it survives the first.
+    """
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) < 2:
+        return None, ("wanted a header line and a values line, got %d"
+                      % len(lines))
+    names = _split_fields(lines[0])
+    values = _split_fields(lines[1])
+    if len(names) != len(values):
+        return None, ("%d column name%s and %d value%s"
+                      % (len(names), "" if len(names) == 1 else "s",
+                         len(values), "" if len(values) == 1 else "s"))
+    return dict(zip(names, values)), None
+
+
+def parse_values(text, columns):
+    """Bare values in a fixed order, named here by --columns.
+
+    The one shape that is not self-describing, which is why the names
+    have to come from the command line: the far side prints `3 41 0.7`
+    and nothing in it says which is which.  A host that prints a
+    different number of values is refused rather than filled in, because
+    a short row here is not a missing value -- it is every column after
+    the gap holding the wrong one.
+    """
+    lines = [l for l in text.splitlines() if l.strip()]
+    if not lines:
+        return None, "no values"
+    values = _split_fields(lines[0])
+    if len(values) != len(columns):
+        return None, ("--columns names %d, the host printed %d: %s"
+                      % (len(columns), len(values),
+                         " ".join(values[:8])[:80]))
+    return dict(zip(columns, values)), None
+
+
+def _split_fields(line):
+    """Tabs where there are tabs, whitespace where there are not."""
+    return line.split("\t") if "\t" in line else line.split()
+
+
+def parse_variables(text, how, columns):
+    """(variables, error) -- one host's answer, in the shape it was promised."""
+    if how == "kv":
+        return parse_kv(text)
+    if how == "json":
+        return parse_json(text)
+    if how == "row":
+        return parse_row(text)
+    return parse_values(text, columns)
+
+
+def read_tsv_header(path):
+    """The columns a table already has, or None if it has none yet.
+
+    Read rather than assumed, because the whole value of appending to one
+    file is that column 4 means the same thing in row 2 and in row 900.
+    Rebuilding the header from this pass's data would quietly renumber
+    every column the first time a host failed to answer.
+    """
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            first = fh.readline()
+    except (OSError, IOError):
+        return None
+    first = first.rstrip("\n")
+    if not first:
+        return None
+    return first.split("\t")
+
+
+def tsv_columns(results, args):
+    """The header this table will have, and whether it is already on disk.
+
+    `--columns` decides it outright.  Otherwise it is the names the fleet
+    actually used, in the order they were first seen -- and host order is
+    fixed by the server list, so two runs over one list build the same
+    header.
+    """
+    existing = read_tsv_header(args.tsv) if args.tsv != "-" else None
+    if existing:
+        return existing, True
+    if args.columns:
+        return list(TSV_META) + list(args.columns), False
+    names = []
+    for r in results:
+        for name in r.variables:
+            if name not in names:
+                names.append(name)
+    return list(TSV_META) + names, False
+
+
+def write_tsv(results, args):
+    """One row per host that answered, appended under a stable header.
+
+    A host with no answer gets no row: an empty line under a timestamp
+    says the fleet reported zero, which is a different and much worse
+    claim than saying nothing.  Which hosts those were, and why, is in
+    the report and in `--csv`.
+    """
+    stamp = tsv_stamp()
+    for r in results:
+        if r.answer is None or not r.answer.strip():
+            continue
+        text = r.answer.decode("utf-8", "replace")
+        variables, err = parse_variables(text, args.parse, args.columns)
+        if err:
+            r.parse_error = err
+            continue
+        for name in variables:
+            if not VAR_NAME_RE.match(name):
+                r.parse_error = ("%r is not a name a column can have "
+                                 "(letters, digits, _ . -)" % name[:40])
+                variables = None
+                break
+        if variables is None:
+            continue
+        r.variables = variables
+
+    header, had_header = tsv_columns(results, args)
+    known = set(header)
+    rows = []
+    for r in results:
+        if not r.variables:
+            continue
+        r.unknown_vars = [n for n in r.variables if n not in known]
+        cells = {"date": stamp, "host": r.host.name}
+        cells.update(r.variables)
+        rows.append([_tsv_escape(cells.get(c, "")) for c in header])
+    if not rows:
+        return 0
+
+    if args.tsv == "-":
+        fh, close = sys.stdout, False
+    else:
+        try:
+            fh, close = io.open(args.tsv, "a", encoding="utf-8"), True
+        except (OSError, IOError) as exc:
+            raise LocalWriteError("cannot write %s: %s" % (args.tsv, exc))
+    try:
+        if not had_header:
+            fh.write("\t".join(header) + "\n")
+        for row in rows:
+            fh.write("\t".join(row) + "\n")
+        fh.flush()
+    finally:
+        if close:
+            fh.close()
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
 # A pass, and passes
 # ---------------------------------------------------------------------------
 
@@ -2336,7 +2785,7 @@ def report_pass(args, results, elapsed, compact=False):
     sys.stdout.flush()
 
 
-def run_repeating(args, hosts):
+def run_repeating(args, hosts, relay=None):
     """A pass, a wait, another pass, until something says stop.
 
     The wait is between passes rather than a period, so a pass that runs
@@ -2377,9 +2826,32 @@ def run_repeating(args, hosts):
     worst = 0
     while True:
         args.passno += 1
+        if relay is not None:
+            # A pass is one round trip through the jump box, and the
+            # timer stays on this side: a daemon looping over there would
+            # hold one connection open for hours and hand back nothing
+            # until it ended.
+            t0 = time.monotonic()
+            if run_relay(args, hosts, relay):
+                worst = 1
+            elapsed = time.monotonic() - t0
+            if stop.is_set():
+                break
+            if args.passes and args.passno >= args.passes:
+                break
+            if elapsed > args.every:
+                note("that pass took %.1fs, longer than --every %s: the "
+                     "next one starts now"
+                     % (elapsed, fmt_interval(args.every)), args.quiet)
+                continue
+            if stop.wait(args.every):
+                break
+            continue
         results, elapsed = one_pass(args, hosts)
         if args.csv is not None:
             write_csv(results, args, args.csv, append=args.passno > 1)
+        if args.tsv is not None:
+            write_tsv(results, args)
         report_pass(args, results, elapsed, compact=True)
         if pass_failed(args, results):
             worst = 1
@@ -2402,6 +2874,334 @@ def run_repeating(args, hosts):
     # A run that was asked to stop did what it was asked. Only a run that
     # finished its --passes reports on what those passes found.
     return 0 if hits else worst
+
+
+# ---------------------------------------------------------------------------
+# A jump box
+# ---------------------------------------------------------------------------
+#
+# The fleet is behind a bastion: A can reach B, and only B can reach C-Z.
+#
+# The tunnelling answer is `ssh -J`, and it works -- but it needs the
+# jump to be configured, it opens one connection per target across the
+# A-B link, and every byte of forty hosts' output crosses that link
+# separately.  This is the other answer, and the one that depends on no
+# configuration at all: send *this file* to B, run the whole collection
+# there, and bring the result back in one piece.
+#
+#     A  --ssh-->  B  --ssh--> C, D, E ... Z
+#        <--tar--     <--------
+#
+# B needs a Python and a shell.  It does not need dredge installed, an
+# agent, a package, a cron entry or a line of configuration, because the
+# copy that runs there is the copy that was running here, sent over the
+# same connection that carries the answer back.  Nothing is left behind:
+# the spool is a known path rather than a `mktemp -d` precisely so that
+# it can be removed even when the run it belonged to was killed.
+#
+# The A-B link carries one transfer instead of forty, which is the whole
+# reason to prefer this over a tunnel when that link is the slow one.
+# The cost is honest and worth saying out loud: the collection exists on
+# B, in the clear, for as long as the run lasts.  On a bastion somebody
+# else owns, that is a disclosure, and `--via`-style tunnelling is the
+# shape that does not make it.
+
+RELAY_SPOOL = "dredge-relay"
+
+# The copy of this file and the server list travel on stdin, as a tar --
+# not as an argument.  This file is three thousand lines, and base64 of
+# it in an argv is past ARG_MAX before it ever reaches ssh: the local
+# exec fails with "Argument list too long" and the fleet is never
+# contacted.  stdin has no such ceiling, and tar is already the shape
+# the answer comes back in.
+_RELAY_SCRIPT = r'''
+spool=%(spool)s
+rm -rf "$spool" 2>/dev/null
+mkdir -p "$spool" || { echo "dredge: cannot make $spool" >&2; exit 7; }
+cleanup() { [ -n "%(keep)s" ] || rm -rf "$spool"; }
+trap cleanup EXIT INT TERM
+cd "$spool" || exit 7
+base64 -d | tar -xf - || {
+  echo "dredge: cannot unpack the copy sent to this host" >&2; exit 7; }
+[ -f dredge.py ] && [ -f servers ] || {
+  echo "dredge: the copy sent to this host did not arrive whole" >&2
+  exit 7; }
+PY=%(python)s
+[ -n "$PY" ] || PY=$(command -v python3 2>/dev/null) \
+             || PY=$(command -v python 2>/dev/null)
+[ -n "$PY" ] || {
+  echo "dredge: no python3 on this host, and the relay runs dredge here" >&2
+  exit 6; }
+mkdir -p collect
+"$PY" dredge.py %(args)s --servers servers -d collect \
+      > report 2>errors
+echo $? > status
+tar -cf - collect report errors status 2>/dev/null
+'''
+
+
+def relay_remote_argv(args):
+    """The run B is asked to do: this one, minus the parts that are A's.
+
+    Rebuilt from the parsed options rather than by filtering the original
+    argv, because `--tag=x` and `--tag x` are the same intent spelled two
+    ways and a filter has to know both.  What is left out is as
+    deliberate as what is kept:
+
+      --relay*        B is where this is running; it does not relay on.
+      --daemon,       the timer stays here.  A pass is a round trip, and
+      --every,        a daemon that looped on B would hold one connection
+      --passes        open for hours and hand back nothing until it ended.
+      -d, --servers   rewritten to the spool, by the script.
+      --csv, --tsv    written into the spool and brought back, so that
+                      the table A keeps is A's and not one more thing
+                      left on the bastion.
+    """
+    out = []
+    if args.cmd:
+        out += ["--cmd", args.cmd]
+    else:
+        out += [args.path]
+    for flag, value in (("--tag", args.tag), ("--suffix", args.suffix),
+                        ("--since", args.since), ("--user", args.user),
+                        ("--ssh", args.ssh), ("--parse", args.parse)):
+        if value:
+            out += [flag, str(value)]
+    for flag, value in (("--head", args.head), ("--tail", args.tail),
+                        ("--max-bytes", args.max_bytes),
+                        ("--max-files", args.max_files),
+                        ("--jobs", args.jobs), ("--timeout", args.timeout)):
+        if value is not None:
+            out += [flag, str(value)]
+    for flag, on in (("--append", args.append), ("--prepend", args.prepend),
+                     ("--mark", args.mark)):
+        if on:
+            out += [flag]
+    if args.columns:
+        out += ["--columns", ",".join(args.columns)]
+    # Into the collection directory, because that is what the tar
+    # carries home. An artifact can never collide with these: every
+    # collected name has a `~` in it, and neither of these does.
+    if args.csv is not None:
+        out += ["--csv", "collect/relay.csv"]
+    if args.tsv is not None:
+        out += ["--tsv", "collect/relay.tsv"]
+    return out
+
+
+def relay_payload(hosts):
+    """This file and the server list, as a tar, base64'd for stdin.
+
+    The list is sent already expanded -- `web[01-40]` became forty names
+    here, and the names are the ones this side chose -- so the jump box
+    collects from exactly the fleet that was asked for rather than
+    re-expanding a range against whatever its own idea of the syntax is.
+    """
+    with io.open(os.path.abspath(__file__), "rb") as fh:
+        source = fh.read()
+    listing = "".join("%s=%s%s\n"
+                      % (h.name, h.addr, ":%d" % h.port if h.port else "")
+                      for h in hosts).encode("utf-8")
+    buf = io.BytesIO()
+    tar = tarfile.open(fileobj=buf, mode="w")
+    for name, data in (("dredge.py", source), ("servers", listing)):
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mode = 0o600
+        info.mtime = int(time.time())
+        tar.addfile(info, io.BytesIO(data))
+    tar.close()
+    return base64.b64encode(buf.getvalue())
+
+
+def relay_command(args):
+    """The one script B is sent: unpack, run, hand back, clean up."""
+    remote = " ".join(shlex.quote(a) for a in relay_remote_argv(args))
+    return _RELAY_SCRIPT % {
+        "spool": shlex.quote(args.relay_dir),
+        "keep": "1" if args.keep_relay else "",
+        "python": shlex.quote(args.relay_python or ""),
+        "args": remote,
+    }
+
+
+def _relay_sweep(args, relay):
+    """Take the spool off B, whatever happened to the run that made it.
+
+    The trap on the far side covers an ordinary end and an ordinary
+    signal.  It does not cover the one that matters here: `--timeout`
+    kills the session with SIGKILL, and a killed shell runs no trap.  A
+    known path rather than a `mktemp -d` is what makes this possible at
+    all -- there is something to name.
+    """
+    if args.keep_relay:
+        return
+    try:
+        p = subprocess.Popen(
+            ssh_argv(args, relay, "rm -rf %s" % shlex.quote(args.relay_dir)),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+        p.wait(timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        # Best effort by definition: the run's answer is already home,
+        # and a bastion that cannot be reached to tidy up is not a
+        # reason to fail the collection that succeeded.
+        pass
+
+
+class RelayResult(object):
+    """What came back through the jump box."""
+
+    __slots__ = ("status", "report", "errors", "files", "bytes", "detail")
+
+    def __init__(self):
+        self.status = None
+        self.report = ""
+        self.errors = ""
+        self.files = 0
+        self.bytes = 0
+        self.detail = ""
+
+
+def _unpack_relay(args, stream, rr):
+    """Land B's tar here: the collection into -d, the rest in hand."""
+    try:
+        tar = tarfile.open(fileobj=stream, mode="r|*")
+    except tarfile.ReadError:
+        rr.detail = "the jump box sent nothing back"
+        return
+    try:
+        for member in tar:
+            if not member.isfile():
+                continue
+            fh = tar.extractfile(member)
+            if fh is None:
+                continue
+            name = _clean_relpath(member.name)
+            if name == "status":
+                raw = fh.read().decode("ascii", "replace").strip()
+                rr.status = int(raw) if raw.isdigit() else raw
+            elif name == "report":
+                rr.report = fh.read().decode("utf-8", "replace")
+            elif name == "errors":
+                rr.errors = fh.read().decode("utf-8", "replace")
+            elif name.startswith("collect/"):
+                _land_relay_file(args, name[len("collect/"):], fh.read(), rr)
+    finally:
+        try:
+            tar.close()
+        except Exception:                          # noqa: BLE001 - reported
+            pass
+
+
+def _land_relay_file(args, rel, data, rr):
+    """One collected file, or one of the tables, put where A wants it.
+
+    The names B built are the names A would have built -- same tool,
+    same tag, same fold -- so the collection lands under `-d` unchanged
+    and `grep -l oom *` reads the same as it would have without a jump
+    box in the way.  The tables are the exception: they belong wherever
+    `--csv` and `--tsv` named, which is a path on A.
+    """
+    if not rel:
+        return
+    if rel == "relay.csv" and args.csv is not None:
+        _append_table(args.csv, data, header_once=True)
+        return
+    if rel == "relay.tsv" and args.tsv is not None:
+        _append_table(args.tsv, data, header_once=True)
+        return
+    where = os.path.join(args.dir, rel.replace("/", FLAT_SEP))
+    d = os.path.dirname(where)
+    if d and not os.path.isdir(d):
+        try:
+            os.makedirs(d)
+        except OSError as exc:
+            raise LocalWriteError("cannot make %s: %s" % (d, exc))
+    tmp = "%s.dredge.%d" % (where, os.getpid())
+    try:
+        with io.open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, where)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise LocalWriteError("cannot write %s: %s" % (where, exc))
+    rr.files += 1
+    rr.bytes += len(data)
+
+
+def _append_table(path, data, header_once=True):
+    """Add B's rows to A's table, and its header only if A has none.
+
+    B wrote a table of its own with a header on top.  Appending that
+    header into a file that already has one would put a row of column
+    names in the middle of the data, where a reader takes it for a
+    reading -- so it goes down once, the first time, and is dropped on
+    every pass after.
+    """
+    if path in (None, "-"):
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        return
+    text = data.decode("utf-8", "replace")
+    exists = os.path.exists(path) and os.path.getsize(path) > 0
+    if exists and header_once:
+        lines = text.split("\n", 1)
+        text = lines[1] if len(lines) > 1 else ""
+    if not text:
+        return
+    with io.open(path, "a", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def run_relay(args, hosts, relay):
+    """One round trip through the jump box, start to finish."""
+    rr = RelayResult()
+    t0 = time.monotonic()
+
+    def consume(stream, _r):
+        _unpack_relay(args, stream, rr)
+
+    result = _run(args, relay, relay_command(args), consume,
+                  send=relay_payload(hosts))
+    rr.detail = rr.detail or result.detail
+    _relay_sweep(args, relay)
+    elapsed = time.monotonic() - t0
+
+    if result.outcome != OK and rr.status is None:
+        sys.stdout.write(
+            "%s -- %s via %s\n        the jump box itself did not answer: "
+            "%s (%s)\n"
+            % (PROG, args.cmd if args.cmd else args.path, relay.name,
+               result.detail or "?", result.outcome))
+        for line in (result.remote_says or [])[:3]:
+            sys.stdout.write("        %s\n" % line[:120])
+        sys.stdout.flush()
+        return 1
+
+    if not args.quiet or rr.status not in (0, None):
+        sys.stdout.write("%s -- %d host%s via %s, %d file%s (%s) in %.1fs\n"
+                         % (PROG, len(hosts), "" if len(hosts) == 1 else "s",
+                            relay.name, rr.files,
+                            "" if rr.files == 1 else "s",
+                            fmt_bytes(rr.bytes), elapsed))
+        # B's own report, verbatim and indented: it is the report of the
+        # run that actually happened, and rewriting it here would be one
+        # more place for the two to disagree.
+        for line in rr.report.splitlines():
+            sys.stdout.write("  %s\n" % line if line else "\n")
+        for line in rr.errors.splitlines()[:10]:
+            sys.stdout.write("  ! %s\n" % line[:150])
+        sys.stdout.flush()
+    if rr.status is None:
+        sys.stdout.write("%s: the jump box ran but sent no exit status back"
+                         "\n" % PROG)
+        return 1
+    return 1 if rr.status else 0
 
 
 # ---------------------------------------------------------------------------
@@ -2459,6 +3259,37 @@ def build_parser():
     p.add_argument("--user", default=_env("USER"))
     p.add_argument("--ssh", default=_env("SSH", "ssh"))
     p.add_argument("--csv", nargs="?", const="-", metavar="PATH")
+    p.add_argument("--tsv", nargs="?", const="-", metavar="PATH",
+                   default=_env("TSV"),
+                   help="append a row per host to a TSV: the time of the "
+                        "pass, the host, then the variables its command "
+                        "printed")
+    p.add_argument("--parse", metavar="HOW", default=_env("PARSE", "kv"),
+                   choices=("kv", "json", "row", "values"),
+                   help="the shape the command prints its variables in: "
+                        "kv (name=value, the default), json, row (a "
+                        "header line then a values line), or values "
+                        "(bare values, named by --columns)")
+    p.add_argument("--columns", metavar="A,B,C", default=_env("COLUMNS"),
+                   help="name the variable columns, in order; required "
+                        "by --parse values and optional elsewhere, where "
+                        "it pins the header rather than taking it from "
+                        "what the fleet happened to say")
+    p.add_argument("--relay", metavar="HOST", default=_env("RELAY"),
+                   help="a jump box: send this file to HOST, run the whole "
+                        "collection from there, and bring it back")
+    p.add_argument("--relay-dir", metavar="DIR",
+                   default=_env("RELAY_DIR"),
+                   help="where the copy and the collection live on the "
+                        "jump box while the run lasts (default: a path "
+                        "under /var/tmp named for this run)")
+    p.add_argument("--relay-python", metavar="PY",
+                   default=_env("RELAY_PYTHON"),
+                   help="the python to run it with on the jump box "
+                        "(default: python3, then python)")
+    p.add_argument("--keep-relay", action="store_true",
+                   help="leave the spool on the jump box instead of "
+                        "removing it -- for looking at what went wrong")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--quiet", action="store_true")
     return p
@@ -2513,6 +3344,43 @@ def main(argv=None):
         die("--since selects among files by age, and --cmd has no files to "
             "select from -- it has one command and one answer")
     args.tag = args.tag or (default_tag(args.cmd) if args.cmd else None)
+    if args.tsv is not None:
+        # The table is a row of *variables*, and a file has none: it has
+        # bytes. What produces named values is a command, so that is what
+        # this is tied to rather than being quietly ignored for a path.
+        if not args.cmd:
+            die("--tsv makes a table out of the variables a command "
+                "prints, and a PATH has none -- use --cmd to run "
+                "something that prints them")
+        args.columns = [c.strip() for c in args.columns.split(",")
+                        if c.strip()] if args.columns else []
+        for name in args.columns:
+            if not VAR_NAME_RE.match(name):
+                die("--columns has a name a column cannot have: %r "
+                    "(letters, digits, _ . -)" % name)
+        if args.parse == "values" and not args.columns:
+            die("--parse values is bare values in a fixed order and "
+                "nothing in them says which is which: name them with "
+                "--columns a,b,c")
+        for name in args.columns:
+            if name in TSV_META:
+                die("--columns cannot name %r: the table already has that "
+                    "column, in front of the variables" % name)
+        # --follow brings back what was *added* since the last pass, and
+        # a row is every variable this pass, not the ones that moved.
+        # Under --daemon the two would silently disagree -- a pass where
+        # nothing changed would write no row at all, leaving a gap in the
+        # series that looks exactly like a host that was down.
+        if args.follow:
+            die("--tsv wants the whole answer every pass and --follow "
+                "brings back only what was added since the last one: a "
+                "pass where nothing changed would write no row, which "
+                "reads as a host that was down.\n"
+                "       --daemon --cmd with --tsv repeats the command "
+                "instead, which is what a time series of variables "
+                "wants.")
+    else:
+        args.columns = []
     if args.suffix is not None:
         cleaned = _clean_suffix(args.suffix)
         if not cleaned:
@@ -2527,7 +3395,7 @@ def main(argv=None):
     # A daemon that re-fetched every file in full every five minutes would
     # be a denial of service against the fleet it is watching, so the
     # timer brings the incremental collection with it.
-    if args.daemon:
+    if args.daemon and args.tsv is None:
         args.follow = True
     if args.follow and args.head:
         die("--head takes the first N lines of a file, which never change, "
@@ -2560,6 +3428,32 @@ def main(argv=None):
     if args.timeout <= 0:
         die("--timeout wants a positive number of seconds, got %s"
             % args.timeout)
+    if args.relay:
+        # The marks a --follow run resumes from would live on the jump
+        # box, in a spool that is removed when the run ends -- so every
+        # pass would be a first sight, and the whole collection would
+        # cross the link again each time.  Keeping the spool instead
+        # (--keep-relay) makes the marks survive but leaves the fleet's
+        # logs on the bastion between runs, which is the one thing a
+        # bastion should not be accumulating.
+        if args.daemon and args.tsv is None:
+            die("--daemon repeats a --follow pass, and --relay cannot "
+                "resume one: the marks live in a spool on the jump box "
+                "that is removed when the run ends, so every pass would "
+                "be a first sight and would carry the whole collection "
+                "again.\n"
+                "       --daemon --cmd with --tsv repeats the command "
+                "instead, and that works through a relay.")
+        if args.follow:
+            die("--follow resumes from marks, and through --relay those "
+                "marks live in a spool on the jump box that is removed "
+                "when the run ends -- so every pass would be a first "
+                "sight and would carry the whole collection again.\n"
+                "       Run --follow from a box that can reach the fleet, "
+                "or collect through the relay without it.")
+        if args.relay_python and "/" not in args.relay_python:
+            die("--relay-python wants the path to a python on the jump "
+                "box, got %r" % args.relay_python)
     if args.mark and not (args.append or args.prepend):
         die("--mark writes a line where old meets new, so it needs "
             "--append or --prepend")
@@ -2597,10 +3491,24 @@ def main(argv=None):
     # Drawn fresh per run and never from the payload: a frame the far side
     # could guess is a frame the far side could forge.
     args.mark_token = "===dredge-%016x" % random.getrandbits(64)
+    if args.relay and not args.relay_dir:
+        # Named rather than mktemp'd, so that a run killed by --timeout
+        # still leaves something this side knows how to remove.
+        args.relay_dir = "/var/tmp/%s-%s" % (RELAY_SPOOL,
+                                             args.mark_token[-16:])
 
     hosts = collect_hosts(args)
 
     if args.dry_run:
+        if args.relay:
+            sys.stdout.write("# %d host(s) via %s: %s\n"
+                             % (len(hosts), args.relay,
+                                " ".join(h.name for h in hosts[:8])
+                                + (" ..." if len(hosts) > 8 else "")))
+            sys.stdout.write("# on the jump box, over ssh (this file and "
+                             "the server list arrive on stdin):\n%s"
+                             % relay_command(args))
+            return 0
         if args.cmd and args.follow:
             cmd = remote_cmd_follow_command(args, args.mark_token, None)
         elif args.cmd:
@@ -2626,6 +3534,15 @@ def main(argv=None):
         # refuse to run because somebody else is holding the marks.
         args.marks = Marks.load(args.state)
 
+    if args.relay:
+        # One host on this side, however many there are on the other: the
+        # fan-out is B's to do, and A's connection count is one.
+        relay = parse_host_token(args.relay)
+        if args.every:
+            return run_repeating(args, hosts, relay=relay)
+        args.passno = 1
+        return run_relay(args, hosts, relay)
+
     if args.every:
         return run_repeating(args, hosts)
 
@@ -2633,6 +3550,10 @@ def main(argv=None):
     results, elapsed = one_pass(args, hosts)
     if args.csv is not None:
         write_csv(results, args, args.csv)
+    # Before the report, because parsing is where a host stops having a
+    # row and starts having a finding, and the report is what says so.
+    if args.tsv is not None:
+        write_tsv(results, args)
     report_pass(args, results, elapsed)
     # A ceiling that was hit, or a name that was refused, means what came
     # back is not what was asked for -- which is the definition of

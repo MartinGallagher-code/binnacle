@@ -8,6 +8,127 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`dredge --relay` runs the collection from a jump box.** The fleet is
+  behind a bastion: this box can reach B, and only B can reach C-Z.
+
+  ```text
+  A  --ssh-->  B  --ssh--> C, D, E ... Z
+     <--tar--     <--------
+  ```
+
+  The tunnelling answer is `ssh -J`, and it works today through `--ssh`.
+  This is the other answer, and the one that **depends on no
+  configuration**: `--relay B` sends *this file* to B, runs the whole
+  collection from there, and brings it back. B needs a Python and a
+  shell and nothing else -- no dredge installed, no agent, no package,
+  no cron entry, no line of config -- because the copy that runs there
+  is the copy that was running here, sent over the same connection that
+  carries the answer back.
+
+  One transfer crosses the A-B link instead of forty, which is the
+  reason to prefer this over a tunnel when that link is the slow one.
+  The fan-out, and the connections it opens, happen on B.
+
+  The copy and the server list travel on **stdin**, as a tar. This file
+  is three thousand lines and base64 of it in an argv is past `ARG_MAX`
+  before ssh ever sees it -- the local exec fails with "Argument list
+  too long" and the fleet is never contacted. The list goes over already
+  expanded, so B collects from exactly the fleet that was asked for here
+  rather than re-expanding `web[01-40]` against its own idea of the
+  syntax. What comes back lands under the names dredge would have built
+  without a jump box in the way, so `grep -l oom *` reads the same
+  either way.
+
+  **Nothing is left behind.** The spool is a named path rather than a
+  `mktemp -d`, specifically so that it can be removed even when the run
+  that made it was killed -- `--timeout` ends the session with SIGKILL
+  and a killed shell runs no `trap`, so there is a sweep from this side
+  as well as the trap on that one. `--keep-relay` leaves it, for when
+  the question is what went wrong over there.
+
+  The far side's report is the report: the run that actually happened is
+  the one over there, so it is shown verbatim and indented rather than
+  rewritten here, and its exit status is this run's exit status.
+
+  The cost is worth saying plainly: the collection exists on B, in the
+  clear, for as long as the run lasts. On a bastion somebody else owns
+  that is a disclosure, and `--ssh 'ssh -J bastion'` is the shape that
+  does not make it.
+
+  `--follow` is refused through a relay -- its marks would live in the
+  spool, which is removed when the run ends, so every pass would be a
+  first sight and would carry the whole collection again. `--daemon`
+  with `--cmd` and `--tsv` repeats the command rather than resuming a
+  file, and that works: the timer stays on this side, one round trip per
+  pass. `DREDGE_RELAY`, `DREDGE_RELAY_DIR` and `DREDGE_RELAY_PYTHON` set
+  the three.
+
+- **`dredge --tsv` makes a table out of what the fleet said.** `--csv`
+  answers "did the collection work" -- a row per file, how big it was,
+  how it went. This answers the other question, the one you pointed the
+  tool at the fleet to ask:
+
+  ```text
+  date                   host    load1   procs
+  2026-09-18T09:14:02    web01   0.41    212
+  2026-09-18T09:14:02    web02   1.93    318
+  ```
+
+  One row per host per pass -- the time the pass ran, the host it came
+  from, then a column per variable its command printed -- appended to one
+  file across runs. That is the shape a week of passes has to have for a
+  spreadsheet, a plot or an `awk` one-liner to read it as a time series
+  rather than as forty files.
+
+  The date is the clock *here*, `%Y-%m-%dT%H:%M:%S`, local, no offset and
+  no fraction, sortable as text. Every row in a pass carries the same
+  stamp however far apart the hosts' own clocks are. `skew` is the
+  instrument for the question of whose clock is wrong, and this column
+  deliberately does not pretend to answer it.
+
+  `--parse` says what shape the variables arrive in, because different
+  probes already speak different ones: `kv` (`name=value` per line),
+  `json` (one level deep -- nesting has no column to go in and is refused
+  by name), `row` (the command prints its own header line, then a values
+  line), and `values` (bare, in a fixed order). `kv` is the default
+  because it is the one shape that describes itself: the columns come
+  from the data rather than from a flag that has to be kept in step with
+  it. `values` is refused without `--columns`, since nothing in
+  `3 41 0.7` says which is which, and a host that prints a different
+  *number* of them is refused rather than filled in -- a short row there
+  is not a missing value, it is every column after the gap holding the
+  wrong one.
+
+  **The header does not move.** It is written when the file is created
+  and every row after it is counted from it; rebuilding it each pass
+  would renumber every column the first time a host answered differently,
+  and the week of rows behind it would quietly start meaning something
+  else. A name that appears later therefore has nowhere to go, and says
+  so as a `NEWVAR` finding rather than being dropped. `--columns` pins
+  the header up front, which is how you leave room for a variable nothing
+  is printing yet.
+
+  A variable a host does not have is an empty cell. A host whose answer
+  will not parse gets no row and an `UNPARSED` finding naming it and what
+  was wrong with what it printed -- a host quietly missing from a table
+  reads as a machine that was fine -- and its answer is still collected
+  whole either way. A host that printed nothing gets no row for the same
+  reason: an empty line under a timestamp claims the fleet reported zero,
+  which is a different and much worse claim than saying nothing. Values
+  are escaped rather than truncated, because a tab ends a column and a
+  newline ends a row.
+
+  `--daemon` normally implies `--follow` so a timer cannot re-fetch every
+  file in full every five minutes. With `--tsv` it does not: a table
+  wants the whole answer each pass, and re-running a command is not a
+  re-transfer. `--follow` and `--tsv` together are refused outright --
+  a pass where nothing changed would write no row, and a gap in the
+  series reads exactly like a host that was down.
+
+  `DREDGE_TSV`, `DREDGE_PARSE` and `DREDGE_COLUMNS` set the three.
+
+### Added
+
 - **`dredge --follow` is a remote tail.** Each pass brings back only what
   was added since the last one: the offset a file was left at travels to
   the far side, which decides -- per file, with `stat` -- between *new*,

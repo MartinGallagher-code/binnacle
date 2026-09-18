@@ -825,6 +825,318 @@ t_head_and_tail_cut_a_commands_output_too() {
     assert_eq "$(tr '\n' '|' < "h2/printf~web01")" "a|"
 }
 
+# --- --tsv: a table of what the fleet said ---------------------------------
+
+t_a_table_has_a_date_a_host_and_the_variables() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "load1=0.4"; echo "procs=212"' -S web01,web02 -d out \
+       --tsv m.tsv --quiet
+    assert_status $? 0
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\tload1\tprocs')"
+    # A row per host, in the order the server list named them.
+    assert_eq "$(sed -n 2p m.tsv | cut -f2-)" "$(printf 'web01\t0.4\t212')"
+    assert_eq "$(sed -n 3p m.tsv | cut -f2-)" "$(printf 'web02\t0.4\t212')"
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "3"
+    # The date column is the one shape a spreadsheet and `sort` agree on.
+    stamp="$(sed -n 2p m.tsv | cut -f1)"
+    if ! printf '%s' "$stamp" | grep -Eq \
+        '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'; then
+        fail "date column is not yyyy-mm-ddThh:mm:ss: $stamp"
+    fi
+}
+
+t_a_second_run_appends_under_the_same_header() {
+    # The whole value of one file is that column 4 means the same thing in
+    # row 2 and in row 900.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"' -S web01 -d out --tsv m.tsv --quiet
+    dr --cmd 'echo "a=2"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "3"
+    assert_eq "$(grep -c '^date' m.tsv)" "1"
+    assert_eq "$(sed -n 3p m.tsv | cut -f3)" "2"
+}
+
+t_the_header_does_not_move_when_a_name_appears_later() {
+    # A header rebuilt from each pass would renumber every column the
+    # first time a host answered differently, and a week of rows behind
+    # it would quietly start meaning something else.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"; echo "b=2"' -S web01 -d out --tsv m.tsv --quiet
+    out="$(dr --cmd 'echo "a=9"; echo "b=8"; echo "c=7"' -S web01 -d out \
+           --tsv m.tsv 2>&1)"
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    assert_eq "$(sed -n 3p m.tsv | cut -f3,4)" "$(printf '9\t8')"
+    assert_contains "$out" "NEWVAR"
+    assert_contains "$out" "c"
+}
+
+t_a_missing_variable_is_a_blank_not_a_shift() {
+    seed
+    cd "$TEST_TMPDIR"
+    printf 'a=1\nb=2\n' > "$FAKE_ROOT/web01/vars"
+    printf 'a=3\n' > "$FAKE_ROOT/web02/vars"
+    dr --cmd 'cat vars' -S web01,web02 -d out --tsv m.tsv --quiet
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    # web02 has no b, so the cell is empty and `a` is still column 3.
+    assert_eq "$(sed -n 3p m.tsv | cut -f3)" "3"
+    assert_eq "$(sed -n 3p m.tsv | cut -f4)" ""
+}
+
+t_every_promised_shape_is_read() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "{\"a\": 1, \"b\": \"two\", \"c\": true}"' -S web01 \
+       -d j --tsv j.tsv --parse json --quiet
+    assert_eq "$(head -1 j.tsv)" "$(printf 'date\thost\ta\tb\tc')"
+    assert_eq "$(sed -n 2p j.tsv | cut -f3-)" "$(printf '1\ttwo\ttrue')"
+
+    dr --cmd 'printf "alpha\tbeta\n1\t2\n"' -S web01 -d r --tsv r.tsv \
+       --parse row --quiet
+    assert_eq "$(head -1 r.tsv)" "$(printf 'date\thost\talpha\tbeta')"
+    assert_eq "$(sed -n 2p r.tsv | cut -f3-)" "$(printf '1\t2')"
+
+    dr --cmd 'echo "3 41 0.7"' -S web01 -d v --tsv v.tsv --parse values \
+       --columns q,r,s --quiet
+    assert_eq "$(head -1 v.tsv)" "$(printf 'date\thost\tq\tr\ts')"
+    assert_eq "$(sed -n 2p v.tsv | cut -f3-)" "$(printf '3\t41\t0.7')"
+}
+
+t_an_answer_that_will_not_parse_is_a_finding_not_a_gap() {
+    # A host quietly missing from the table reads as a machine that was
+    # fine. Its answer is still collected -- only its row is missing.
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr --cmd 'echo "not kv at all"' -S web01 -d out --tsv m.tsv 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 0
+    assert_contains "$out" "UNPARSED"
+    assert_contains "$out" "web01"
+    assert_no_file "m.tsv"
+    # The raw answer is on disk either way.
+    assert_eq "$(cat out/echo~web01)" "not kv at all"
+}
+
+t_a_value_cannot_break_the_row_it_is_in() {
+    # A tab ends a column and a newline ends a row: either would turn one
+    # row into two, or shift every column after it.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'printf "note=a\tb\nx=1\n"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "2"
+    assert_eq "$(sed -n 2p m.tsv | cut -f3)" 'a\tb'
+    assert_eq "$(sed -n 2p m.tsv | cut -f4)" "1"
+}
+
+t_a_silent_host_gets_no_row() {
+    # An empty line under a timestamp says the fleet reported zero, which
+    # is a different and much worse claim than saying nothing.
+    seed
+    cd "$TEST_TMPDIR"
+    printf 'a=1\n' > "$FAKE_ROOT/web01/vars"
+    dr --cmd 'cat vars 2>/dev/null || true' -S web01,web02 -d out \
+       --tsv m.tsv --quiet
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "2"
+    assert_eq "$(sed -n 2p m.tsv | cut -f2)" "web01"
+}
+
+t_columns_pins_the_header_up_front() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "b=2"; echo "a=1"' -S web01 -d out --tsv m.tsv \
+       --columns a,b --quiet
+    # Named order, not the order the host happened to print them in.
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    assert_eq "$(sed -n 2p m.tsv | cut -f3,4)" "$(printf '1\t2')"
+}
+
+t_a_table_needs_a_command_and_a_whole_answer() {
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr logs/app.log -S web01 -d out --tsv m.tsv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "a PATH has none"
+
+    set +e
+    out="$(dr --cmd 'echo x' -S web01 -d out --tsv m.tsv --parse values 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--columns"
+
+    # --follow brings back what was added; a row is every variable.
+    set +e
+    out="$(dr --cmd 'echo x' -S web01 -d out --tsv m.tsv --follow 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "whole answer"
+
+    set +e
+    out="$(dr --cmd 'echo x' -S web01 -d out --tsv m.tsv --columns host 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "already has that column"
+}
+
+t_a_daemon_building_a_table_repeats_the_command() {
+    # --daemon implies --follow so a timer cannot re-fetch every file in
+    # full, but a table wants the whole answer each pass -- and re-running
+    # a command is not a re-transfer.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"' -S web01 -d out --tsv m.tsv --daemon --every 1s \
+       --passes 3 --quiet
+    assert_status $? 0
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "4"
+    assert_eq "$(grep -c '^date' m.tsv)" "1"
+}
+
+# --- --relay: a jump box ---------------------------------------------------
+#
+# jump01 stands in for B. The shim runs its "remote" command inside
+# $FAKE_ROOT/jump01, and the copy of dredge sent there fans out to web01
+# and web02 through the same shim -- so the two hops are real hops, with
+# a real unpack, a real inner run and a real tar coming home.
+
+relay_seed() {
+    seed
+    fake_host jump01
+}
+
+# The inner dredge needs the shim to reach the fleet, and a spool that
+# does not litter the machine running the tests.
+relay() {
+    dr --relay jump01 --ssh "$FAKE_BIN/ssh" \
+       --relay-dir "$TEST_TMPDIR/spool" "$@"
+}
+
+t_a_jump_box_runs_the_collection_and_sends_it_back() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'cat logs/app.log' -S web01,web02 -d out --quiet
+    assert_status $? 0
+    # The names are the ones this side would have built without a jump
+    # box in the way, so the next command reads the same either way.
+    assert_eq "$(cat out/cat~web01)" "hello from web01"
+    assert_eq "$(cat out/cat~web02)" "hello from web02"
+}
+
+t_a_jump_box_keeps_nothing_afterwards() {
+    # The whole point of sending the file rather than installing it.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo hi' -S web01 -d out --quiet
+    assert_no_file "spool"
+    assert_no_file "spool/dredge.py"
+}
+
+t_keep_relay_leaves_the_spool_to_look_at() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo hi' -S web01 -d out --keep-relay --quiet
+    assert_file_exists "spool/dredge.py"
+    assert_file_exists "spool/servers"
+    assert_file_exists "spool/report"
+}
+
+t_the_jump_box_gets_the_fleet_already_expanded() {
+    # `web[01-02]` is expanded here, by this side's idea of the syntax,
+    # so the far side collects from exactly the fleet that was asked for.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo hi' -S 'web[01-02]' -d out --keep-relay --quiet
+    assert_contains "$(cat spool/servers)" "web01"
+    assert_contains "$(cat spool/servers)" "web02"
+    assert_not_contains "$(cat spool/servers)" "["
+}
+
+t_the_far_sides_report_and_status_come_home() {
+    # The run that actually happened is the one over there, so its report
+    # is what is shown -- rewriting it here would be one more place for
+    # the two to disagree.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(relay --cmd 'echo before; exit 7' -S web01 -d out 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "via jump01"
+    assert_contains "$out" "NONZERO"
+    assert_contains "$out" "exit 7"
+    assert_eq "$(cat out/echo~web01)" "before"
+}
+
+t_a_table_built_over_there_lands_here() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo "a=1"; echo "b=2"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    assert_eq "$(sed -n 2p m.tsv | cut -f2-)" "$(printf 'web01\t1\t2')"
+    # A second pass appends to this side's table, header and all -- one
+    # header, not one per pass.
+    relay --cmd 'echo "a=3"; echo "b=4"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(grep -c '^date' m.tsv)" "1"
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "3"
+    # And the table is not left in the collection directory.
+    assert_no_file "out/relay.tsv"
+}
+
+t_a_jump_box_that_cannot_be_reached_says_so() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    : > "$FAKE_ROOT/jump01/.unreachable"
+    set +e
+    out="$(relay --cmd 'echo hi' -S web01 -d out 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "the jump box itself did not answer"
+}
+
+t_a_relay_cannot_resume_what_it_does_not_keep() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(relay logs/app.log -S web01 -d out --follow 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "marks"
+
+    set +e
+    out="$(relay --cmd 'echo hi' -S web01 -d out --daemon 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--tsv"
+}
+
+t_a_dry_run_through_a_jump_box_contacts_nothing() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    out="$(relay --cmd 'echo hi' -S web01 -d out --dry-run 2>&1)"
+    assert_status $? 0
+    assert_contains "$out" "via jump01"
+    assert_contains "$out" "base64 -d | tar -xf -"
+    assert_no_file "out"
+    assert_eq "$(wc -l < "$FAKE_SSH_LOG" | tr -d ' ')" "0"
+}
+
+t_a_file_comes_back_through_a_jump_box_too() {
+    # Not just --cmd: the tar transport works the same way over there.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay logs -S web01 -d out --quiet
+    assert_status $? 0
+    assert_file_exists "out/web01~logs~app.log"
+    assert_file_exists "out/web01~logs~sub~other.log"
+}
+
 echo "dredge"
 # --- a remote tail ---------------------------------------------------------
 #
@@ -1384,4 +1696,25 @@ run_test "a daemon outlives a dead host"       t_a_daemon_keeps_going_when_a_hos
 run_test "a daemon's csv has a row per pass"   t_the_csv_of_a_daemon_carries_a_row_per_pass
 run_test "an impossible interval is refused"   t_an_interval_that_cannot_mean_anything_is_refused
 run_test "an interval is spelled like --since" t_the_interval_is_spelled_the_way_since_is
+run_test "a table has date, host, variables"   t_a_table_has_a_date_a_host_and_the_variables
+run_test "a second run appends to it"         t_a_second_run_appends_under_the_same_header
+run_test "the header does not move"           t_the_header_does_not_move_when_a_name_appears_later
+run_test "a missing variable is a blank"      t_a_missing_variable_is_a_blank_not_a_shift
+run_test "every promised shape is read"       t_every_promised_shape_is_read
+run_test "an unreadable answer is a finding"  t_an_answer_that_will_not_parse_is_a_finding_not_a_gap
+run_test "a value cannot break its row"       t_a_value_cannot_break_the_row_it_is_in
+run_test "a silent host gets no row"          t_a_silent_host_gets_no_row
+run_test "--columns pins the header"          t_columns_pins_the_header_up_front
+run_test "a table needs a whole answer"       t_a_table_needs_a_command_and_a_whole_answer
+run_test "a daemon table repeats the command" t_a_daemon_building_a_table_repeats_the_command
+run_test "a jump box runs the collection"     t_a_jump_box_runs_the_collection_and_sends_it_back
+run_test "a jump box keeps nothing"           t_a_jump_box_keeps_nothing_afterwards
+run_test "--keep-relay leaves the spool"      t_keep_relay_leaves_the_spool_to_look_at
+run_test "the fleet goes over expanded"       t_the_jump_box_gets_the_fleet_already_expanded
+run_test "the far report and status come home" t_the_far_sides_report_and_status_come_home
+run_test "a table built over there lands here" t_a_table_built_over_there_lands_here
+run_test "an unreachable jump box says so"    t_a_jump_box_that_cannot_be_reached_says_so
+run_test "a relay cannot resume"              t_a_relay_cannot_resume_what_it_does_not_keep
+run_test "a dry run via a jump box is dry"    t_a_dry_run_through_a_jump_box_contacts_nothing
+run_test "a file comes back through it too"   t_a_file_comes_back_through_a_jump_box_too
 finish
