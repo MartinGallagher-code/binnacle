@@ -999,6 +999,144 @@ t_a_daemon_building_a_table_repeats_the_command() {
     assert_eq "$(grep -c '^date' m.tsv)" "1"
 }
 
+# --- --relay: a jump box ---------------------------------------------------
+#
+# jump01 stands in for B. The shim runs its "remote" command inside
+# $FAKE_ROOT/jump01, and the copy of dredge sent there fans out to web01
+# and web02 through the same shim -- so the two hops are real hops, with
+# a real unpack, a real inner run and a real tar coming home.
+
+relay_seed() {
+    seed
+    fake_host jump01
+}
+
+# The inner dredge needs the shim to reach the fleet, and a spool that
+# does not litter the machine running the tests.
+relay() {
+    dr --relay jump01 --ssh "$FAKE_BIN/ssh" \
+       --relay-dir "$TEST_TMPDIR/spool" "$@"
+}
+
+t_a_jump_box_runs_the_collection_and_sends_it_back() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'cat logs/app.log' -S web01,web02 -d out --quiet
+    assert_status $? 0
+    # The names are the ones this side would have built without a jump
+    # box in the way, so the next command reads the same either way.
+    assert_eq "$(cat out/cat~web01)" "hello from web01"
+    assert_eq "$(cat out/cat~web02)" "hello from web02"
+}
+
+t_a_jump_box_keeps_nothing_afterwards() {
+    # The whole point of sending the file rather than installing it.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo hi' -S web01 -d out --quiet
+    assert_no_file "spool"
+    assert_no_file "spool/dredge.py"
+}
+
+t_keep_relay_leaves_the_spool_to_look_at() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo hi' -S web01 -d out --keep-relay --quiet
+    assert_file_exists "spool/dredge.py"
+    assert_file_exists "spool/servers"
+    assert_file_exists "spool/report"
+}
+
+t_the_jump_box_gets_the_fleet_already_expanded() {
+    # `web[01-02]` is expanded here, by this side's idea of the syntax,
+    # so the far side collects from exactly the fleet that was asked for.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo hi' -S 'web[01-02]' -d out --keep-relay --quiet
+    assert_contains "$(cat spool/servers)" "web01"
+    assert_contains "$(cat spool/servers)" "web02"
+    assert_not_contains "$(cat spool/servers)" "["
+}
+
+t_the_far_sides_report_and_status_come_home() {
+    # The run that actually happened is the one over there, so its report
+    # is what is shown -- rewriting it here would be one more place for
+    # the two to disagree.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(relay --cmd 'echo before; exit 7' -S web01 -d out 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "via jump01"
+    assert_contains "$out" "NONZERO"
+    assert_contains "$out" "exit 7"
+    assert_eq "$(cat out/echo~web01)" "before"
+}
+
+t_a_table_built_over_there_lands_here() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay --cmd 'echo "a=1"; echo "b=2"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    assert_eq "$(sed -n 2p m.tsv | cut -f2-)" "$(printf 'web01\t1\t2')"
+    # A second pass appends to this side's table, header and all -- one
+    # header, not one per pass.
+    relay --cmd 'echo "a=3"; echo "b=4"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(grep -c '^date' m.tsv)" "1"
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "3"
+    # And the table is not left in the collection directory.
+    assert_no_file "out/relay.tsv"
+}
+
+t_a_jump_box_that_cannot_be_reached_says_so() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    : > "$FAKE_ROOT/jump01/.unreachable"
+    set +e
+    out="$(relay --cmd 'echo hi' -S web01 -d out 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "the jump box itself did not answer"
+}
+
+t_a_relay_cannot_resume_what_it_does_not_keep() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(relay logs/app.log -S web01 -d out --follow 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "marks"
+
+    set +e
+    out="$(relay --cmd 'echo hi' -S web01 -d out --daemon 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--tsv"
+}
+
+t_a_dry_run_through_a_jump_box_contacts_nothing() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    out="$(relay --cmd 'echo hi' -S web01 -d out --dry-run 2>&1)"
+    assert_status $? 0
+    assert_contains "$out" "via jump01"
+    assert_contains "$out" "base64 -d | tar -xf -"
+    assert_no_file "out"
+    assert_eq "$(wc -l < "$FAKE_SSH_LOG" | tr -d ' ')" "0"
+}
+
+t_a_file_comes_back_through_a_jump_box_too() {
+    # Not just --cmd: the tar transport works the same way over there.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    relay logs -S web01 -d out --quiet
+    assert_status $? 0
+    assert_file_exists "out/web01~logs~app.log"
+    assert_file_exists "out/web01~logs~sub~other.log"
+}
+
 echo "dredge"
 # --- a remote tail ---------------------------------------------------------
 #
@@ -1569,4 +1707,14 @@ run_test "a silent host gets no row"          t_a_silent_host_gets_no_row
 run_test "--columns pins the header"          t_columns_pins_the_header_up_front
 run_test "a table needs a whole answer"       t_a_table_needs_a_command_and_a_whole_answer
 run_test "a daemon table repeats the command" t_a_daemon_building_a_table_repeats_the_command
+run_test "a jump box runs the collection"     t_a_jump_box_runs_the_collection_and_sends_it_back
+run_test "a jump box keeps nothing"           t_a_jump_box_keeps_nothing_afterwards
+run_test "--keep-relay leaves the spool"      t_keep_relay_leaves_the_spool_to_look_at
+run_test "the fleet goes over expanded"       t_the_jump_box_gets_the_fleet_already_expanded
+run_test "the far report and status come home" t_the_far_sides_report_and_status_come_home
+run_test "a table built over there lands here" t_a_table_built_over_there_lands_here
+run_test "an unreachable jump box says so"    t_a_jump_box_that_cannot_be_reached_says_so
+run_test "a relay cannot resume"              t_a_relay_cannot_resume_what_it_does_not_keep
+run_test "a dry run via a jump box is dry"    t_a_dry_run_through_a_jump_box_contacts_nothing
+run_test "a file comes back through it too"   t_a_file_comes_back_through_a_jump_box_too
 finish

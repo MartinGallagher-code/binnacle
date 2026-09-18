@@ -8,6 +8,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`dredge --relay` runs the collection from a jump box.** The fleet is
+  behind a bastion: this box can reach B, and only B can reach C-Z.
+
+  ```text
+  A  --ssh-->  B  --ssh--> C, D, E ... Z
+     <--tar--     <--------
+  ```
+
+  The tunnelling answer is `ssh -J`, and it works today through `--ssh`.
+  This is the other answer, and the one that **depends on no
+  configuration**: `--relay B` sends *this file* to B, runs the whole
+  collection from there, and brings it back. B needs a Python and a
+  shell and nothing else -- no dredge installed, no agent, no package,
+  no cron entry, no line of config -- because the copy that runs there
+  is the copy that was running here, sent over the same connection that
+  carries the answer back.
+
+  One transfer crosses the A-B link instead of forty, which is the
+  reason to prefer this over a tunnel when that link is the slow one.
+  The fan-out, and the connections it opens, happen on B.
+
+  The copy and the server list travel on **stdin**, as a tar. This file
+  is three thousand lines and base64 of it in an argv is past `ARG_MAX`
+  before ssh ever sees it -- the local exec fails with "Argument list
+  too long" and the fleet is never contacted. The list goes over already
+  expanded, so B collects from exactly the fleet that was asked for here
+  rather than re-expanding `web[01-40]` against its own idea of the
+  syntax. What comes back lands under the names dredge would have built
+  without a jump box in the way, so `grep -l oom *` reads the same
+  either way.
+
+  **Nothing is left behind.** The spool is a named path rather than a
+  `mktemp -d`, specifically so that it can be removed even when the run
+  that made it was killed -- `--timeout` ends the session with SIGKILL
+  and a killed shell runs no `trap`, so there is a sweep from this side
+  as well as the trap on that one. `--keep-relay` leaves it, for when
+  the question is what went wrong over there.
+
+  The far side's report is the report: the run that actually happened is
+  the one over there, so it is shown verbatim and indented rather than
+  rewritten here, and its exit status is this run's exit status.
+
+  The cost is worth saying plainly: the collection exists on B, in the
+  clear, for as long as the run lasts. On a bastion somebody else owns
+  that is a disclosure, and `--ssh 'ssh -J bastion'` is the shape that
+  does not make it.
+
+  `--follow` is refused through a relay -- its marks would live in the
+  spool, which is removed when the run ends, so every pass would be a
+  first sight and would carry the whole collection again. `--daemon`
+  with `--cmd` and `--tsv` repeats the command rather than resuming a
+  file, and that works: the timer stays on this side, one round trip per
+  pass. `DREDGE_RELAY`, `DREDGE_RELAY_DIR` and `DREDGE_RELAY_PYTHON` set
+  the three.
+
 - **`dredge --tsv` makes a table out of what the fleet said.** `--csv`
   answers "did the collection work" -- a row per file, how big it was,
   how it went. This answers the other question, the one you pointed the

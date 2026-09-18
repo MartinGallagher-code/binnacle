@@ -604,6 +604,87 @@ re-transfer. `--follow` and `--tsv` together are refused outright — a pass
 where nothing changed would write no row, which reads as a host that was down.
 
 
+## A jump box
+
+The fleet is behind a bastion: **A** can reach **B**, and only B can reach
+**C–Z**.
+
+```bash
+dredge --cmd 'uptime' --servers hosts.txt --relay bastion -d out
+```
+
+```text
+A  --ssh-->  B  --ssh--> C, D, E ... Z
+   <--tar--     <--------
+```
+
+The tunnelling answer is `ssh -J`, and it works — `--ssh 'ssh -J bastion'`
+needs nothing from dredge at all. This is the other answer, and the one that
+**depends on no configuration**: `--relay` sends *this file* to B, runs the
+whole collection from there, and brings it back.
+
+B needs a Python and a shell. It does not need dredge installed, an agent, a
+package, a cron entry or a line of config, because the copy that runs there is
+the copy that was running here — sent over the same connection that carries
+the answer back, and removed when the run ends.
+
+One transfer crosses the A–B link instead of forty, which is the reason to
+prefer this over a tunnel when that link is the slow one. The fan-out, and the
+connections it opens, happen on B.
+
+The names the collection lands under are the ones dredge would have built
+without a jump box in the way, so `grep -l oom *` reads the same either way.
+The server list goes over **already expanded** — `web[01-40]` became forty
+names here — so B collects from exactly the fleet that was asked for rather
+than re-expanding a range against its own idea of the syntax.
+
+### What it leaves behind
+
+Nothing, by default. The spool is a **named path** rather than a `mktemp -d`,
+specifically so that it can be removed even when the run that made it was
+killed: `--timeout` ends the session with `SIGKILL`, and a killed shell runs no
+`trap`. `--keep-relay` leaves it, for when the question is what went wrong over
+there:
+
+```bash
+dredge --cmd 'uptime' --servers hosts.txt --relay bastion -d out --keep-relay
+# then: ssh bastion 'cat /var/tmp/dredge-relay-*/errors'
+```
+
+The cost is worth saying plainly: **the collection exists on B, in the clear,
+for as long as the run lasts.** On a bastion somebody else owns, that is a
+disclosure — and `--ssh 'ssh -J bastion'` is the shape that does not make it,
+because there the bytes pass through B's sshd encrypted end to end and B cannot
+read them.
+
+### The far side's report is the report
+
+The run that actually happened is the one over there, so its report is what is
+shown, indented under one line of this side's own. Rewriting it here would be
+one more place for the two to disagree. Its exit status is this run's exit
+status.
+
+```text
+dredge.py -- 12 hosts via bastion, 12 files (1.4MB) in 6.2s
+  dredge.py -- [uptime] uptime
+          12 files from 12 of 12 hosts, 1.4MB in 5.8s -> collect/
+```
+
+### What a relay cannot do
+
+[`--follow`](#a-remote-tail) is refused. Its marks would live in the spool,
+which is removed when the run ends, so every pass would be a first sight and
+would carry the whole collection again. `--daemon` with `--cmd` and
+[`--tsv`](#a-table-of-what-the-fleet-said) repeats the command rather than
+resuming a file, and that does work — the timer stays on this side, one round
+trip per pass:
+
+```bash
+dredge --cmd 'echo "load1=$(cut -d" " -f1 /proc/loadavg)"' \
+       --servers hosts.txt --relay bastion --tsv metrics.tsv \
+       --daemon --every 5m -d out
+```
+
 ## How it goes over the wire
 
 One ssh per host, and one round trip. A `find` on the far side selects the
@@ -713,6 +794,10 @@ not carry and nothing will bring back.
 | `--max-bytes N` / `--max-files N` | ceilings, per file and per host; hitting either is reported |
 | `--timeout S` | bounds the whole transfer per host (default 120s) |
 | `-j, --jobs N` | hosts contacted at once (default 20) |
+| `--relay HOST` | a jump box: send this file there, run the collection from there, bring it back |
+| `--relay-dir DIR` | where the copy and the collection live on the jump box while the run lasts |
+| `--relay-python P` | the python to run it with over there (default: `python3`, then `python`) |
+| `--keep-relay` | leave the spool on the jump box instead of removing it |
 | `--csv [PATH]` | one row per file |
 | `--tsv [PATH]` | a table: one row per host per pass, of the variables its command printed |
 | `--parse HOW` | the shape those variables arrive in: `kv` (default), `json`, `row`, `values` |
