@@ -825,6 +825,180 @@ t_head_and_tail_cut_a_commands_output_too() {
     assert_eq "$(tr '\n' '|' < "h2/printf~web01")" "a|"
 }
 
+# --- --tsv: a table of what the fleet said ---------------------------------
+
+t_a_table_has_a_date_a_host_and_the_variables() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "load1=0.4"; echo "procs=212"' -S web01,web02 -d out \
+       --tsv m.tsv --quiet
+    assert_status $? 0
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\tload1\tprocs')"
+    # A row per host, in the order the server list named them.
+    assert_eq "$(sed -n 2p m.tsv | cut -f2-)" "$(printf 'web01\t0.4\t212')"
+    assert_eq "$(sed -n 3p m.tsv | cut -f2-)" "$(printf 'web02\t0.4\t212')"
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "3"
+    # The date column is the one shape a spreadsheet and `sort` agree on.
+    stamp="$(sed -n 2p m.tsv | cut -f1)"
+    if ! printf '%s' "$stamp" | grep -Eq \
+        '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'; then
+        fail "date column is not yyyy-mm-ddThh:mm:ss: $stamp"
+    fi
+}
+
+t_a_second_run_appends_under_the_same_header() {
+    # The whole value of one file is that column 4 means the same thing in
+    # row 2 and in row 900.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"' -S web01 -d out --tsv m.tsv --quiet
+    dr --cmd 'echo "a=2"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "3"
+    assert_eq "$(grep -c '^date' m.tsv)" "1"
+    assert_eq "$(sed -n 3p m.tsv | cut -f3)" "2"
+}
+
+t_the_header_does_not_move_when_a_name_appears_later() {
+    # A header rebuilt from each pass would renumber every column the
+    # first time a host answered differently, and a week of rows behind
+    # it would quietly start meaning something else.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"; echo "b=2"' -S web01 -d out --tsv m.tsv --quiet
+    out="$(dr --cmd 'echo "a=9"; echo "b=8"; echo "c=7"' -S web01 -d out \
+           --tsv m.tsv 2>&1)"
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    assert_eq "$(sed -n 3p m.tsv | cut -f3,4)" "$(printf '9\t8')"
+    assert_contains "$out" "NEWVAR"
+    assert_contains "$out" "c"
+}
+
+t_a_missing_variable_is_a_blank_not_a_shift() {
+    seed
+    cd "$TEST_TMPDIR"
+    printf 'a=1\nb=2\n' > "$FAKE_ROOT/web01/vars"
+    printf 'a=3\n' > "$FAKE_ROOT/web02/vars"
+    dr --cmd 'cat vars' -S web01,web02 -d out --tsv m.tsv --quiet
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    # web02 has no b, so the cell is empty and `a` is still column 3.
+    assert_eq "$(sed -n 3p m.tsv | cut -f3)" "3"
+    assert_eq "$(sed -n 3p m.tsv | cut -f4)" ""
+}
+
+t_every_promised_shape_is_read() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "{\"a\": 1, \"b\": \"two\", \"c\": true}"' -S web01 \
+       -d j --tsv j.tsv --parse json --quiet
+    assert_eq "$(head -1 j.tsv)" "$(printf 'date\thost\ta\tb\tc')"
+    assert_eq "$(sed -n 2p j.tsv | cut -f3-)" "$(printf '1\ttwo\ttrue')"
+
+    dr --cmd 'printf "alpha\tbeta\n1\t2\n"' -S web01 -d r --tsv r.tsv \
+       --parse row --quiet
+    assert_eq "$(head -1 r.tsv)" "$(printf 'date\thost\talpha\tbeta')"
+    assert_eq "$(sed -n 2p r.tsv | cut -f3-)" "$(printf '1\t2')"
+
+    dr --cmd 'echo "3 41 0.7"' -S web01 -d v --tsv v.tsv --parse values \
+       --columns q,r,s --quiet
+    assert_eq "$(head -1 v.tsv)" "$(printf 'date\thost\tq\tr\ts')"
+    assert_eq "$(sed -n 2p v.tsv | cut -f3-)" "$(printf '3\t41\t0.7')"
+}
+
+t_an_answer_that_will_not_parse_is_a_finding_not_a_gap() {
+    # A host quietly missing from the table reads as a machine that was
+    # fine. Its answer is still collected -- only its row is missing.
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr --cmd 'echo "not kv at all"' -S web01 -d out --tsv m.tsv 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 0
+    assert_contains "$out" "UNPARSED"
+    assert_contains "$out" "web01"
+    assert_no_file "m.tsv"
+    # The raw answer is on disk either way.
+    assert_eq "$(cat out/echo~web01)" "not kv at all"
+}
+
+t_a_value_cannot_break_the_row_it_is_in() {
+    # A tab ends a column and a newline ends a row: either would turn one
+    # row into two, or shift every column after it.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'printf "note=a\tb\nx=1\n"' -S web01 -d out --tsv m.tsv --quiet
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "2"
+    assert_eq "$(sed -n 2p m.tsv | cut -f3)" 'a\tb'
+    assert_eq "$(sed -n 2p m.tsv | cut -f4)" "1"
+}
+
+t_a_silent_host_gets_no_row() {
+    # An empty line under a timestamp says the fleet reported zero, which
+    # is a different and much worse claim than saying nothing.
+    seed
+    cd "$TEST_TMPDIR"
+    printf 'a=1\n' > "$FAKE_ROOT/web01/vars"
+    dr --cmd 'cat vars 2>/dev/null || true' -S web01,web02 -d out \
+       --tsv m.tsv --quiet
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "2"
+    assert_eq "$(sed -n 2p m.tsv | cut -f2)" "web01"
+}
+
+t_columns_pins_the_header_up_front() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "b=2"; echo "a=1"' -S web01 -d out --tsv m.tsv \
+       --columns a,b --quiet
+    # Named order, not the order the host happened to print them in.
+    assert_eq "$(head -1 m.tsv)" "$(printf 'date\thost\ta\tb')"
+    assert_eq "$(sed -n 2p m.tsv | cut -f3,4)" "$(printf '1\t2')"
+}
+
+t_a_table_needs_a_command_and_a_whole_answer() {
+    seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr logs/app.log -S web01 -d out --tsv m.tsv 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "a PATH has none"
+
+    set +e
+    out="$(dr --cmd 'echo x' -S web01 -d out --tsv m.tsv --parse values 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "--columns"
+
+    # --follow brings back what was added; a row is every variable.
+    set +e
+    out="$(dr --cmd 'echo x' -S web01 -d out --tsv m.tsv --follow 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "whole answer"
+
+    set +e
+    out="$(dr --cmd 'echo x' -S web01 -d out --tsv m.tsv --columns host 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "already has that column"
+}
+
+t_a_daemon_building_a_table_repeats_the_command() {
+    # --daemon implies --follow so a timer cannot re-fetch every file in
+    # full, but a table wants the whole answer each pass -- and re-running
+    # a command is not a re-transfer.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"' -S web01 -d out --tsv m.tsv --daemon --every 1s \
+       --passes 3 --quiet
+    assert_status $? 0
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "4"
+    assert_eq "$(grep -c '^date' m.tsv)" "1"
+}
+
 echo "dredge"
 # --- a remote tail ---------------------------------------------------------
 #
@@ -1384,4 +1558,15 @@ run_test "a daemon outlives a dead host"       t_a_daemon_keeps_going_when_a_hos
 run_test "a daemon's csv has a row per pass"   t_the_csv_of_a_daemon_carries_a_row_per_pass
 run_test "an impossible interval is refused"   t_an_interval_that_cannot_mean_anything_is_refused
 run_test "an interval is spelled like --since" t_the_interval_is_spelled_the_way_since_is
+run_test "a table has date, host, variables"   t_a_table_has_a_date_a_host_and_the_variables
+run_test "a second run appends to it"         t_a_second_run_appends_under_the_same_header
+run_test "the header does not move"           t_the_header_does_not_move_when_a_name_appears_later
+run_test "a missing variable is a blank"      t_a_missing_variable_is_a_blank_not_a_shift
+run_test "every promised shape is read"       t_every_promised_shape_is_read
+run_test "an unreadable answer is a finding"  t_an_answer_that_will_not_parse_is_a_finding_not_a_gap
+run_test "a value cannot break its row"       t_a_value_cannot_break_the_row_it_is_in
+run_test "a silent host gets no row"          t_a_silent_host_gets_no_row
+run_test "--columns pins the header"          t_columns_pins_the_header_up_front
+run_test "a table needs a whole answer"       t_a_table_needs_a_command_and_a_whole_answer
+run_test "a daemon table repeats the command" t_a_daemon_building_a_table_repeats_the_command
 finish

@@ -505,6 +505,105 @@ unless something went wrong. A failed host is still a finding and still
 printed, because a daemon that swallows an unreachable host is a daemon you
 cannot leave running.
 
+## A table of what the fleet said
+
+`--csv` answers "did the collection work" — a row per file, how big it was,
+how it went. `--tsv` answers the other question, the one you actually pointed
+dredge at the fleet to ask: **what were the numbers?**
+
+```bash
+dredge --cmd 'echo "load1=$(cut -d" " -f1 /proc/loadavg)"
+              echo "procs=$(ls /proc | grep -c "^[0-9]")"' \
+       --servers hosts.txt --tsv metrics.tsv
+```
+
+```text
+date                   host    load1   procs
+2026-09-18T09:14:02    web01   0.41    212
+2026-09-18T09:14:02    web02   1.93    318
+```
+
+One row per host per pass: the time the pass ran, the host it came from, then
+a column per variable. Appended to one file across runs, because that is the
+shape a week of passes has to have for a spreadsheet, a plot or an `awk`
+one-liner to read it as a time series rather than as forty files.
+
+The date is the clock **here** — `%Y-%m-%dT%H:%M:%S`, local, no offset and no
+fraction, sortable as text. Every row in a pass carries the same stamp however
+far apart the hosts' own clocks are; [`skew`](skew.md) is the instrument for
+the question of whose clock is wrong, and this column deliberately does not
+pretend to answer it.
+
+### The shape the variables arrive in
+
+`--parse` says how to read what the command printed. Four shapes, because
+different probes already speak different ones:
+
+| `--parse` | The command prints | Notes |
+|---|---|---|
+| `kv` (default) | `name=value` per line | Self-describing: `sysctl -a`, `/etc/os-release`, most probes. Blank lines and `#` comments are skipped; the first `=` separates |
+| `json` | `{"name": value}` | One level deep — a nested object or list has no column to go in and is refused by name |
+| `row` | a header line, then a values line | The command names its own columns. Tabs where there are tabs, whitespace where there are not |
+| `values` | bare values in a fixed order | The one shape that is not self-describing, so `--columns` is required |
+
+`kv` is the default because it is the shape that describes itself. The columns
+come from the data rather than from a flag you have to keep in step with it,
+and a host missing one is a visible blank rather than a row whose columns have
+all shifted along by one.
+
+`--parse values` is refused without `--columns`: `3 41 0.7` says nothing about
+which is which. A host that prints a different *number* of values is refused
+too, rather than filled in — a short row there is not a missing value, it is
+every column after the gap holding the wrong one.
+
+### The header does not move
+
+The header is written when the file is created, and every row after it is
+counted from that header. Rebuilding it from each pass would renumber every
+column the first time a host answered differently, and the week of rows behind
+it would quietly start meaning something else.
+
+So a name that shows up later has nowhere to go, and that is said rather than
+dropped:
+
+```text
+  NEWVAR    1 name the table has no column for: swap_free
+            The header was written when metrics.tsv was created and every row since
+            is counted from it.  Start a new table, or name the columns
+            up front with --columns.
+```
+
+`--columns a,b,c` pins the header up front, which is how you leave room for a
+variable a host is not printing yet. Without it the header is the names the
+fleet actually used, first-seen order — and host order is fixed by the server
+list, so two runs over one list build the same header.
+
+A variable a host does not have is an empty cell. A host whose answer will not
+parse gets **no row**, and a `UNPARSED` line saying which host and what was
+wrong with what it printed — a host quietly missing from a table reads as a
+machine that was fine. Its answer is still collected whole either way; only its
+row is missing. A host that printed nothing gets no row for the same reason: an
+empty line under a timestamp claims the fleet reported zero, which is a
+different and much worse claim than saying nothing.
+
+Values are escaped, not truncated: a tab ends a column and a newline ends a
+row, so either would turn one row into two or shift every column after it.
+They travel as `\t` and `\n`.
+
+### A time series
+
+```bash
+dredge --cmd 'cat /proc/pressure/cpu | head -1' --servers hosts.txt \
+       --tsv pressure.tsv --parse kv --daemon --every 5m
+```
+
+`--daemon` normally implies [`--follow`](#a-remote-tail), so a timer cannot
+re-fetch every file in full every five minutes. With `--tsv` it does not: a
+table wants the whole answer each pass, and re-running a command is not a
+re-transfer. `--follow` and `--tsv` together are refused outright — a pass
+where nothing changed would write no row, which reads as a host that was down.
+
+
 ## How it goes over the wire
 
 One ssh per host, and one round trip. A `find` on the far side selects the
@@ -607,7 +706,7 @@ not carry and nothing will bring back.
 | `--append` / `--prepend` / `--replace` | where the new bytes land; `--replace` is the default, except under `--follow` |
 | `--mark` | write a marker line where old meets new |
 | `-f, --follow` | only what is new since the last pass |
-| `--daemon` | keep going, a pass at a time (implies `--follow`) |
+| `--daemon` | keep going, a pass at a time (implies `--follow`, except with `--tsv`) |
 | `--every T` | how long between passes: `30s`, `5m`, `2h` (default 5m) |
 | `--passes N` | stop after N passes (`0`: until stopped) |
 | `--state FILE` | where a `--follow` run keeps its marks |
@@ -615,6 +714,9 @@ not carry and nothing will bring back.
 | `--timeout S` | bounds the whole transfer per host (default 120s) |
 | `-j, --jobs N` | hosts contacted at once (default 20) |
 | `--csv [PATH]` | one row per file |
+| `--tsv [PATH]` | a table: one row per host per pass, of the variables its command printed |
+| `--parse HOW` | the shape those variables arrive in: `kv` (default), `json`, `row`, `values` |
+| `--columns A,B,C` | name the variable columns; required by `--parse values`, elsewhere it pins the header |
 | `--dry-run` | print the remote command and stop |
 
 ## Exit status
