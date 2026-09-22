@@ -409,6 +409,122 @@ t_max_files_is_not_a_failure_on_a_slice_either() {
     assert_eq "$(find out -type f | wc -l | tr -d ' ')" "3"
 }
 
+# --- what the login says before the command runs ---------------------------
+
+# An ssh that greets every command with a banner, the way a bastion's
+# /etc/bashrc or a MOTD does: on the command's own stdout, before the
+# command runs. Nothing about it is unusual, and it used to be fatal.
+install_banner_ssh() {
+    cat > "$FAKE_BIN/ssh" <<'SHIM'
+#!/bin/bash
+args=(); host=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2;; -p) shift 2;;
+    *) if [ -z "$host" ]; then host="$1"; else args+=("$1"); fi; shift;;
+  esac
+done
+host="${host#*@}"
+printf 'ssh %s %s\n' "$host" "${args[*]}" >> "$FAKE_SSH_LOG"
+[ -d "$FAKE_ROOT/$host" ] || { echo "ssh: no such host $host" >&2; exit 255; }
+cd "$FAKE_ROOT/$host" || exit 255
+echo "*** Authorised users only. All activity is monitored. ***"
+echo "Last login: Tue Sep 22 09:14:02 2026 from 10.0.0.1"
+exec bash -c "${args[*]}"
+SHIM
+    chmod +x "$FAKE_BIN/ssh"
+}
+
+t_a_login_banner_does_not_break_a_collection() {
+    # The tar transport has no frame to hide behind: the first byte of
+    # the stream is the first byte of a header, so a banner in front of
+    # it made the whole tar unreadable and the host was reported as
+    # having nothing to send -- silently wrong, about a file plainly
+    # there.
+    seed
+    install_banner_ssh
+    cd "$TEST_TMPDIR"
+    out="$(dr logs/app.log -S web01,web02 -d out 2>&1)"
+    assert_status $? 0
+    assert_eq "$(cat out/web01~logs~app.log)" "hello from web01"
+    assert_eq "$(cat out/web02~logs~app.log)" "hello from web02"
+    assert_not_contains "$out" "EMPTY"
+    # And the banner is not mistaken for evidence and landed as one.
+    assert_not_contains "$(cat out/web01~logs~app.log)" "Authorised"
+}
+
+t_a_login_banner_does_not_break_a_jump_box() {
+    # The same stream, one hop further out. Here it did not even fail
+    # quietly: the unreadable tar closed the pipe, the far side died of
+    # it, and the SIGPIPE this side had caused came back as "the jump
+    # box itself did not answer".
+    relay_seed
+    install_banner_ssh
+    cd "$TEST_TMPDIR"
+    out="$(relay --cmd 'cat logs/app.log' -S web01,web02 -d out 2>&1)"
+    assert_status $? 0
+    assert_eq "$(cat out/cat~web01)" "hello from web01"
+    assert_eq "$(cat out/cat~web02)" "hello from web02"
+    assert_not_contains "$out" "did not answer"
+}
+
+t_a_banner_big_enough_to_fill_the_pipe_is_still_only_a_banner() {
+    # The failure only showed up on a collection large enough that the
+    # far side was still writing when this side gave up on the stream,
+    # so the size is the point of the case.
+    relay_seed
+    install_banner_ssh
+    cd "$TEST_TMPDIR"
+    out="$(relay --cmd 'head -c 2000000 /dev/zero | tr "\0" x' \
+        -S web01 -d out 2>&1)"
+    assert_status $? 0
+    assert_eq "$(wc -c < out/head~web01 | tr -d ' ')" "2000000"
+}
+
+t_a_host_that_only_talks_is_named_for_what_it_said() {
+    # A login that prints its notice and never runs what it was sent.
+    # There is no collection in that and there never will be, so the
+    # line it printed is the entire diagnosis and belongs in the report.
+    seed
+    cd "$TEST_TMPDIR"
+    cat > "$FAKE_BIN/ssh-mute" <<'SHIM'
+#!/bin/bash
+echo "*** This bastion requires an interactive session. ***"
+exit 0
+SHIM
+    chmod +x "$FAKE_BIN/ssh-mute"
+    set +e
+    out="$("$PY" "$DR" logs -S web01 -d out --ssh "$FAKE_BIN/ssh-mute" 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "FAILED"
+    assert_contains "$out" "not with a collection"
+    assert_contains "$out" "interactive session"
+    assert_not_contains "$out" "nothing to send"
+}
+
+t_a_jump_box_that_only_talks_is_named_for_what_it_said() {
+    relay_seed
+    cd "$TEST_TMPDIR"
+    cat > "$FAKE_BIN/ssh-mute" <<'SHIM'
+#!/bin/bash
+echo "*** This bastion requires an interactive session. ***"
+exit 0
+SHIM
+    chmod +x "$FAKE_BIN/ssh-mute"
+    set +e
+    out="$(dr --relay jump01 --ssh "$FAKE_BIN/ssh-mute" \
+        --relay-dir "$TEST_TMPDIR/spool" --cmd 'echo hi' -S web01 -d out 2>&1)"
+    rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "not with a collection"
+    assert_contains "$out" "interactive session"
+    # The nearer cause, not ssh's account of a pipe this side closed.
+    assert_not_contains "$out" "did not answer"
+}
+
 t_a_symlinked_path_is_the_file_it_points_at() {
     # `[ -e ]` follows a symlink, so the path passed the existence check
     # and then matched no -type f: the host was reported as having
@@ -1639,6 +1755,11 @@ run_test "a dry run contacts nothing"          t_a_dry_run_contacts_nothing
 run_test "--version matches the house format"  t_version_matches_the_house_format
 run_test "--max-files is not a failure"        t_max_files_stops_without_calling_it_a_failure
 run_test "nor on a slice"                      t_max_files_is_not_a_failure_on_a_slice_either
+run_test "a banner does not break a tar"       t_a_login_banner_does_not_break_a_collection
+run_test "a banner does not break a relay"     t_a_login_banner_does_not_break_a_jump_box
+run_test "a big answer past a banner"          t_a_banner_big_enough_to_fill_the_pipe_is_still_only_a_banner
+run_test "a host that only talks is named"     t_a_host_that_only_talks_is_named_for_what_it_said
+run_test "a jump box that only talks is named" t_a_jump_box_that_only_talks_is_named_for_what_it_said
 run_test "a symlinked path is followed"        t_a_symlinked_path_is_the_file_it_points_at
 run_test "a link inside a tree is not"         t_a_link_inside_a_tree_is_still_not_collected
 run_test "a write failure is one host's"       t_a_local_write_failure_is_one_hosts_failure

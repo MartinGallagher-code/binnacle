@@ -705,6 +705,29 @@ fresh for each run, with the payload base64'd so no byte in it can be mistaken
 for that token. The 33% that costs is nothing when the payload is two hundred
 lines.
 
+### A login that talks first
+
+Plenty of hosts greet a command before running it: a banner from
+`/etc/bashrc`, a MOTD, a "last login" line, the compliance notice a bastion
+prints at every login. All of it lands on the command's own stdout, mixed in
+front of the answer.
+
+The framed transports step over any line they do not recognise, so a banner
+costs them nothing. A tar cannot do that — the first byte of the stream is the
+first byte of a header, so one line of welcome in front of it makes the whole
+tar unreadable. So the far side announces its tar with a line of its own, and
+everything before that line is the login talking and is dropped.
+
+If the mark never arrives, what the host did say is quoted in the report,
+because that is the whole diagnosis:
+
+```text
+  FAILED    web31: the host answered, but not with a collection: *** This bastion requires an interactive session. ***
+```
+
+This matters most under `--relay`, where the banner is on the jump box and
+the answer being wrecked is the entire fleet's.
+
 `--dry-run` prints the remote command and contacts nothing, which is the way
 to see exactly what will run on your fleet before it does.
 

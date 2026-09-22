@@ -449,6 +449,7 @@ import json
 import os
 import random
 import re
+import select
 import shlex
 import signal
 import socket
@@ -1141,11 +1142,140 @@ def _oversize_report(args):
             % int(args.max_bytes))
 
 
-def remote_tar_command(args, since_epoch):
+# The line a tar is announced by, and the reason there is one.
+#
+# A login may greet a command before the command runs: a banner, a MOTD,
+# a "last login" line, a compliance notice a bastion prints from
+# /etc/bashrc.  All of it lands on the same stdout the answer comes back
+# on.  Every framed transport here already steps over a line it does not
+# recognise, so a banner costs those nothing.  A tar cannot do that: the
+# first byte of the stream is the first byte of a header, so one line of
+# welcome in front of it makes the whole tar unreadable -- and the
+# failure that follows names the wrong thing, because by then all this
+# side knows is that it could not read what it was sent.
+#
+# So the far side says where the tar starts, and everything before that
+# line is the login talking and is dropped.
+MARK_TAR = " TAR"
+
+
+def remote_tar_command(args, since_epoch, mark):
     return (_PREAMBLE % {"path": shlex.quote(args.path)}
             + _oversize_report(args)
+            + "printf '%%s\\n' %s\n" % shlex.quote(mark + MARK_TAR)
             + '%s -print0 2>/dev/null | tar -h --null -T - -cf - '
               '2>/dev/null\n' % _find_expr(args, since_epoch))
+
+
+def _noise_lines(raw, keep=5):
+    """The first few things the far side said, fit to put in a report.
+
+    A banner is text.  Anything else arriving on this stream is payload
+    that came without its mark, and a line of that quoted into a report
+    is not a diagnosis -- so unprintable bytes go, and a line that was
+    nothing else does not survive at all.
+    """
+    out = []
+    for line in raw.split(b"\n"):
+        text = "".join(c if c.isprintable() else " "
+                       for c in line.decode("utf-8", "replace")).strip()
+        if text:
+            out.append(text[:120])
+        if len(out) >= keep:
+            break
+    return out
+
+
+class _PushedBack(object):
+    """A stream with the bytes already read off it put back in front.
+
+    Finding the mark means reading past it, and what came after it in
+    the same chunk is the start of the tar.  tarfile cannot be asked to
+    rewind a pipe, so the bytes are handed back to it here instead.
+    """
+
+    __slots__ = ("_head", "_fh")
+
+    def __init__(self, head, fh):
+        self._head, self._fh = head, fh
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            head, self._head = self._head, b""
+            return head + self._fh.read()
+        if not self._head:
+            return self._fh.read(size)
+        out, self._head = self._head[:size], self._head[size:]
+        if len(out) == size:
+            return out
+        return out + self._fh.read(size - len(out))
+
+    def close(self):
+        """Nothing of its own to close, and the stream is not its to close.
+
+        tarfile leaves a fileobj it was handed alone, so this is never
+        reached -- but a wrapper that cannot be closed at all is one
+        `AttributeError` away from turning a collection into a crash.
+        """
+
+
+def skip_to_tar(stream, mark, deadline=None, budget=262144, chunk=65536):
+    """Read past the login's chatter and stop where the tar starts.
+
+    Answers `(found, noise, rest)`: whether the mark arrived, the first
+    few lines that came before it, and the bytes read past it that
+    belong to the tar.  NOISE is what makes a report say *banner* rather
+    than *broken* -- naming the line the far side printed turns an
+    unreadable stream into an obvious misconfiguration.
+
+    Two bounds, because a search for something that may never come must
+    end either way.  DEADLINE is the important one: a far side that
+    sends a little and then stalls is what the run's watchdog exists
+    for, and a read waiting on a pipe something else still holds open
+    would sit past the kill and hang the whole run on one host.  BUDGET
+    is the other: a stream that is somehow all payload and no mark ends
+    the search rather than being pulled into memory looking for a line
+    that is not coming.
+
+    The read is done on the descriptor rather than through the buffered
+    reader, so that nothing is left sitting in a buffer tarfile cannot
+    see.
+    """
+    needle = (mark + MARK_TAR).encode("utf-8")
+    try:
+        fd = stream.fileno()
+    except (AttributeError, io.UnsupportedOperation, ValueError):
+        fd = None
+    buf = b""
+    while True:
+        at = buf.find(needle)
+        if at >= 0:
+            end = buf.find(b"\n", at)
+            if end >= 0:
+                return True, _noise_lines(buf[:at]), buf[end + 1:]
+        if len(buf) >= budget:
+            break
+        if deadline is not None and fd is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                ready, _w, _x = select.select([fd], [], [], left)
+            except (OSError, ValueError):
+                break
+            if not ready:
+                break
+        try:
+            # A stream with no descriptor is not one of ssh's -- a test
+            # holding bytes in memory, say -- and it cannot stall, so it
+            # is read directly and needs no watching.
+            data = os.read(fd, chunk) if fd is not None else stream.read(chunk)
+        except (OSError, ValueError):
+            break
+        if not data:
+            break
+        buf += data
+    return False, _noise_lines(buf), buf
 
 
 _CMD_SCRIPT = r'''
@@ -1564,6 +1694,17 @@ def local_path(args, host, relpath):
 # Writing what came back
 # ---------------------------------------------------------------------------
 
+class RemoteNoiseError(Exception):
+    """The far side said something, and it was not the answer.
+
+    Raised rather than settled on the spot: the classification in `_run`
+    weighs this against a timeout and against the far side's own exit
+    status, and a stream that stopped being readable because the
+    watchdog killed the session underneath it is a timeout, whatever it
+    left in the buffer.
+    """
+
+
 class LocalWriteError(Exception):
     """A file came back and could not be landed here.
 
@@ -1852,7 +1993,8 @@ def _run(args, host, command, consume, send=None):
         # reported.
         # A local write failure already says what it is; anything else
         # needs its type to be readable at all.
-        consume_err = (str(exc) if isinstance(exc, LocalWriteError)
+        consume_err = (str(exc)
+                       if isinstance(exc, (LocalWriteError, RemoteNoiseError))
                        else "%s: %s" % (type(exc).__name__, exc))
     finally:
         alarm.cancel()
@@ -1919,11 +2061,26 @@ def collect_tar(args, host):
     """Whole files, unpacked from the tar stream as it arrives."""
     def consume(stream, r):
         taken = []
+        found, noise, rest = skip_to_tar(
+            stream, args.mark_token, time.monotonic() + args.timeout)
+        if not found:
+            # Nothing said the tar had started. If the host talked first
+            # and then stopped, what it said is the whole diagnosis --
+            # usually a login that prints a banner and a shell that never
+            # ran the script behind it. If it said nothing at all, it
+            # never got that far, and its exit status -- or the watchdog
+            # -- is a better witness than a guess made here.
+            r.files, r.bytes = [], 0
+            if noise:
+                raise RemoteNoiseError(
+                    "the host answered, but not with a collection: %s"
+                    % noise[0])
+            return
         # r| is the streaming mode: members are read in order off a pipe,
         # with no seeking back, which is what lets the unpacking start
         # before the far side has finished sending.
         try:
-            tar = tarfile.open(fileobj=stream, mode="r|*")
+            tar = tarfile.open(fileobj=_PushedBack(rest, stream), mode="r|*")
         except tarfile.ReadError:
             # `find` matched nothing, so tar sent nothing. Zero files is an
             # answer -- --since exists to produce it -- not a broken run.
@@ -1954,7 +2111,8 @@ def collect_tar(args, host):
                 pass
         r.files = [(p, n) for _h, p, n in taken]
         r.bytes = sum(n for _p, n in r.files)
-    return _run(args, host, remote_tar_command(args, args.since_epoch),
+    return _run(args, host,
+                remote_tar_command(args, args.since_epoch, args.mark_token),
                 consume)
 
 
@@ -2936,6 +3094,7 @@ mkdir -p collect
 "$PY" dredge.py %(args)s --servers servers -d collect \
       > report 2>errors
 echo $? > status
+printf '%%s\n' %(mark)s
 tar -cf - collect report errors status 2>/dev/null
 '''
 
@@ -3021,6 +3180,7 @@ def relay_command(args):
         "spool": shlex.quote(args.relay_dir),
         "keep": "1" if args.keep_relay else "",
         "python": shlex.quote(args.relay_python or ""),
+        "mark": shlex.quote(args.mark_token + MARK_TAR),
         "args": remote,
     }
 
@@ -3052,7 +3212,8 @@ def _relay_sweep(args, relay):
 class RelayResult(object):
     """What came back through the jump box."""
 
-    __slots__ = ("status", "report", "errors", "files", "bytes", "detail")
+    __slots__ = ("status", "report", "errors", "files", "bytes", "detail",
+                 "trouble")
 
     def __init__(self):
         self.status = None
@@ -3061,12 +3222,30 @@ class RelayResult(object):
         self.files = 0
         self.bytes = 0
         self.detail = ""
+        # A whole sentence rather than a fragment, for the case where
+        # the stream itself said what went wrong. ssh's own account of
+        # the same moment is the further cause and the more misleading
+        # one -- a jump box that answered with a banner *did* answer,
+        # and the closed pipe that follows is this side's doing.
+        self.trouble = ""
 
 
 def _unpack_relay(args, stream, rr):
     """Land B's tar here: the collection into -d, the rest in hand."""
+    found, noise, rest = skip_to_tar(
+        stream, args.mark_token, time.monotonic() + args.timeout)
+    if not found:
+        if noise:
+            rr.trouble = ("the jump box answered, but not with a "
+                          "collection: %s" % noise[0])
+            rr.detail = noise[0]
+        else:
+            # Nothing came back at all, which is not the stream's
+            # account of anything: ssh's is the only one there is.
+            rr.detail = "the jump box sent nothing back"
+        return
     try:
-        tar = tarfile.open(fileobj=stream, mode="r|*")
+        tar = tarfile.open(fileobj=_PushedBack(rest, stream), mode="r|*")
     except tarfile.ReadError:
         rr.detail = "the jump box sent nothing back"
         return
@@ -3173,11 +3352,17 @@ def run_relay(args, hosts, relay):
     elapsed = time.monotonic() - t0
 
     if result.outcome != OK and rr.status is None:
+        # What came down the stream is believed over what ssh made of
+        # the end of it: closing an unreadable stream kills the far side,
+        # so ssh's `exit 141` here is this side's own hand reported back
+        # as the fault, and it sends the reader to the network for
+        # something that is wrong in the login.
+        trouble = rr.trouble or ("the jump box itself did not answer: %s"
+                                 % (result.detail or "?"))
         sys.stdout.write(
-            "%s -- %s via %s\n        the jump box itself did not answer: "
-            "%s (%s)\n"
+            "%s -- %s via %s\n        %s (%s)\n"
             % (PROG, args.cmd if args.cmd else args.path, relay.name,
-               result.detail or "?", result.outcome))
+               trouble, result.outcome))
         for line in (result.remote_says or [])[:3]:
             sys.stdout.write("        %s\n" % line[:120])
         sys.stdout.flush()
@@ -3198,8 +3383,9 @@ def run_relay(args, hosts, relay):
             sys.stdout.write("  ! %s\n" % line[:150])
         sys.stdout.flush()
     if rr.status is None:
-        sys.stdout.write("%s: the jump box ran but sent no exit status back"
-                         "\n" % PROG)
+        sys.stdout.write("%s: %s\n"
+                         % (PROG, rr.trouble or "the jump box ran but sent "
+                                                "no exit status back"))
         return 1
     return 1 if rr.status else 0
 
@@ -3521,7 +3707,8 @@ def main(argv=None):
             cmd = remote_slice_command(args, args.since_epoch,
                                        args.mark_token)
         else:
-            cmd = remote_tar_command(args, args.since_epoch)
+            cmd = remote_tar_command(args, args.since_epoch,
+                                     args.mark_token)
         sys.stdout.write("# %d host(s): %s\n"
                          % (len(hosts),
                             " ".join(h.name for h in hosts[:8])
