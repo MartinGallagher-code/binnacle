@@ -277,6 +277,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A login banner on a host -- or on a jump box -- wrecked the
+  collection.** A banner from `/etc/bashrc`, a MOTD, a "last login"
+  line, the compliance notice a bastion prints at every login: all of it
+  lands on the command's own stdout, in front of the answer. The framed
+  transports (`--cmd`, `--head`, `--tail`, `--follow`) step over a line
+  they do not recognise and never minded. The tar transport had no frame
+  to hide behind -- the first byte of the stream is the first byte of a
+  header -- so one line of welcome made the whole tar unreadable.
+
+  It failed twice over, and neither failure named the banner:
+
+  - A plain collection reported the host as having **nothing to send**.
+    An unreadable tar and an empty one were the same thing to this side,
+    so every host on a fleet with a banner came back `EMPTY` -- silently
+    wrong, about files plainly there.
+  - `--relay` reported `the jump box itself did not answer`. This side
+    gave up on the stream and closed the pipe, the far side died of the
+    SIGPIPE that caused, and ssh's `exit 141` was reported as the fault
+    -- pointing at the network for something wrong in the login, and
+    losing the whole fleet's collection rather than one host's.
+
+  The far side now announces its tar with a line of its own, and
+  everything before that line is the login talking and is dropped. The
+  search for it is bounded both by a byte budget and by `--timeout`, so
+  a far side that sends a little and then stalls is still the watchdog's
+  to end and not a run that hangs on one host.
+
+  A host that never sends the mark is named for what it *did* say, which
+  is usually the entire diagnosis -- `the host answered, but not with a
+  collection: *** This bastion requires an interactive session. ***` --
+  and through a relay that sentence is reported in place of ssh's
+  account of a pipe this side closed. A host that sent nothing at all is
+  untouched: there is no stream to quote, and its exit status, or the
+  timeout, remains the better witness.
+
 - **`dredge --cmd` wrote a zero-byte file for a command that said
   nothing.** `dredge --cmd ls --servers hosts.txt` over a fleet whose
   login directories hold nothing visible landed one empty artifact per
