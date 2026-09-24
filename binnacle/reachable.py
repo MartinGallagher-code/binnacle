@@ -28,51 +28,7 @@ Options:
       --quiet         no progress and no summary, just the list
       --dry-run       check nothing; print what would be contacted
 
-What it does
-  A server list rots.  Boxes get decommissioned, renamed, rebuilt without
-  your key, or moved behind a firewall, and the list goes on naming them
-  until some later run fans out to 200 hosts and quietly does nothing on
-  eleven of them.  This checks every entry and comments out the ones that
-  are not usable, leaving a file the other tools can still read.
-
-  Both probes are run because they answer different questions.  **ssh is
-  the gate** -- it is what the fleet tools actually need -- and **ping is
-  the explanation**: a host that pings but refuses ssh is a key or firewall
-  problem, and a host that does neither is off or gone.  A host that
-  answers ssh is kept even when it does not answer ping, because plenty of
-  networks drop ICMP and commenting those out would throw away working
-  machines.
-
-  Running it again is the point.  Entries this tool commented out are
-  re-tested on the next run and **uncommented if they come back**, so the
-  list converges on the truth instead of decaying in one direction.  Your
-  own comments are never touched: only lines carrying this tool's marker
-  are managed.
-
-Output format
-  The file is rewritten line for line.  Blank lines, your comments, inline
-  comments and the order of entries all survive; the only change is a
-  leading '# ' on failures and a marker explaining why:
-
-      web01
-      # db07  #[unreachable] no ping, no ssh: timed out - 2026-08-15
-      cache02  # the slow one
-
-Robustness properties
-  * your comments and blank lines are preserved exactly; only lines with
-    the #[unreachable] marker are ever managed by this tool
-  * previously-commented hosts are re-checked and restored when they come
-    back, so the list does not decay in one direction
-  * a probe that could not be run is reported as unknown, never as failure
-    -- if ping is missing, that is said, not silently treated as a down host
-  * ssh answering outranks ping failing: ICMP is blocked on plenty of
-    healthy networks
-  * the failure reason is recorded in the file, so a later reader knows
-    whether a host was off, firewalled, or just missing your key
-  * writes are atomic (temp file + rename), and -i keeps a .bak by default
-  * output order is the input order, so two runs diff cleanly
-  * needs no root and no packages; ssh runs with BatchMode=yes so it can
-    never sit waiting for a password
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/reachable.html
 """
 
 import argparse

@@ -190,6 +190,10 @@ burst_factor,score,template,example
 agree script ./logtriage.py --servers prod.txt --fleet-csv -- /var/log/syslog --csv
 ```
 
+With `LANG` set to `C` or `POSIX`, or unset, the output is pure ASCII,
+like the rest of these tools: the sparklines are drawn with plain
+characters instead of block glyphs. `--ascii` forces the same anywhere.
+
 ## Debugging the tool itself
 
 Two seams, documented rather than hidden, because they are also how you work

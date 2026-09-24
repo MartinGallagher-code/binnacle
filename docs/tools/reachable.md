@@ -86,6 +86,10 @@ Outcomes are distinguished rather than lumped into "failed":
 | `timeout` | ssh timed out |
 | `down` | no ping and no ssh |
 
+A probe that **could not be run** is reported as unknown, never as a
+failure: if `ping` is missing on this machine, that is said, not silently
+treated as a down host.
+
 `--require` changes the gate: `ssh` (default), `ping`, `both`, or `any`.
 `--keep-auth` keeps hosts whose only problem is your key, since those are a
 provisioning gap rather than dead boxes.
@@ -146,6 +150,9 @@ compact.
   (`--no-backup` to skip it).
 - All writes are atomic — temp file plus rename. A half-written server list
   is worse than none, and a crash mid-run leaves the original intact.
+- Output order is the input order, so two runs diff cleanly.
+- It needs no root and no packages. ssh runs with `BatchMode=yes`, so it can
+  never sit waiting for a password.
 
 ## Output and exit codes
 

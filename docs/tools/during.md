@@ -163,6 +163,18 @@ would call every disk-bound run unstable each time the CPU idled.
 agree script ./during.py --servers prod.txt --fleet-csv -- --seconds 60 --csv
 ```
 
+## What it needs, and what it guarantees
+
+- **Sampling reads `/proc` and `/sys` only**: no root, no packages, no
+  agent, nothing left behind. Without root nothing is lost except
+  per-process I/O.
+- **A fact that could not be measured is blank, never 0**, and any rule
+  that needed it is reported as skipped with the reason (`--all` lists
+  them).
+- **The analysis is a pure function of the sample series**, so
+  `--from-samples` reproduces any verdict with no machine in that state —
+  which is also how the analysis is tested.
+
 ## With the rest of the toolchain
 
 `during` does not generate load; it watches while something else does.

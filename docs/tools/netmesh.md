@@ -160,7 +160,10 @@ reply_ttl,ttl_hops,hop_ttl,hop_addr
 ```
 
 `dir` is `tx` (this host probed peer), `rx` (this host answered peer) or
-`host` (totals). `flow` is blank on every row except the per-source-port
+`host` (totals). With `--hops` on, `dir` is also `hop`: one row per timed
+hop, with `hop_ttl` its position in the path and `hop_addr` the router that
+answered (see [Where along the path did it
+queue?](#where-along-the-path-did-it-queue)). `flow` is blank on every row except the per-source-port
 breakdown described under [Which path did it take?](#which-path-did-it-take);
 a row carrying one is part of the row above it, never an addition to it.
 `reply_ttl` and `ttl_hops` are the hop count replies came back over and how
@@ -258,9 +261,15 @@ per-row note (`cannot resolve ...`) with nothing sent, never silence.
 ## Leaves nothing behind
 
 No package, no daemon, no dotdir, no sysctl. The agent is the tool's own
-file, copied by scp and run from a working directory that `clean` removes.
+file, copied by scp and run from a working directory that `clean` removes —
+`check` does that automatically. It needs no root, no `CAP_NET_RAW`, no
+installed packages, and no inbound port beyond ssh and the agents' own UDP
+port (`--port`, 5310 by default).
 `stop` sends SIGTERM, and the agent flushes its current interval before
 exiting rather than discarding everything measured since the last one.
+
+A host that cannot be reached is **reported, not fatal**: the rest of the
+mesh still measures. And every run is reproducible from `mesh.csv` alone.
 
 ### When the number is the card's timer
 

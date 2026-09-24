@@ -90,7 +90,7 @@ API — nothing is written, and the layout file is never modified.
 | `r01u05,r01u07` | either of those two, by name |
 | `+gpu` | carries the tag, inherited ones included |
 | `role=tor` | an attribute; globs allowed, so `model=r76*` |
-| `DH1/A/R01/u05` | a path, or any suffix of one |
+| `DH1/A/R01/u05` | a path, or any suffix of one — which may name more than one element |
 | `wr01r03*` | a glob against name, id or path |
 | `!+decom` | negated |
 
@@ -198,7 +198,8 @@ tool agrees with the file.
 
 The `.dc` format from the
 [layout_visualizer](https://github.com/MartinGallagher-code/layout_visualizer)
-project, which is the format's reference implementation. Indentation nests,
+project, which is the format's reference implementation — see its README for
+the full grammar. Indentation nests,
 ranges expand, and one line describes a whole floor:
 
 ```text
@@ -237,6 +238,9 @@ manifest floor.dc 'rack[1]' --role any      # everything in the rack
 
 `--role any` is also the quickest way to see the containers a selector
 picked out, since it stops filtering them away.
+
+`MANIFEST_ROLE` sets the default for `--role`, and `MANIFEST_LAYOUT` names the
+layout file when it is not given as the first argument (or with `--layout`).
 
 ## Where each one is
 

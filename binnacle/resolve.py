@@ -33,54 +33,7 @@ Options:
   --no-exec          never run a subprocess
   --no-color         plain output (also honours NO_COLOR)
 
-What it does
-  "Is it DNS?" is the oldest question in the book, and the usual answers --
-  dig, host, nslookup -- all ask *one* resolver *one* question and print
-  what came back.  That is not the shape of the problem.  A box with three
-  nameservers where the first one is dead resolves everything correctly and
-  slowly, for ever, and every one of those tools will tell you DNS is fine
-  because they only ever spoke to the second.
-
-  So this asks every configured resolver separately, on the wire, and
-  reports where they differ:
-
-    * each nameserver is queried directly rather than through the stub, so
-      a dead or slow one is attributed to itself instead of being hidden
-      behind the retry that covers for it
-    * the answers are compared across resolvers, because two servers that
-      disagree about a name is split horizon, a stale cache, or a resolver
-      pointing somewhere you have forgotten about -- and no single-server
-      query can see it
-    * the search list is walked and the wasted round trips counted, since
-      an unqualified name with six search domains is six NXDOMAINs before
-      the query you meant
-    * getaddrinfo is timed alongside, because that is the path your
-      application actually takes, and the gap between it and the direct
-      query is the cost of the configuration rather than the network
-    * /etc/hosts is read, because an entry there silently beats DNS and is
-      why a name resolves differently on one box and nowhere else
-
-  Then it says which of those is the problem, in the same voice as the rest
-  of binnacle: the verdict names the cause rather than the biggest number.
-
-Robustness properties
-  * a fact that could not be measured is None, never 0, and any rule that
-    needed it is reported as skipped with the reason
-  * answer sets are compared sorted, so a resolver rotating records
-    round-robin -- which is normal and healthy -- never reads as
-    disagreement
-  * replies whose id or question does not match the query are discarded and
-    the wait continues, so a late reply to an earlier query cannot be
-    counted as this one's answer
-  * a local stub resolver (127.0.0.53 and friends) is named as such: timing
-    it says nothing about the upstreams behind it, and the report says so
-    rather than reporting a healthy 0.2ms and leaving you to assume
-  * needs no root, no packages and no dig: the queries are built and parsed
-    here, standard library only, Python 3.6+
-  * every rule is a pure function of the fact dictionary, so --from-facts
-    reproduces any diagnosis with nothing resolving at the time
-  * exit status is 0 unless you ask for --exit-code, so it is safe in a
-    pipeline by default
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/resolve.html
 """
 
 import argparse

@@ -38,10 +38,12 @@ binnacle 0.6.0 -- the housing, and what is in it
   binnacle help TOOL   just that one
 ```
 
-`binnacle help` concatenates every tool's `--help`, verbs included, so one
-page is the whole manual for the package **as installed** rather than as
-documented somewhere else. It is around 2,200 lines; `binnacle help | less`
-is the intended reading, and a closed pipe is not an error.
+`binnacle help` concatenates every tool's `--help` — each tool's own module
+docstring — verbs included, so one page is the quick reference for the
+package **as installed** rather than as documented somewhere else: usage,
+options and exit codes, with a link to each tool's full manual.
+`binnacle help | less` is the intended reading, and a closed pipe is not an
+error.
 
 ## Why the version column is per-tool
 

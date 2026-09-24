@@ -100,6 +100,13 @@ up as a large *delay* without making the clock look wrong. The best of
 `--samples` queries is kept, chosen by lowest delay, because a single
 sample over a congested link measures the congestion.
 
+Only this box's clock is read twice, and the source's twice, which is what
+makes the result independent of the path being symmetric in throughput.
+
+A reply whose originate timestamp does not echo the transmit timestamp that
+was sent is discarded and the wait continues, so neither a late reply to an
+earlier query nor an off-path forgery can be counted as this one's answer.
+
 ### A source that answers is not necessarily a source of time
 
 Stratum 16, or the leap indicator set to alarm, is a server reporting
@@ -178,6 +185,19 @@ minutes is where Kerberos and AD stop accepting a ticket, so it is the
 point at which the clock is breaking things rather than merely being wrong.
 One second is where correlating this box's logs against another's stops
 being safe. Both move with a flag or an environment variable.
+
+## What it needs, and what it guarantees
+
+- **No root, no packages, no `ntpdate`.** The queries are built and parsed
+  here, standard library only, Python 3.6+.
+- **A fact that could not be measured is `None`, never 0**, and any rule
+  that needed it is reported as skipped with the reason (`--all` lists
+  them).
+- **Every rule is a pure function of the fact dictionary**, so
+  `--from-facts` reproduces any diagnosis with no clock being read at the
+  time — which is also how the rules are tested.
+- **Exit status is 0 unless you ask for `--exit-code`**, so it is safe in a
+  pipeline by default.
 
 ## Where it does not help
 
