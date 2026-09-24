@@ -1163,6 +1163,59 @@ t_keep_relay_leaves_the_spool_to_look_at() {
     assert_file_exists "spool/report"
 }
 
+t_relay_refuses_a_directory_it_did_not_make() {
+    # The spool is dredge's to clear and remove. A --relay-dir pointed at
+    # a tree dredge did not make is somebody's own directory handed over by
+    # mistake, and clearing it would delete their files -- the report that
+    # started this. dredge must refuse and delete nothing.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    mkdir -p spool/src
+    printf 'months of work\n' > spool/src/main.c
+    printf 'keep me\n'        > spool/keepme
+    set +e
+    out="$(relay --cmd 'echo hi' -S web01 -d out 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "dredge did not make it"
+    # Nothing in the tree was touched -- not by the far side's guard, and
+    # not by the sweep that tidies up afterwards.
+    assert_eq "$(cat spool/src/main.c)" "months of work"
+    assert_file_exists "spool/keepme"
+}
+
+t_relay_still_owns_and_clears_its_own_spool() {
+    # The marker is what tells dredge's own scratch directory from the
+    # caller's tree, so a genuine leftover spool -- marker inside -- is
+    # still cleared and reused, and the run collects as normal.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    mkdir -p spool
+    : > "spool/.dredge-relay-spool"
+    printf 'stale\n' > spool/leftover
+    relay --cmd 'echo hi' -S web01 -d out --quiet
+    assert_status $? 0
+    assert_eq "$(cat out/echo~web01)" "hi"
+    # dredge owned this spool, so it cleared the stale contents and then
+    # (no --keep-relay) removed the whole thing.
+    assert_no_file "spool"
+}
+
+t_relay_refuses_a_root_or_home_before_contacting_anything() {
+    # A relay-dir that resolves to a root or a home is a request to
+    # delete one, and the far side would refuse it -- but these few are
+    # worth stopping here, before a single host is contacted.
+    relay_seed
+    cd "$TEST_TMPDIR"
+    set +e
+    out="$(dr --relay jump01 --relay-dir / --cmd 'echo hi' -S web01 \
+        -d out 2>&1)"; rc=$?
+    set -e
+    assert_status $rc 2
+    assert_contains "$out" "cannot be a root or a home"
+    assert_eq "$(ssh_calls)" "0"
+}
+
 t_the_jump_box_gets_the_fleet_already_expanded() {
     # `web[01-02]` is expanded here, by this side's idea of the syntax,
     # so the far side collects from exactly the fleet that was asked for.
@@ -1831,6 +1884,9 @@ run_test "a daemon table repeats the command" t_a_daemon_building_a_table_repeat
 run_test "a jump box runs the collection"     t_a_jump_box_runs_the_collection_and_sends_it_back
 run_test "a jump box keeps nothing"           t_a_jump_box_keeps_nothing_afterwards
 run_test "--keep-relay leaves the spool"      t_keep_relay_leaves_the_spool_to_look_at
+run_test "a relay will not wipe your tree"    t_relay_refuses_a_directory_it_did_not_make
+run_test "a relay clears its own spool"       t_relay_still_owns_and_clears_its_own_spool
+run_test "a relay refuses root or home"       t_relay_refuses_a_root_or_home_before_contacting_anything
 run_test "the fleet goes over expanded"       t_the_jump_box_gets_the_fleet_already_expanded
 run_test "the far report and status come home" t_the_far_sides_report_and_status_come_home
 run_test "a table built over there lands here" t_a_table_built_over_there_lands_here

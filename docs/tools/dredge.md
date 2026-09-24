@@ -657,6 +657,38 @@ disclosure — and `--ssh 'ssh -J bastion'` is the shape that does not make it,
 because there the bytes pass through B's sshd encrypted end to end and B cannot
 read them.
 
+### The spool is dredge's, and only dredge's
+
+dredge **clears the spool before it uses it and removes it after** — that is
+how a run killed mid-flight does not leave a half-collection on the bastion,
+and how the next run starts clean. It means the spool has to be a path dredge
+*owns*: point `--relay-dir` (or `DREDGE_RELAY_DIR`) at an existing tree and
+dredge would delete it, because to dredge that path is last run's scratch to
+clear.
+
+So it will not. A spool dredge makes carries a marker file inside it, and
+dredge removes only a directory that has one:
+
+- On the jump box, a `--relay-dir` that already exists **without** the marker
+  is taken to be your own directory, handed over by mistake. dredge refuses
+  the run and deletes nothing:
+
+  ```text
+  dredge: /home/me/project already exists here and dredge did not make it --
+  dredge: refusing to touch it, so nothing in it is deleted. Point
+  dredge: --relay-dir at a path dredge can own, or omit it for the default.
+  ```
+
+- The tidy-up sweep at the end is guarded by the same marker, so a run that
+  refused is never "cleaned up" by deleting the tree it refused to touch.
+- A `--relay-dir` that resolves to a root or a home directory is refused on
+  this side, before any host is contacted, for the message alone.
+
+The safe course is the default: omit `--relay-dir` and dredge names a path
+under `/var/tmp` for the run. Give one of your own only when you have a reason
+to, and give a path dredge can have to itself — not a directory with anything
+in it you would miss.
+
 ### The far side's report is the report
 
 The run that actually happened is the one over there, so its report is what is
