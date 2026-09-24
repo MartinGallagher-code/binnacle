@@ -246,8 +246,8 @@ fleet.
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
 including a per-tool manual, the design conventions and a CLI reference
-generated from the live parsers. Each tool's `--help` prints its own manual,
-so the two cannot drift.
+generated from the live parsers. Each tool's `--help` is the short version:
+usage, options and exit status, then a link to that tool's manual.
 
 ## Tests
 

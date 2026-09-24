@@ -67,6 +67,9 @@ The `5002ms` on the last line is the point: the resolvers that answered are
 fast, and the library is still five seconds slow. That gap is the cost of
 the configuration rather than of the network.
 
+The verdict names the **cause** rather than the biggest number, in the same
+voice as the rest of binnacle.
+
 ## The rules
 
 Thirteen, each a pure function of a fact dictionary, same as
@@ -109,6 +112,20 @@ normal, healthy load balancing, and comparing them in wire order would
 report every load-balanced name in the estate as a disagreement — burying
 the handful that are real.
 
+## A reply has to be the answer to this query
+
+Replies whose id or question does not match the query are discarded and the
+wait continues, so a late reply to an earlier query can never be counted as
+this one's answer.
+
+## Not measured is not zero
+
+A fact that could not be measured is `None`, never `0`, and any rule that
+needed it is reported as skipped with the reason — `--all` lists them.
+
+It needs no root, no packages and no `dig`: the queries are built and parsed
+by the tool itself, standard library only, Python 3.6+.
+
 ## A local stub is named as one
 
 If `resolv.conf` points at `127.0.0.53`, everything measured describes the
@@ -137,11 +154,14 @@ shows up as its own group instead of as intermittent application errors.
 ## Exit codes
 
 `0` always, unless the tool itself failed (`2` = usage). Severity is opt-in
-via `--exit-code`: `0` ok / `10` warn / `20` critical.
+via `--exit-code`: `0` ok / `10` warn / `20` critical. So it is safe in a
+pipeline by default.
 
 ## Testing
 
-The rules are driven from JSON fixtures with nothing resolving:
+Every rule is a pure function of the fact dictionary, so `--from-facts`
+reproduces any diagnosis with nothing resolving at the time. The rules are
+driven from JSON fixtures that way:
 
 ```bash
 resolve --facts > facts.json

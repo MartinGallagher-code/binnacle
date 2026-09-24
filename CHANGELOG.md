@@ -202,6 +202,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`--help` is a reference card, not the manual.** Every tool's help
+  had grown into its whole manual -- `dredge --help` was 506 lines. Help now
+  prints the summary, the usage examples, the options and the exit codes,
+  then links the tool's page in the docs. The prose moved to
+  `docs/tools/`, which already carried most of it; what was only in the
+  help was merged in there. The suite checks that each help stays under
+  100 lines and ends with that link.
+
 - **`dredge --csv` gained two columns at the end**, `pass` and
   `unchanged`: which pass of a `--daemon` run the row is from, and how
   many artifacts that host had that were checked and did not have to be

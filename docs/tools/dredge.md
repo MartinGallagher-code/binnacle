@@ -490,7 +490,8 @@ default handler back.
 
 It does **not** fork, detach, write a pidfile or leave anything behind but the
 files it collected and its state file. `&`, `tmux` or a systemd unit is how it
-becomes a background service:
+becomes a background service — and there `--every` in the unit's command line
+and `DREDGE_EVERY` in its environment mean the same thing:
 
 ```ini
 [Service]
@@ -637,6 +638,10 @@ without a jump box in the way, so `grep -l oom *` reads the same either way.
 The server list goes over **already expanded** — `web[01-40]` became forty
 names here — so B collects from exactly the fleet that was asked for rather
 than re-expanding a range against its own idea of the syntax.
+
+The copy and the server list travel on **stdin**, as a tar, not in the command
+line: this file is three thousand lines, and base64 of it in an argv is past
+`ARG_MAX` before ssh ever sees it.
 
 ### What it leaves behind
 
@@ -857,7 +862,18 @@ not carry and nothing will bring back.
 | `--tsv [PATH]` | a table: one row per host per pass, of the variables its command printed |
 | `--parse HOW` | the shape those variables arrive in: `kv` (default), `json`, `row`, `values` |
 | `--columns A,B,C` | name the variable columns; required by `--parse values`, elsewhere it pins the header |
+| `--user NAME` | ssh user |
+| `--ssh CMD` | ssh command (`'ssh -J bastion'` is the tunnelling answer to a jump box) |
 | `--dry-run` | print the remote command and stop |
+| `--quiet` | no progress and no summary, just the findings |
+
+Most options have an environment variable that sets their default, so a
+systemd unit or a shell profile can carry them: `DREDGE_DIR`, `DREDGE_SUFFIX`,
+`DREDGE_EVERY`, `DREDGE_STATE`, `DREDGE_MAX_BYTES`, `DREDGE_MAX_FILES`,
+`DREDGE_JOBS`, `DREDGE_TIMEOUT`,
+`DREDGE_USER`, `DREDGE_SSH`, `DREDGE_TSV`, `DREDGE_PARSE`, `DREDGE_COLUMNS`,
+`DREDGE_RELAY`, `DREDGE_RELAY_DIR` and `DREDGE_RELAY_PYTHON`. A flag on the
+command line wins over the variable.
 
 ## Exit status
 

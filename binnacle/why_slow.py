@@ -36,44 +36,7 @@ Options:
   --no-exec          never run a subprocess: pure /proc and /sys mode
   --no-color         plain output (also honours NO_COLOR)
 
-What it does
-  top, atop and sar show you numbers.  This reads the numbers and tells you
-  what they mean, which is the part that takes experience.  It samples
-  /proc twice a couple of seconds apart, adds the things that are only
-  visible once (the kernel log, cgroup limits, filesystem fullness), runs
-  about thirty rules over the result, and prints the highest-severity
-  finding as a verdict with the exact command to run next.
-
-  The rules are ordered by cause, not by symptom.  A box that is swapping
-  also looks CPU-busy, and reporting the CPU is how people spend an hour
-  tuning the wrong thing -- so swap thrashing and disk errors outrank CPU
-  saturation in the verdict even when the CPU number is larger.
-
-  Slow is not the only way a box fails.  It can be idle and still refusing
-  work because a kernel table is full: conntrack, file descriptors, task
-  slots, the ephemeral port range, the neighbour table.  Those have no
-  gradient to watch -- they work until abruptly they do not -- so they are
-  measured as ratios against their ceilings and reported before the wall,
-  and the kernel log is searched for the moment one was actually hit,
-  because a table that overflowed an hour ago has since drained and no
-  ratio measured now will show it.
-
-Robustness properties
-  * a fact that could not be measured is None, never 0, and any rule that
-    needed it is reported as skipped *with the reason* -- a tool that
-    quietly checks less when run as non-root is worse than one that says so
-  * needs no root: without it you lose the kernel log (so OOM kills and I/O
-    errors) and per-process I/O, and it tells you exactly that
-  * needs no packages: standard library only, Python 3.6+
-  * --no-exec runs without spawning anything at all
-  * container-aware: in a cgroup, your own limit is checked first and the
-    host's numbers are demoted, because a 4 GB container on a 256 GB host
-    is out of memory while the host is fine
-  * every rule is a pure function of the fact dictionary, so --from-facts
-    reproduces any diagnosis exactly, with no machine in the state that
-    produced it
-  * exit status is 0 unless you ask for --exit-code, so it is safe in a
-    pipeline by default
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/why-slow.html
 """
 
 import argparse

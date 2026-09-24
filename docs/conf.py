@@ -10,7 +10,8 @@ Two principles, both anti-drift:
 - The CLI reference is generated at build time from the real argparse
   parsers, so a flag cannot exist without appearing here, nor linger here
   after it is removed.  Each tool's ``--help`` prints its own module
-  docstring, so the manual, the help text and this page are the same words.
+  docstring: usage, options and exit status, with the prose left to the
+  per-tool manual it links to.
 """
 
 import os

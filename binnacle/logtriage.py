@@ -35,44 +35,7 @@ Options:
   --csv [PATH] / --json [PATH]
   --ascii              plain sparklines (automatic when LANG is C/POSIX)
 
-How it works
-  Log lines are not distinct events; they are a few hundred *shapes* with
-  the variable parts filled in differently.  This masks the variable parts
-  -- numbers, addresses, paths, hex, quoted strings, timestamps -- and what
-  is left is the shape, which is what you want to count.
-
-  Ranking is deliberately not by frequency.  The most frequent line in any
-  log is something like "session opened for user", and it has never once
-  been the answer.  What matters is what is NEW, what is SEVERE, and what
-  SUDDENLY started happening -- so novelty, severity and burstiness carry
-  more weight than count, and the score is printed so you can see why
-  something is at the top.
-
-  Novelty needs a baseline.  By default the log is split in half and the
-  first half is the baseline, which answers "what changed" with no state,
-  no config and no second file.  --split-at is the sharper version: give it
-  the time the pager went off and it tells you what started then.
-
-Masking, in order (the order is the algorithm)
-  ANSI, timestamps (ISO/syslog/CLF/dmesg/clock), UUID, MAC, IPv6, IPv4,
-  URL, email, pid, absolute path, hex, quoted string, size+unit, number.
-  A UUID has to be caught before the hex rule would eat it, and timestamps
-  before the number rule; --rule inserts your own patterns ahead of all of
-  them so you always win.
-
-Robustness properties
-  * streams: one pass, bounded memory, fine on a multi-gigabyte file
-  * template ids are a hash of the masked shape, so the same line gives the
-    same id on every machine -- which is what lets a fleet be compared
-  * bounded memory is honest: if --max-templates is hit, the evicted ones
-    are pooled into <OTHER> and the report says how many, rather than
-    quietly dropping them
-  * stack traces attach to the line above, so 400 tracebacks are one
-    finding and not 4,800 fake ones
-  * no timestamps at all is fine: ordering falls back to line number and
-    the report says so
-  * compressed input (.gz, .bz2, .xz) is read directly
-  * pure ASCII output under LANG=C, like the rest of these tools
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/logtriage.html
 """
 
 import argparse

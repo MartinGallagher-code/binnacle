@@ -67,38 +67,7 @@ Normalization (outputs almost never match byte for byte):
   --head N/--tail N   only the first/last N lines
   --field N           only whitespace-field N of each line
 
-Why this exists
-  pssh and friends print N outputs and leave you to read them.  What you
-  actually want to know is which hosts differ from the rest, and that is
-  a different question: 47 agree, 3 do not, here is the diff.
-
-  A host that could not be reached is a group, not an error.  "3 hosts
-  never answered" is usually the finding, and a tool that prints those to
-  stderr and moves on lets you believe you checked them.
-
-  It composes: `agree.py script why-slow -- --csv` fans a diagnosis
-  across the fleet and groups the hosts by what is wrong with them, which
-  is fleet-wide triage in one command.  A bare name like that finds the
-  tool installed alongside this file, so it works from a pip install
-  where nobody knows the path; an explicit path still wins.
-
-Robustness properties
-  * output is replayed in host-list order, never completion order, so two
-    runs over the same list diff cleanly
-  * a failed, timed-out or unreachable host becomes its own group and is
-    always reported
-  * the active normalizations are printed with the result, because "47
-    agree" means nothing if you masked every number to get there
-  * `sudo -n` always: a password prompt would hang a fan-out, and a host
-    without NOPASSWD becomes a visible finding rather than a hang
-  * no password is ever read, passed or stored, and no key is distributed
-  * the mutation guard is a typo guard, not security -- it is trivially
-    bypassed with --yes and says so
-  * hosts left holding an empty answer by the normalizations are named,
-    and never counted as unanimous: a comparison of empty strings is a
-    comparison that did not happen
-  * exit 0 unanimous, 1 divergence (or nothing left to compare), 3 some
-    host failed, 2 usage
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/agree.html
 """
 
 import argparse

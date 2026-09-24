@@ -207,3 +207,9 @@ Each tool's `--help` prints its own module docstring, and the
 [CLI reference](cli.md) is generated from the live argparse parsers at build
 time. A flag cannot exist without being documented, nor linger in the docs
 after it is removed.
+
+`--help` is a reference card, not the manual: a summary line, usage
+examples, the options and the exit codes, and then a link to the tool's page
+here. The explanation -- what it does, why, how it behaves at the edges --
+lives in the manual only. The suite holds both halves: every flag has to
+appear in `--help`, and `--help` has to stay short and end with that link.

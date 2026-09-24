@@ -266,6 +266,44 @@ EOF
     assert_contains "$nm" "--mtu-ceiling"
 }
 
+t_help_is_a_reference_card_not_the_manual() {
+    # dredge --help once ran to 506 lines, most of them the manual's prose.
+    # --help is the options and a pointer; the explanation lives in
+    # docs/tools/, and each tool's help has to say where.
+    "$PY" - "$BINNACLE_DIR" <<'EOF'
+import importlib.util, os, sys
+
+root = sys.argv[1]
+LIMIT = 100
+DOCS = {"why_slow": "why-slow"}
+bad = []
+for name in ("why_slow", "agree", "logtriage", "netmesh", "reachable",
+             "resolve", "during", "skew", "binnacle", "muster", "manifest",
+             "dredge"):
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(root, name + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    doc = (mod.__doc__ or "").rstrip()
+    n = len(doc.splitlines())
+    if n > LIMIT:
+        bad.append("%s: --help is %d lines, over %d" % (name, n, LIMIT))
+    link = ("https://binnacle.readthedocs.io/en/latest/tools/%s.html"
+            % DOCS.get(name, name))
+    if not doc.endswith(link):
+        bad.append("%s: --help does not end with %s" % (name, link))
+    page = os.path.join(root, "..", "docs", "tools",
+                        DOCS.get(name, name) + ".md")
+    if not os.path.isfile(page):
+        bad.append("%s: no manual at %s" % (name, page))
+
+if bad:
+    sys.stderr.write("\n".join(bad) + "\n")
+    sys.exit(1)
+EOF
+    assert_status $? 0
+}
+
 t_a_stray_utf8_byte_does_not_lose_the_run() {
     # The floor this package targets is RHEL 8: Python 3.6, often LANG=C,
     # where stdout is ASCII.  One UTF-8 name in a log, a process table, a
@@ -614,6 +652,7 @@ run_test "skew groups by what clocks are doing" t_skew_groups_hosts_by_what_thei
 run_test "--fleet-csv is the two flags"         t_fleet_csv_is_the_two_flags_and_says_so
 run_test "the tools share one csv header"       t_the_diagnostic_tools_share_one_csv_header
 run_test "every flag appears in --help"         t_every_flag_appears_in_its_tools_help
+run_test "--help is short and links the manual" t_help_is_a_reference_card_not_the_manual
 run_test "declared copies have not drifted"     t_declared_copies_have_not_drifted
 run_test "every declared version agrees"        t_every_declared_version_agrees
 run_test "a stray utf8 byte is survivable"      t_a_stray_utf8_byte_does_not_lose_the_run

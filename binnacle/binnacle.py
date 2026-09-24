@@ -18,62 +18,14 @@ Options:
   -d, --dir DIR       with copy, where the files land (default: here)
       --force         with copy, overwrite a file that is already there
 
-What it does
-  A binnacle is the housing that holds the instruments; this is the
-  housing talking.  It answers the three questions you have before you
-  can use any of the others: **what is installed here**, **how do I
-  drive it**, and **where is the file** -- without needing to already
-  know the eleven names.
-
-  `binnacle` on its own prints one row per instrument: the command name,
-  the version that instrument reports for *itself*, and the question it
-  answers.  `binnacle help` concatenates every tool's `--help`, which is
-  each tool's own module docstring, so one page is the whole manual for
-  the package as installed rather than as documented somewhere else.
-
-Why the version column is per-tool and not one number
-  It would be shorter to print the package version once.  It would also
-  hide the failure this is most useful for.  Each of these files carries
-  its own `VERSION`, because each is routinely copied to a machine that
-  has never heard of this package -- `netmesh` scp's itself across a mesh,
-  `agree script why-slow` pushes a tool to a fleet -- and out there its
-  own `VERSION` is the only version there is.  `agree` then groups a fleet
-  by what `--version` reports, so one module left behind at an older
-  number does not read as a bad install: it reads as version skew across
-  the whole fleet, and the hunt starts in the wrong place.
-
-  So every instrument is asked separately, and a disagreement is a
-  finding, printed and reflected in the exit status.
-
-Getting a tool onto another machine
-  Every instrument is a standalone file -- standard library only, no
-  imports from its siblings -- because the way it usually gets used is
-  copied onto a box that has never heard of this package.  Doing that
-  needs the file, and after `pip install` the file is somewhere under
-  site-packages that nobody has memorised.
-
-  `binnacle copy netmesh` puts `netmesh.py` in the current directory,
-  executable, ready for `scp netmesh.py somehost:`.  It keeps the file
-  name the package uses, because that is the name the rest of the
-  package expects: `agree script why-slow` looks for `why_slow.py`, and
-  a copy renamed on the way out stops matching.
-
-  It refuses to write over a file that is already there and differs,
-  because the thing most likely to be sitting under that name is your
-  edited copy.  `--force` says otherwise.  A file already there and
-  byte-identical is reported as such and left alone.
-
-What it does not do
-  It runs nothing.  Building a parser to format its help does not execute
-  any tool, touch the network, or read /proc.  This command reads the
-  directory it lives in and nothing else.
-
 Exit status
   0   every instrument loaded and agreed on a version; or, for copy,
       every named file is now here
   1   an instrument could not be loaded, or a version disagrees; or, for
       copy, a file could not be written or would have overwritten one
   2   usage error -- an unknown verb, or a tool that is not installed
+
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/binnacle.html
 """
 
 import argparse

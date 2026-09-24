@@ -152,6 +152,13 @@ says so, because a clean report you cannot trust is worse than no report.
 `--all` lists every skipped rule; the kernel-log skip is shown even without
 it, because it is the biggest thing you lose.
 
+## What it needs
+
+Nothing beyond Python 3.6+ and the standard library — no packages, and no
+root. Without root you lose the kernel log (so OOM kills and I/O errors) and
+per-process I/O, and the report tells you exactly that rather than quietly
+checking less. `--no-exec` runs without spawning a single subprocess.
+
 ## One remote box
 
 ```bash
@@ -205,7 +212,8 @@ That reports *"44 hosts healthy, 4 agree they are swapping, 2 unreachable"*.
 
 ## Exit codes
 
-`0` always, unless the tool itself failed (`2` = usage). Severity is opt-in
+`0` always, unless the tool itself failed (`2` = usage), so it is safe in a
+pipeline by default. Severity is opt-in
 via `--exit-code`, which returns `0` ok / `10` warn / `20` critical —
 deliberately not `1`/`2`, so a monitoring wrapper can never confuse a
 severity with a usage error.

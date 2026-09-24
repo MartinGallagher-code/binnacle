@@ -30,91 +30,12 @@ Options:
       --stale-lock S  break a lock older than this           (default 120)
       --quiet         no summary, just the data
 
-What it does
-  Some jobs are a list and a promise: forty hosts to patch, nine hundred
-  files to re-encode, every switch in a rack to walk up to.  The work is
-  handed out to whoever is free, it must happen once each, and the thing
-  that actually goes wrong is not the work -- it is the bookkeeping.  Two
-  people take the same host.  Somebody's laptop shuts and eleven items
-  are held by nobody, forever.  At the end nobody can say which twelve of
-  the forty are left, so the whole list gets re-walked to be sure.
-
-  This is the bookkeeping, and nothing else.  It does not do the work, it
-  does not know what the work is, and it never touches the items -- they
-  are strings to it, hostnames or filenames or ticket numbers.  It only
-  answers: who has what, for how long, and what is still outstanding.
-
-The lease is the whole idea
-  `take` marks items held by you until a deadline.  If you finish, `done`
-  closes them.  If you do not -- the job died, the laptop shut, you went
-  home -- the lease simply runs out and the items are available again.
-  Nothing has to notice this and nothing has to run: an expired lease is
-  not a lease, and every command works that out from the timestamps as it
-  opens the pool.  There is no daemon, no reaper and no cleanup step.
-
-  A lease that has to be reclaimed is not a silent event.  `attempts`
-  counts every time an item was taken, so an item taken four times and
-  finished none of them is the thing `status` puts in front of you: that
-  is not a scheduling problem, it is a host nobody can actually patch.
-
-Finishing late
-  If your lease lapsed while you were working, someone else may already
-  hold the item.  Reporting it done is still accepted -- the work did
-  happen, and refusing it would send the pool out to have it done twice
-  more -- but it is reported as a CONFLICT naming both holders and how
-  late it was, because two people on one host is exactly what the lease
-  existed to prevent.  The fix is nearly always a longer --lease, and
-  `status` says so when it sees leases expiring mid-run.
-
-Sharing a pool between machines
-  The pool is one file; put it on a shared filesystem and workers on any
-  number of hosts draw from it.  Locking is an O_EXCL sentinel beside the
-  pool rather than flock, because flock over NFS is not dependable, and
-  every write is a temporary file renamed into place, so a reader never
-  sees half a pool.  A lock whose holder died is broken after
-  --stale-lock seconds rather than blocking the fleet forever.
-
-  Leases are wall-clock deadlines, so they assume the workers roughly
-  agree about the time.  If they do not, leases expire early on the fast
-  box and late on the slow one -- `skew` is the tool for that question.
-
-Item names, and how a list of them is written
-  A newline, a space and a comma all separate one item from the next, so
-  a file with one per line, `muster add 'web01 web02'` and `muster add
-  web01,web02` are the same command.  That works because **an item name
-  never contains whitespace or a comma** -- those are the delimiters,
-  which is also what makes a ticket unambiguously one item per line.
-
-  Commas are split outside brackets only, so `node[1,3,5]` is still one
-  range.  A space inside a range is refused rather than half-expanded:
-  `web[01-04, 06]` would otherwise leave a literal item called
-  `web[01-04,` for somebody to find weeks later.
-
-  Everything else is fine -- a name may hold dots, colons, slashes or
-  non-ASCII, so hostnames, paths and ticket numbers all work.
-
-Conventions
-  The pool is a CSV you can read, diff, and put in git:
-
-      item,state,holder,lease_id,taken_ts,expires_ts,done_ts,attempts,note
-
-  A ticket is one item per line, so it is already the input to whatever
-  does the work -- `for h in $(grep -v '^#' mine.txt); do ...` -- with the
-  lease recorded in comment lines above it, which `done` reads to tell
-  your completion from somebody else's.
-
-  A hand-written list of item names, or `--item`, works too -- with the
-  lease line missing there is nothing to check a completion against, so
-  `done` accepts it quietly.  `release` does not: with no ticket the
-  holder recorded on the row decides, so releasing an item somebody else
-  holds is refused rather than done silently.  Name yourself with `--as`
-  if that is who took it, or use `reset`, which puts an item back
-  regardless of who holds it.
-
 Exit status
   0   nothing wrong
   1   something worth seeing: a conflict, an unknown item, a stuck item
   2   usage error, or the pool could not be locked
+
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/muster.html
 """
 
 import argparse

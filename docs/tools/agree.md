@@ -176,6 +176,10 @@ largest *successful* group becomes the baseline, and every other group is
 rendered as a unified diff against it. A fleet where most hosts failed still
 diffs against the ones that worked.
 
+Output is replayed in host-list order, never completion order, so two runs
+over the same list diff cleanly however the ssh connections happened to
+race.
+
 ## Host lists
 
 The same grammar as `servers.txt` in `iperf_orchestrator` and
@@ -220,7 +224,8 @@ the fleet — and `--limit N` refuses runs wider than N without `--yes`.
 `--sudo` prefixes `sudo -n`, always with `-n`. A password prompt would hang
 a fan-out, and a host without NOPASSWD becomes a **visible finding** (it
 lands in an `exit:1` group saying `sudo: a password is required`) rather
-than a mystery hang. No password is ever read, passed or stored.
+than a mystery hang. No password is ever read, passed or stored, and no
+key is distributed.
 
 ## Pushing a script
 
