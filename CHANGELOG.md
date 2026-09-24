@@ -277,6 +277,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`dredge --relay-dir` could delete a directory it did not create.**
+  The relay spool is scratch dredge clears before use and removes after,
+  so a run killed mid-flight leaves no half-collection on the bastion.
+  Nothing checked that the path was dredge's: a `--relay-dir` (or
+  `DREDGE_RELAY_DIR`) pointed at an existing tree was `rm -rf`'d on the
+  jump box before the run even started, and swept again at the end. Point
+  it at a working directory by mistake and the directory was gone.
+
+  A spool dredge makes now carries a marker file, and dredge removes only
+  a directory that has one. A `--relay-dir` that already exists without
+  the marker is taken to be the caller's own directory: the run is
+  refused on the jump box and nothing in it is deleted, the end-of-run
+  sweep is guarded by the same marker so a refused run is never tidied
+  away by deleting the tree it spared, and a `--relay-dir` that resolves
+  to a root or a home is refused on this side before any host is
+  contacted. A genuine leftover spool -- marker inside -- is still
+  cleared and reused as before.
+
 - **A login banner on a host -- or on a jump box -- wrecked the
   collection.** A banner from `/etc/bashrc`, a MOTD, a "last login"
   line, the compliance notice a bastion prints at every login: all of it

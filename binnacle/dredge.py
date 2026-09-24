@@ -3072,10 +3072,28 @@ RELAY_SPOOL = "dredge-relay"
 # exec fails with "Argument list too long" and the fleet is never
 # contacted.  stdin has no such ceiling, and tar is already the shape
 # the answer comes back in.
+#
+# The marker a spool dredge made carries, so dredge can tell its own
+# scratch directory from one the caller handed it by mistake. It lives
+# inside the spool, never in the tar that comes home (only collect/,
+# report, errors and status are packed), and its absence is what stops
+# `rm -rf` from falling on a directory dredge did not create -- the
+# difference between clearing a spool and deleting somebody's tree.
+RELAY_MARKER = ".dredge-relay-spool"
+
 _RELAY_SCRIPT = r'''
 spool=%(spool)s
+marker=%(marker)s
+if [ -e "$spool" ] && [ ! -f "$spool/$marker" ]; then
+  echo "dredge: $spool already exists here and dredge did not make it --" >&2
+  echo "dredge: refusing to touch it, so nothing in it is deleted. Point" >&2
+  echo "dredge: --relay-dir at a path dredge can own, or omit it for the" >&2
+  echo "dredge: default under /var/tmp." >&2
+  exit 8
+fi
 rm -rf "$spool" 2>/dev/null
 mkdir -p "$spool" || { echo "dredge: cannot make $spool" >&2; exit 7; }
+: > "$spool/$marker" || { echo "dredge: cannot write in $spool" >&2; exit 7; }
 cleanup() { [ -n "%(keep)s" ] || rm -rf "$spool"; }
 trap cleanup EXIT INT TERM
 cd "$spool" || exit 7
@@ -3178,6 +3196,7 @@ def relay_command(args):
     remote = " ".join(shlex.quote(a) for a in relay_remote_argv(args))
     return _RELAY_SCRIPT % {
         "spool": shlex.quote(args.relay_dir),
+        "marker": shlex.quote(RELAY_MARKER),
         "keep": "1" if args.keep_relay else "",
         "python": shlex.quote(args.relay_python or ""),
         "mark": shlex.quote(args.mark_token + MARK_TAR),
@@ -3196,9 +3215,14 @@ def _relay_sweep(args, relay):
     """
     if args.keep_relay:
         return
+    # Only remove a spool dredge made: the same marker the far side checks
+    # before it clears the path guards the sweep too, so a run that refused
+    # to touch the caller's directory is never tidied away by deleting it.
+    d = shlex.quote(args.relay_dir)
+    sweep = "test -f %s/%s && rm -rf %s" % (d, shlex.quote(RELAY_MARKER), d)
     try:
         p = subprocess.Popen(
-            ssh_argv(args, relay, "rm -rf %s" % shlex.quote(args.relay_dir)),
+            ssh_argv(args, relay, sweep),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True)
         p.wait(timeout=30)
@@ -3466,9 +3490,12 @@ def build_parser():
                         "collection from there, and bring it back")
     p.add_argument("--relay-dir", metavar="DIR",
                    default=_env("RELAY_DIR"),
-                   help="where the copy and the collection live on the "
-                        "jump box while the run lasts (default: a path "
-                        "under /var/tmp named for this run)")
+                   help="dredge's own scratch directory on the jump box, "
+                        "where the copy and the collection live while the "
+                        "run lasts. dredge clears it before use and removes "
+                        "it after, so give it a path dredge can own, never "
+                        "an existing tree (default: a path under /var/tmp "
+                        "named for this run)")
     p.add_argument("--relay-python", metavar="PY",
                    default=_env("RELAY_PYTHON"),
                    help="the python to run it with on the jump box "
@@ -3682,6 +3709,20 @@ def main(argv=None):
         # still leaves something this side knows how to remove.
         args.relay_dir = "/var/tmp/%s-%s" % (RELAY_SPOOL,
                                              args.mark_token[-16:])
+    if args.relay:
+        # dredge clears the spool before use and removes it after, so a
+        # relay-dir that resolves to a root or a home is a request to
+        # delete one. The far side has the real guard -- a marker only a
+        # dredge spool carries -- but these few are worth refusing before
+        # a single host is contacted, for the message alone.
+        canon = os.path.normpath(args.relay_dir.rstrip("/")) if \
+            args.relay_dir.strip() else ""
+        if canon in ("", ".", "/", os.path.expanduser("~")):
+            die("--relay-dir %r is dredge's scratch directory on the jump "
+                "box, and dredge clears it before use -- it cannot be a "
+                "root or a home directory.\n"
+                "       Omit --relay-dir for a safe default under /var/tmp."
+                % args.relay_dir)
 
     hosts = collect_hosts(args)
 
