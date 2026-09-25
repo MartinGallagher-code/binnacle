@@ -118,6 +118,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are escaped rather than truncated, because a tab ends a column and a
   newline ends a row.
 
+  `UNPARSED` and `NEWVAR` are findings, so `--quiet` still prints them:
+  a quiet run whose table silently lost a host or a column is the one
+  nobody is watching for it. When *no* host's answer reads, the fault is
+  the command's shape rather than any one host's -- `uptime`, which
+  prints prose, is the usual one -- and the finding says so and names
+  the shapes there are.
+
   `--daemon` normally implies `--follow` so a timer cannot re-fetch every
   file in full every five minutes. With `--tsv` it does not: a table
   wants the whole answer each pass, and re-running a command is not a

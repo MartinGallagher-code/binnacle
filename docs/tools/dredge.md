@@ -557,6 +557,44 @@ which is which. A host that prints a different *number* of values is refused
 too, rather than filled in — a short row there is not a missing value, it is
 every column after the gap holding the wrong one.
 
+### A command that prints prose
+
+`uptime` is none of the four. It prints a sentence:
+
+```text
+ 09:14:02 up 10 days,  3:22,  2 users,  load average: 0.41, 0.35, 0.30
+```
+
+`kv` finds no `=` in it, and `values` cannot name its fields either, because
+how many there are depends on the answer: `up 3:22,` is ten fields, `up 5 min,`
+eleven and `up 10 days,  3:22,` twelve. Every host lands in `UNPARSED`, and
+because not one of them read, the finding says the fault is the command's
+shape rather than any one host's.
+
+The numbers `uptime` prints come from `/proc`, which is already in shapes:
+
+```bash
+dredge --cmd 'read up _ < /proc/uptime; read l1 l5 l15 _ < /proc/loadavg
+              echo "uptime_s=${up%.*}"; echo "load1=$l1"
+              echo "load5=$l5"; echo "load15=$l15"' \
+       --servers hosts.txt --tsv uptime.tsv
+```
+
+```text
+date                   host    uptime_s  load1   load5   load15
+2026-09-18T09:14:02    web01   884411    0.41    0.35    0.30
+2026-09-18T09:14:02    web02   12904     1.93    1.20    0.88
+```
+
+`/proc/loadavg` always prints five fields, so it is also `values` as it
+stands:
+
+```bash
+dredge --cmd 'cat /proc/loadavg' --parse values \
+       --columns load1,load5,load15,running,lastpid \
+       --servers hosts.txt --tsv load.tsv
+```
+
 ### The header does not move
 
 The header is written when the file is created, and every row after it is
@@ -586,6 +624,10 @@ machine that was fine. Its answer is still collected whole either way; only its
 row is missing. A host that printed nothing gets no row for the same reason: an
 empty line under a timestamp claims the fleet reported zero, which is a
 different and much worse claim than saying nothing.
+
+`UNPARSED` and `NEWVAR` are findings, so `--quiet` still prints them. A quiet
+run is the one nobody is watching, and a table that silently lost a host or a
+column is exactly what it would otherwise hide.
 
 Values are escaped, not truncated: a tab ends a column and a newline ends a
 row, so either would turn one row into two or shift every column after it.

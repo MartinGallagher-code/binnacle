@@ -1037,6 +1037,45 @@ t_an_answer_that_will_not_parse_is_a_finding_not_a_gap() {
     assert_eq "$(cat out/echo~web01)" "not kv at all"
 }
 
+t_quiet_still_says_a_host_has_no_row() {
+    # `uptime` is prose, not one of the shapes. Under --quiet that used to
+    # be no output, no table and exit 0 -- a run that looked like it
+    # worked and wrote nothing.
+    seed
+    cd "$TEST_TMPDIR"
+    prose='echo " 09:14:02 up 10 days,  3:22,  2 users,  load average: 0.41"'
+    out="$(dr --cmd "$prose" -S web01,web02 -d out --tsv m.tsv --quiet 2>&1)"
+    assert_contains "$out" "UNPARSED"
+    assert_contains "$out" "web02"
+    # Nothing read at all, so it is the command's shape, and it says so.
+    assert_contains "$out" "print name=value lines"
+    assert_no_file "m.tsv"
+}
+
+t_one_unreadable_host_is_not_blamed_on_the_shape() {
+    # One host printing an error is that host's problem, not the command's:
+    # the shape advice is for when nothing read.
+    seed
+    cd "$TEST_TMPDIR"
+    printf 'a=1\n' > "$FAKE_ROOT/web01/vars"
+    printf 'cat: vars: Permission denied\n' > "$FAKE_ROOT/web02/vars"
+    out="$(dr --cmd 'cat vars' -S web01,web02 -d out --tsv m.tsv --quiet 2>&1)"
+    assert_contains "$out" "UNPARSED"
+    assert_contains "$out" "web02"
+    assert_not_contains "$out" "the command's shape"
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "2"
+}
+
+t_quiet_still_says_a_name_has_no_column() {
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"' -S web01 -d out --tsv m.tsv --quiet
+    out="$(dr --cmd 'echo "a=2"; echo "b=3"' -S web01 -d out --tsv m.tsv \
+           --quiet 2>&1)"
+    assert_contains "$out" "NEWVAR"
+    assert_contains "$out" "b"
+}
+
 t_a_value_cannot_break_the_row_it_is_in() {
     # A tab ends a column and a newline ends a row: either would turn one
     # row into two, or shift every column after it.
@@ -1876,6 +1915,9 @@ run_test "the header does not move"           t_the_header_does_not_move_when_a_
 run_test "a missing variable is a blank"      t_a_missing_variable_is_a_blank_not_a_shift
 run_test "every promised shape is read"       t_every_promised_shape_is_read
 run_test "an unreadable answer is a finding"  t_an_answer_that_will_not_parse_is_a_finding_not_a_gap
+run_test "--quiet still says a row is missing" t_quiet_still_says_a_host_has_no_row
+run_test "one bad host is not the shape"      t_one_unreadable_host_is_not_blamed_on_the_shape
+run_test "--quiet still says a column is new" t_quiet_still_says_a_name_has_no_column
 run_test "a value cannot break its row"       t_a_value_cannot_break_the_row_it_is_in
 run_test "a silent host gets no row"          t_a_silent_host_gets_no_row
 run_test "--columns pins the header"          t_columns_pins_the_header_up_front
