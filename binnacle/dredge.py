@@ -40,8 +40,9 @@ Options:
       --append        add what came back to the end of what is already here
       --prepend       add it to the beginning instead
       --replace       overwrite what is here (the default, except under
-                      --follow, where --append is)
-      --mark          write a marker line where old meets new
+                      --follow, where --append is).  All three are for
+                      collected files: a --tsv table is always appended to
+      --mark         write a marker line where old meets new
       --max-bytes N   skip a file larger than this  (default 100M, 0 none)
       --max-files N   stop after this many files per host   (default 500)
   -j, --jobs N        hosts contacted at once               (DREDGE_JOBS, 20)
@@ -2119,6 +2120,17 @@ def _render_findings(out, results, args, compact=False):
             out.append("            ... and %d more" % (len(unparsed) - 5))
         out.append("            Its answer is still collected whole -- "
                    "only its row is missing.")
+        if not any(r.variables for r in results):
+            # Not one host read, so it is the command and not a host: a
+            # probe that prints prose, like `uptime`, has no shape to read
+            # until the command gives it one.
+            others = ", ".join(s for s in ("kv", "json", "row", "values")
+                               if s != args.parse)
+            out.append("            Not one host read as %s, so it is the "
+                       "command's shape: make it" % args.parse)
+            out.append("            print %s," % PARSE_SHAPES[args.parse])
+            out.append("            or pick the shape it does print with "
+                       "--parse (%s)." % others)
     fresh = []
     for r in results:
         for name in r.unknown_vars:
@@ -2291,6 +2303,14 @@ def write_csv(results, args, path, append=False):
 # one-liner -- to read it as a time series rather than as forty files.
 
 TSV_META = ("date", "host")
+
+# The shapes --parse reads, and what a command has to print to be one.
+PARSE_SHAPES = {
+    "kv": "name=value lines",
+    "json": "a JSON object",
+    "row": "a header line then a values line",
+    "values": "the values --columns names",
+}
 
 # What a name is allowed to be. A variable that arrives called `load 1`
 # or `a\tb` would put a tab or a space where a column boundary goes, so
@@ -2575,9 +2595,13 @@ def report_pass(args, results, elapsed, compact=False):
 
     Quiet means the same thing in both shapes: a failure is still a
     finding and still gets said, because a daemon that swallows an
-    unreachable host is a daemon you cannot leave running.
+    unreachable host is a daemon you cannot leave running.  So is a
+    host that answered but has no row in the table, or a name the
+    table had no column for: that is the table being wrong, and a
+    quiet run is the one nobody is watching for it.
     """
-    if args.quiet and not any(r.outcome != OK for r in results):
+    if args.quiet and not any(r.outcome != OK or r.parse_error
+                              or r.unknown_vars for r in results):
         return
     sys.stdout.write(render(results, args, elapsed, compact=compact))
     sys.stdout.flush()

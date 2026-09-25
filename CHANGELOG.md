@@ -118,6 +118,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are escaped rather than truncated, because a tab ends a column and a
   newline ends a row.
 
+  `UNPARSED` and `NEWVAR` are findings, so `--quiet` still prints them:
+  a quiet run whose table silently lost a host or a column is the one
+  nobody is watching for it. When *no* host's answer reads, the fault is
+  the command's shape rather than any one host's -- `uptime`, which
+  prints prose, is the usual one -- and the finding says so and names
+  the shapes there are.
+
+  The table is always appended to, whatever `--append`, `--prepend` or
+  `--replace` says: those three decide where a collected file's bytes
+  land, and a `--replace` that emptied the table every pass would leave
+  a time series one row deep. A fresh table is a new path, or the old
+  one removed first.
+
   `--daemon` normally implies `--follow` so a timer cannot re-fetch every
   file in full every five minutes. With `--tsv` it does not: a table
   wants the whole answer each pass, and re-running a command is not a
