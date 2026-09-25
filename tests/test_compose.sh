@@ -243,7 +243,7 @@ def walk(parser, flags, seen):
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
              "during", "skew", "binnacle", "muster", "manifest",
-             "dredge"):
+             "dredge", "rig"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -279,7 +279,7 @@ DOCS = {"why_slow": "why-slow"}
 bad = []
 for name in ("why_slow", "agree", "logtriage", "netmesh", "reachable",
              "resolve", "during", "skew", "binnacle", "muster", "manifest",
-             "dredge"):
+             "dredge", "rig"):
     spec = importlib.util.spec_from_file_location(
         name, os.path.join(root, name + ".py"))
     mod = importlib.util.module_from_spec(spec)
@@ -493,8 +493,8 @@ VERBATIM = [
     ("read_pressure", "why_slow.py", "during.py"),
     ("_read", "why_slow.py", "resolve.py"),
     ("_read", "why_slow.py", "skew.py"),
-    # Duplicated into all ten instruments and into the index, so all
-    # eleven files are held to it.
+    # Duplicated into every instrument and into the index, so all
+    # thirteen files are held to it.
     ("_stdio_safe", "why_slow.py", "agree.py"),
     ("_stdio_safe", "why_slow.py", "logtriage.py"),
     ("_stdio_safe", "why_slow.py", "netmesh.py"),
@@ -505,6 +505,7 @@ VERBATIM = [
     ("_stdio_safe", "why_slow.py", "binnacle.py"),
     ("_stdio_safe", "why_slow.py", "muster.py"),
     ("_stdio_safe", "why_slow.py", "manifest.py"),
+    ("_stdio_safe", "why_slow.py", "rig.py"),
     ("_WriteGuard", "why_slow.py", "agree.py"),
     ("_WriteGuard", "why_slow.py", "logtriage.py"),
     ("_WriteGuard", "why_slow.py", "netmesh.py"),

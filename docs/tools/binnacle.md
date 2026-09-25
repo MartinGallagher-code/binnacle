@@ -3,10 +3,10 @@
 **What is in this binnacle, and how to drive it.**
 
 A binnacle is the housing that holds the instruments. `binnacle` is the
-housing talking: it is not a twelfth instrument, it is the index. It answers
+housing talking: it is not a thirteenth instrument, it is the index. It answers
 the three questions you have before you can use any of the others — *what is
 installed here*, *how do I drive it*, and *where is the file* — without
-needing to already know the eleven names.
+needing to already know the twelve names.
 
 ```bash
 binnacle                # the instruments installed here, and their versions

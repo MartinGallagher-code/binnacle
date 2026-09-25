@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`rig`, the twelfth instrument: run a command with its settings kept
+  in a file.** The flags a tool needs are written down once, one a line,
+  by four rules -- `jobs=20` is `--jobs 20`, `verbose` is `--verbose`,
+  `host=` asks for it, `mode=fast|safe` asks which -- and `rig app.conf
+  -- mytool` runs mytool with them, becoming it: its output, its signals,
+  its exit status.
+
+  Anything left blank is asked on **one screen**, drawn with curses on the
+  terminal itself rather than on stdout, with the command line the
+  answers make written underneath as they are typed. Enter runs it, Esc
+  runs nothing (exit 130). With no terminal to ask on -- cron, CI -- it
+  refuses rather than waits, and names the `--set NAME=VALUE` that would
+  answer each question.
+
+  `{name}` in the command puts a setting there instead of adding a flag
+  (`ssh {user}@{host} uptime`), and `{...}` says where the flags go when
+  the end is wrong. A `{name}` the file cannot fill is refused before
+  anything is asked, with the `{{...}}` spelling that means real braces.
+
+  `rig grep.conf --init -- grep` writes the file to start from, out of the
+  tool's own `--help`, then `-h`, then its man page: every flag it
+  describes, each commented out under its line of help, with choices and
+  defaults filled in where the help gives them. It never writes over a
+  file, and asks the tool rather than a run of it.
+
 - **`dredge --relay` runs the collection from a jump box.** The fleet is
   behind a bastion: this box can reach B, and only B can reach C-Z.
 
