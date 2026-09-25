@@ -8,7 +8,7 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/MartinGallagher-code/binnacle)](https://api.reuse.software/info/github.com/MartinGallagher-code/binnacle)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds eleven, for Linux boxes, the fleets they belong to, and the networks
+one holds twelve, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -24,6 +24,7 @@ between them.
 | `muster` | Who has which of these, and what is still outstanding? |
 | `manifest` | Which servers are those, in the layout? |
 | `dredge` | Bring that answer back from every host, kept apart |
+| `rig` | Run that command with the settings in this file |
 
 ```bash
 pip install binnacle
@@ -42,8 +43,8 @@ binnacle help          # every tool's --help, on one page
 binnacle copy netmesh  # netmesh.py, here, ready to scp somewhere
 ```
 
-`binnacle` is the housing rather than a twelfth instrument -- one name to
-remember instead of eleven, and the only thing that will tell you a module
+`binnacle` is the housing rather than a thirteenth instrument -- one name to
+remember instead of twelve, and the only thing that will tell you a module
 was left behind at an older version.
 
 Every tool is one standalone file, so getting one onto a box that has never
@@ -103,7 +104,7 @@ agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- -
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The eleven, briefly
+## The twelve, briefly
 
 ### why-slow
 
@@ -242,6 +243,19 @@ added travels. `--daemon` does that on a timer -- a pass, a wait, another
 pass -- which is a fleet-wide `tail -F` that needed nothing installed on the
 fleet.
 
+### rig
+
+Runs a command with its settings kept in a file, so the twelve flags a tool
+needs are written down once rather than retyped. The file has four rules:
+`jobs=20` is `--jobs 20`, `verbose` is `--verbose`, `host=` asks for it, and
+`mode=fast|safe` asks which. **Anything left blank is asked on one screen**,
+with the command line it makes written underneath as you answer, and Esc
+runs nothing. `{host}` in the command puts a value in place rather than
+adding a flag, which is how `rig ssh.conf -- ssh {user}@{host} uptime` works.
+`rig grep.conf --init -- grep` writes the file to start from, out of the
+tool's own `--help`, `-h` or man page, with every flag in it still commented
+out.
+
 ## Documentation
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
@@ -252,7 +266,7 @@ usage, options and exit status, then a link to that tool's manual.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # twelve suites, 503 checks
+bash tests/run_tests.sh          # fourteen suites, 580 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

@@ -35,7 +35,7 @@ usual cause of `invalid-publisher`.
    the suite fails if they do not:
    - `pyproject.toml` → `version`
    - `binnacle/__init__.py` → `VERSION`
-   - each tool's own `VERSION`, in all ten modules
+   - each tool's own `VERSION`, in every module
    - `binnacle/binnacle.py` → `VERSION`
 
    The ten are not redundant. A tool is routinely `scp`'d to a machine

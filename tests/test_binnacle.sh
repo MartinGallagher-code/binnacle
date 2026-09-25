@@ -28,7 +28,7 @@ pkg_version() {
 # How many instruments sit beside binnacle.py, counted the way discover()
 # counts them: every .py in the package directory that is neither private
 # nor the housing itself.  Derived rather than written down, so adding a
-# twelfth tool does not turn four of these cases red.
+# thirteenth tool does not turn four of these cases red.
 pkg_tool_count() {
     n=0
     for f in "$BINNACLE_DIR"/*.py; do
@@ -42,7 +42,7 @@ pkg_tool_count() {
 
 t_lists_every_installed_tool() {
     out="$(bn)"
-    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge; do
+    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge rig; do
         assert_contains "$out" "$tool"
     done
 }
@@ -78,7 +78,7 @@ t_help_covers_every_tool() {
     out="$(bn help)"
     # Each tool's help is its own module docstring, so its usage line is
     # the thing to look for -- and under its own name, not binnacle's.
-    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest; do
+    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge rig; do
         assert_contains "$out" "usage: $tool"
     done
 }
