@@ -974,6 +974,18 @@ t_a_second_run_appends_under_the_same_header() {
     assert_eq "$(sed -n 3p m.tsv | cut -f3)" "2"
 }
 
+t_replace_is_for_the_files_not_the_table() {
+    # --replace lands a collected file over the last one. The table is a
+    # time series, and one that restarted every run would be one row deep.
+    seed
+    cd "$TEST_TMPDIR"
+    dr --cmd 'echo "a=1"' -S web01 -d out --tsv m.tsv --replace --quiet
+    dr --cmd 'echo "a=2"' -S web01 -d out --tsv m.tsv --replace --quiet
+    assert_eq "$(cat out/echo~web01)" "a=2"
+    assert_eq "$(wc -l < m.tsv | tr -d ' ')" "3"
+    assert_eq "$(cut -f3 m.tsv | tr '\n' ' ')" "a 1 2 "
+}
+
 t_the_header_does_not_move_when_a_name_appears_later() {
     # A header rebuilt from each pass would renumber every column the
     # first time a host answered differently, and a week of rows behind
@@ -1911,6 +1923,7 @@ run_test "an impossible interval is refused"   t_an_interval_that_cannot_mean_an
 run_test "an interval is spelled like --since" t_the_interval_is_spelled_the_way_since_is
 run_test "a table has date, host, variables"   t_a_table_has_a_date_a_host_and_the_variables
 run_test "a second run appends to it"         t_a_second_run_appends_under_the_same_header
+run_test "--replace leaves the table alone"   t_replace_is_for_the_files_not_the_table
 run_test "the header does not move"           t_the_header_does_not_move_when_a_name_appears_later
 run_test "a missing variable is a blank"      t_a_missing_variable_is_a_blank_not_a_shift
 run_test "every promised shape is read"       t_every_promised_shape_is_read

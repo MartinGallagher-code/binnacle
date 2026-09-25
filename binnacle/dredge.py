@@ -40,8 +40,9 @@ Options:
       --append        add what came back to the end of what is already here
       --prepend       add it to the beginning instead
       --replace       overwrite what is here (the default, except under
-                      --follow, where --append is)
-      --mark          write a marker line where old meets new
+                      --follow, where --append is).  All three are for
+                      collected files: a --tsv table is always appended to
+      --mark         write a marker line where old meets new
       --max-bytes N   skip a file larger than this  (default 100M, 0 none)
       --max-files N   stop after this many files per host   (default 500)
   -j, --jobs N        hosts contacted at once               (DREDGE_JOBS, 20)

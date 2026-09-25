@@ -125,6 +125,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prints prose, is the usual one -- and the finding says so and names
   the shapes there are.
 
+  The table is always appended to, whatever `--append`, `--prepend` or
+  `--replace` says: those three decide where a collected file's bytes
+  land, and a `--replace` that emptied the table every pass would leave
+  a time series one row deep. A fresh table is a new path, or the old
+  one removed first.
+
   `--daemon` normally implies `--follow` so a timer cannot re-fetch every
   file in full every five minutes. With `--tsv` it does not: a table
   wants the whole answer each pass, and re-running a command is not a

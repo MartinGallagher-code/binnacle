@@ -529,6 +529,15 @@ a column per variable. Appended to one file across runs, because that is the
 shape a week of passes has to have for a spreadsheet, a plot or an `awk`
 one-liner to read it as a time series rather than as forty files.
 
+That holds whatever `--append`, `--prepend` or `--replace` says. Those decide
+where a collected *file*'s bytes land; the table is always appended to, because
+a `--replace` that emptied it every pass would leave a time series one row
+deep. To start a table fresh, remove it first or give each run its own:
+
+```bash
+dredge --cmd ... --servers hosts.txt --tsv "uptime-$(date +%F).tsv"
+```
+
 The date is the clock **here** — `%Y-%m-%dT%H:%M:%S`, local, no offset and no
 fraction, sortable as text. Every row in a pass carries the same stamp however
 far apart the hosts' own clocks are; [`skew`](skew.md) is the instrument for
@@ -886,7 +895,7 @@ not carry and nothing will bring back.
 | `-d, --dir DIR` | where collected files land (default: a `dredge-<timestamp>` of this run's own) |
 | `--head N` / `--tail N` | only that many lines, cut on the far side |
 | `--since T` | only files modified since T |
-| `--append` / `--prepend` / `--replace` | where the new bytes land; `--replace` is the default, except under `--follow` |
+| `--append` / `--prepend` / `--replace` | where the new bytes land in a collected file; `--replace` is the default, except under `--follow`. A `--tsv` table is always appended to |
 | `--mark` | write a marker line where old meets new |
 | `-f, --follow` | only what is new since the last pass |
 | `--daemon` | keep going, a pass at a time (implies `--follow`, except with `--tsv`) |
