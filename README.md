@@ -282,7 +282,7 @@ usage, options and exit status, then a link to that tool's manual.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # fifteen suites, 626 checks
+bash tests/run_tests.sh          # fifteen suites, 629 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

@@ -1690,7 +1690,9 @@ def limit_text(limit, on, c):
         return "%s uplinks %s" % (label, on[2])
     if limit == UNBOUNDED:
         return "nothing declared"
-    return "not modelled"
+    if limit == UNMODELLED:
+        return "not modelled"
+    return "-"
 
 
 def _flow_name(f):
@@ -1748,15 +1750,15 @@ def r_no_report(c):
         c.explained.update(silent)
         why = ("`mx status` says why they were silent"
                if c.run.source == "mx" else
-               "iperf_state and iperf_status say why they were silent")
+               "The iperf_state and iperf_status overlays say why they were "
+               "silent")
         out.append(Finding(RULE_BY_ID["NO_REPORT"], CRITICAL, "*",
                            "%d host(s) took part in the run and reported "
                            "nothing: %s" % (len(silent), _names(silent)),
                            "Their own flows are missing from the model, so "
                            "every flow that shared their links is expected "
                            "to get more than it could have.  %s; compare "
-                           "again once they report." % why[0].upper()
-                           + why[1:]))
+                           "again once they report." % why))
     failed = sorted(set((s, d, st) for s, d, st, _w in c.run.failed))
     if failed:
         s, d, st = failed[0]
@@ -1889,8 +1891,11 @@ def r_cpu_bound(c):
 
 def r_host_short(c):
     out = []
+    # Hosts a cause above has explained -- a silent one, one out of CPU --
+    # are not evidence about their neighbours: a rack-mate that never
+    # reported cannot vouch that the rack is fine, or that it is not.
     fleet = dict((n, h.efficiency) for n, h in c.hosts.items()
-                 if h.efficiency is not None)
+                 if h.efficiency is not None and n not in c.explained)
     for name in sorted(fleet, key=lambda n: (fleet[n], n)):
         eff = fleet[name]
         if eff >= c.args.short or name in c.explained:
@@ -2010,7 +2015,8 @@ def r_group_short(c):
 
 
 def r_fleet_short(c):
-    effs = [h.efficiency for h in c.hosts.values() if h.efficiency is not None]
+    effs = [h.efficiency for n, h in c.hosts.items()
+            if h.efficiency is not None and n not in c.explained]
     if len(effs) < 2:
         return None, "fewer than two hosts compared"
     med = _median(effs)
@@ -2048,7 +2054,7 @@ def r_fleet_short(c):
     sev = CRITICAL if med < c.args.fail else WARN
     return [Finding(RULE_BY_ID["FLEET_SHORT"], sev, "*",
                     "the fleet reaches %.0f%% of what its hardware allows "
-                    "(median host; %d of %d hosts short of %.0f%%), mostly "
+                    "(median host; %d of %d hosts short of %g%%), mostly "
                     "against %s"
                     % (med, short, len(effs), c.args.short, {
                         TARGET: "targets the hardware has room for",
@@ -2195,7 +2201,7 @@ def verdict_line(c, findings):
     if not effs:
         return ("Nothing could be compared: no flow has both a measurement "
                 "and an expectation.")
-    return ("Every host is within %.0f%% of what its hardware allows (median "
+    return ("Every host is within %g%% of what its hardware allows (median "
             "host %.0f%%): the fabric delivers what it was built to."
             % (c.args.short, _median(effs)))
 
@@ -2341,9 +2347,12 @@ def render_flows(c, top):
             width, name, fmt_rate(f.expected, unit),
             fmt_rate(f.achieved, unit), _pct(f.efficiency))
         if extra:
-            line += "  %6s  %8s" % (
-                "-" if f.loss is None else "%.2f%%" % f.loss,
-                fmt_us(f.added_rtt))
+            # mx writes loss as 100 - replies/requests, so a reply that
+            # landed an interval late reads a hair below zero.  The CSV and
+            # JSON keep it; the table does not print "-0.00%".
+            loss = "-" if f.loss is None else "%.2f%%" % (
+                0.0 if abs(f.loss) < 0.005 else f.loss)
+            line += "  %6s  %8s" % (loss, fmt_us(f.added_rtt))
         out.append(line + "  " + limit_text(f.limit, f.limit_on, c))
     out.append("")
     return out

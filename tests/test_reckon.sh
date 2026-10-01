@@ -428,6 +428,36 @@ t_a_silent_host_is_a_finding() {
     assert_contains "$(cat ov.tsv)" "$(printf 'reckon_verdict\tc2\tNO-DATA')"
 }
 
+t_a_silent_host_says_where_to_look() {
+    setup_run
+    mxgen reports --silent c2
+    out="$(findings floor.dc --mx reports)"
+    # The backticks are literal: they are what the report prints.
+    # shellcheck disable=SC2016
+    assert_contains "$out" '`mx status` says why they were silent; compare again once they report.'
+}
+
+t_a_silent_host_is_not_evidence_about_its_rack() {
+    # b2 never reported, and the flows into it ran at 40%.  It is not a
+    # rack-mate that can say what is normal for r02, so b1 at about 60% is
+    # judged against the hosts that did report -- and named.  (59%, not
+    # 60: b2's own flows are missing from the model, which is exactly what
+    # NO_REPORT warns of, and its peers' shares come out a little higher.)
+    setup_run
+    mxgen reports --silent b2 --host b2=40 --host b1=60
+    out="$(findings floor.dc --mx reports)"
+    assert_contains "$out" "b1,1010,HOST_SHORT"
+    assert_contains "$out" "while the rest of the fleet is at"
+    assert_not_contains "$out" "FLEET_SHORT"
+}
+
+t_a_threshold_is_printed_as_given() {
+    setup_run
+    mxgen reports --eff 99.8
+    out="$(rk floor.dc --mx reports --short 99.5 --quiet)"
+    assert_contains "$out" "Every host is within 99.5% of what"
+}
+
 # --- what is and is not known about the hardware ---------------------------
 
 t_a_host_with_no_speed_gets_no_expectation() {
@@ -847,6 +877,9 @@ run_test "above the hardware is a bad layout"   t_above_the_hardware_is_a_wrong_
 run_test "a cpu-bound host is its cpu"          t_a_cpu_bound_host_is_its_cpu_not_its_link
 run_test "loss with room to spare"              t_loss_with_room_to_spare_is_named
 run_test "a silent host is a finding"           t_a_silent_host_is_a_finding
+run_test "a silent host says where to look"   t_a_silent_host_says_where_to_look
+run_test "a silent host is not evidence"     t_a_silent_host_is_not_evidence_about_its_rack
+run_test "a threshold prints as given"      t_a_threshold_is_printed_as_given
 run_test "no speed, no expectation"             t_a_host_with_no_speed_gets_no_expectation
 run_test "no speed anywhere exits 1"            t_no_speed_anywhere_is_nothing_to_compare
 run_test "no flows is nothing to compare"       t_reports_with_no_flows_are_nothing_to_compare
