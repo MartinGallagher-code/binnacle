@@ -105,6 +105,7 @@ skew = "binnacle.skew:main"
 muster = "binnacle.muster:main"
 manifest = "binnacle.manifest:main"
 dredge = "binnacle.dredge:main"
+rig = "binnacle.rig:main"
 
 [tool.setuptools]
 packages = ["binnacle"]
