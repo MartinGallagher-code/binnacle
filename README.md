@@ -8,7 +8,7 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/MartinGallagher-code/binnacle)](https://api.reuse.software/info/github.com/MartinGallagher-code/binnacle)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds twelve, for Linux boxes, the fleets they belong to, and the networks
+one holds thirteen, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -25,6 +25,7 @@ between them.
 | `manifest` | Which servers are those, in the layout? |
 | `dredge` | Bring that answer back from every host, kept apart |
 | `rig` | Run that command with the settings in this file |
+| `reckon` | What should this run have reached, and where did it fall short? |
 
 ```bash
 pip install binnacle
@@ -43,8 +44,8 @@ binnacle help          # every tool's --help, on one page
 binnacle copy netmesh  # netmesh.py, here, ready to scp somewhere
 ```
 
-`binnacle` is the housing rather than a thirteenth instrument -- one name to
-remember instead of twelve, and the only thing that will tell you a module
+`binnacle` is the housing rather than a fourteenth instrument -- one name to
+remember instead of thirteen, and the only thing that will tell you a module
 was left behind at an older version.
 
 Every tool is one standalone file, so getting one onto a box that has never
@@ -104,7 +105,7 @@ agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- -
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The twelve, briefly
+## The thirteen, briefly
 
 ### why-slow
 
@@ -256,6 +257,21 @@ adding a flag, which is how `rig ssh.conf -- ssh {user}@{host} uptime` works.
 tool's own `--help`, `-h` or man page, with every flag in it still commented
 out.
 
+### reckon
+
+Works out what a network test *should* have reached and says where it fell
+short. The datacenter layout says what was built -- `nic_gbps=` on the
+servers, `uplinks=` and `uplink_gbps=` on the racks -- and a
+matrix_orchestrator or iperf_orchestrator run says what was achieved. **Every
+flow is expected to reach its max-min fair share** of the links it crosses,
+or its target if that is lower, worked on the wire the way the test tools
+themselves count it; the gap is then diagnosed in order of cause: a link that
+came up slow, a test host out of CPU, one host, one rack's uplinks, the whole
+fleet, or a single path. A flow that *beats* the declared hardware is a
+finding too -- the layout is wrong. `--overlay` writes the datacenter
+viewer's own results format, so achieved-against-possible paints straight
+onto the floor plan beside `mx export`'s overlays.
+
 ## Documentation
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
@@ -266,7 +282,7 @@ usage, options and exit status, then a link to that tool's manual.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # fourteen suites, 580 checks
+bash tests/run_tests.sh          # fifteen suites, 626 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim
@@ -285,6 +301,7 @@ tally.
 
 - [iperf_orchestrator](https://github.com/MartinGallagher-code/iperf_orchestrator) — TCP bandwidth across a fleet
 - [matrix_orchestrator](https://github.com/MartinGallagher-code/matrix_orchestrator) — request/response pps across a fleet
+- [datacenter_visualization](https://github.com/MartinGallagher-code/datacenter_visualization) — the `.dc` layout `manifest` and `reckon` read, and the viewer `reckon --overlay` paints
 - [provost](https://github.com/MartinGallagher-code/provost) — turn command output into a tidy dataset
 
 ## License

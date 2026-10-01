@@ -243,7 +243,7 @@ def walk(parser, flags, seen):
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
              "during", "skew", "binnacle", "muster", "manifest",
-             "dredge", "rig"):
+             "dredge", "rig", "reckon"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -279,7 +279,7 @@ DOCS = {"why_slow": "why-slow"}
 bad = []
 for name in ("why_slow", "agree", "logtriage", "netmesh", "reachable",
              "resolve", "during", "skew", "binnacle", "muster", "manifest",
-             "dredge", "rig"):
+             "dredge", "rig", "reckon"):
     spec = importlib.util.spec_from_file_location(
         name, os.path.join(root, name + ".py"))
     mod = importlib.util.module_from_spec(spec)
@@ -494,7 +494,7 @@ VERBATIM = [
     ("_read", "why_slow.py", "resolve.py"),
     ("_read", "why_slow.py", "skew.py"),
     # Duplicated into every instrument and into the index, so all
-    # thirteen files are held to it.
+    # fourteen files are held to it.
     ("_stdio_safe", "why_slow.py", "agree.py"),
     ("_stdio_safe", "why_slow.py", "logtriage.py"),
     ("_stdio_safe", "why_slow.py", "netmesh.py"),
@@ -506,6 +506,7 @@ VERBATIM = [
     ("_stdio_safe", "why_slow.py", "muster.py"),
     ("_stdio_safe", "why_slow.py", "manifest.py"),
     ("_stdio_safe", "why_slow.py", "rig.py"),
+    ("_stdio_safe", "why_slow.py", "reckon.py"),
     ("_WriteGuard", "why_slow.py", "agree.py"),
     ("_WriteGuard", "why_slow.py", "logtriage.py"),
     ("_WriteGuard", "why_slow.py", "netmesh.py"),
@@ -514,6 +515,7 @@ VERBATIM = [
     ("_WriteGuard", "why_slow.py", "during.py"),
     ("_WriteGuard", "why_slow.py", "skew.py"),
     ("_WriteGuard", "why_slow.py", "muster.py"),
+    ("_WriteGuard", "why_slow.py", "reckon.py"),
     ("expand_range", "agree.py", "reachable.py"),
     ("expand_range", "agree.py", "muster.py"),
     ("split_commas", "agree.py", "muster.py"),
@@ -521,6 +523,17 @@ VERBATIM = [
     ("expand_range", "agree.py", "manifest.py"),
     ("split_host_port", "agree.py", "reachable.py"),
     ("is_ipv6", "agree.py", "reachable.py"),
+    # The layout parser: manifest reads a .dc to answer "which machines",
+    # reckon to answer "what was built", and the two must read one file
+    # the same way.
+    ("dc_expand_one", "manifest.py", "reckon.py"),
+    ("dc_expand", "manifest.py", "reckon.py"),
+    ("subst", "manifest.py", "reckon.py"),
+    ("tokenize", "manifest.py", "reckon.py"),
+    ("indent_of", "manifest.py", "reckon.py"),
+    ("Element", "manifest.py", "reckon.py"),
+    ("parse_layout", "manifest.py", "reckon.py"),
+    ("_materialize", "manifest.py", "reckon.py"),
 ]
 
 

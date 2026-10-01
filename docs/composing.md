@@ -170,6 +170,7 @@ different pair of tools -- with `during` watching while they run:
 | How much TCP bandwidth under load? | [`iperf_orchestrator`](https://github.com/MartinGallagher-code/iperf_orchestrator) |
 | How many packets per second under load? | [`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator) |
 | What was each box doing while that ran? | `during` |
+| Was that what the hardware should do? | `reckon` |
 | What did the load do to the latency? | `netmesh run --baseline` |
 | Do the boxes agree what time it is? | `skew` |
 | Which settings actually matter? | [`doehelper`](https://doehelper.com) |
@@ -177,6 +178,20 @@ different pair of tools -- with `during` watching while they run:
 `netmesh`'s grid CSVs deliberately use the same `src\dst` shape as `mx`'s,
 so both open in the same spreadsheet and read the same way: a dark row is a
 sick sender, a dark column a sick receiver.
+
+The load tools' own numbers are relative -- to the target the run asked
+for, or to the fleet's median -- and a fleet running at half its NICs sits
+at 100% of both.  [`reckon`](tools/reckon.md) is the absolute reading: the
+same datacenter layout `manifest` reads, with the NIC and uplink speeds
+written on it, says what each flow could have had, and the run is graded
+against that.  It takes the idle floor from `netmesh` and hands the hosts it
+names to `why-slow` and `during`:
+
+```bash
+netmesh check --reports idle/ $(cat hosts.txt)
+mx run --for 120
+reckon floor.dc --mx reports/ --idle idle/ --overlay reckon.tsv
+```
 
 ## Everything is CSV, and rendering is separate
 
