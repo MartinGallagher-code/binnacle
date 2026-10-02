@@ -23,8 +23,8 @@ sys.path.insert(0, REPO_ROOT)
 
 import binnacle  # noqa: E402
 from binnacle import (agree, dredge, during, logtriage,  # noqa: E402
-                      manifest, muster, netmesh, reachable, resolve,
-                      reckon, rig, skew, why_slow)
+                      manifest, muster, netmesh, plumb, reachable,
+                      reckon, resolve, rig, skew, why_slow)
 # Aliased: a bare `binnacle` here would rebind the package name above,
 # and `binnacle.VERSION` two lines down would then be the module's.
 from binnacle import binnacle as binnacle_cli  # noqa: E402
@@ -54,8 +54,8 @@ suppress_warnings = ["myst.xref_missing"]
 
 
 # Each tool, and how to reach its parser. Two shapes exist: a single parser
-# (binnacle, why-slow, logtriage, reachable, manifest, rig, reckon) and a
-# verb parser
+# (binnacle, why-slow, logtriage, reachable, manifest, rig, reckon, plumb)
+# and a verb parser
 # with subcommands (agree, netmesh, muster).  `binnacle` leads because it is the index:
 # it is the one command that names the others.
 TOOLS = [
@@ -73,6 +73,7 @@ TOOLS = [
     ("dredge", dredge, False),
     ("rig", rig, False),
     ("reckon", reckon, False),
+    ("plumb", plumb, False),
 ]
 
 

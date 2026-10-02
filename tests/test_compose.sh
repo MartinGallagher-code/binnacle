@@ -190,10 +190,13 @@ t_the_diagnostic_tools_share_one_csv_header() {
     c="$("$PY" "$BINNACLE_DIR/during.py" --from-samples "$TEST_TMPDIR/s.csv" --csv | head -1)"
     skew_facts_json "$TEST_TMPDIR/k.json"
     d="$("$PY" "$BINNACLE_DIR/skew.py" --from-facts "$TEST_TMPDIR/k.json" --csv | head -1)"
+    plumb_facts_json "$TEST_TMPDIR/p.json"
+    e="$("$PY" "$BINNACLE_DIR/plumb.py" --from-facts "$TEST_TMPDIR/p.json" --csv | head -1)"
     assert_eq "$a" "host,ts,rule_id,severity,title,detail,fix"
     assert_eq "$b" "$a"
     assert_eq "$c" "$a"
     assert_eq "$d" "$a"
+    assert_eq "$e" "$a"
 }
 
 t_every_flag_appears_in_its_tools_help() {
@@ -243,7 +246,7 @@ def walk(parser, flags, seen):
 
 for name in ("why_slow", "agree", "logtriage", "reachable", "resolve",
              "during", "skew", "binnacle", "muster", "manifest",
-             "dredge", "rig", "reckon"):
+             "dredge", "rig", "reckon", "plumb"):
     mod = load(name)
     built = mod.build_parser()
     parsers = list(built) if isinstance(built, tuple) else [built]
@@ -279,7 +282,7 @@ DOCS = {"why_slow": "why-slow"}
 bad = []
 for name in ("why_slow", "agree", "logtriage", "netmesh", "reachable",
              "resolve", "during", "skew", "binnacle", "muster", "manifest",
-             "dredge", "rig", "reckon"):
+             "dredge", "rig", "reckon", "plumb"):
     spec = importlib.util.spec_from_file_location(
         name, os.path.join(root, name + ".py"))
     mod = importlib.util.module_from_spec(spec)
@@ -493,8 +496,11 @@ VERBATIM = [
     ("read_pressure", "why_slow.py", "during.py"),
     ("_read", "why_slow.py", "resolve.py"),
     ("_read", "why_slow.py", "skew.py"),
+    ("_read", "why_slow.py", "plumb.py"),
+    ("_read_int", "why_slow.py", "plumb.py"),
+    ("_run", "why_slow.py", "plumb.py"),
     # Duplicated into every instrument and into the index, so all
-    # fourteen files are held to it.
+    # fifteen files are held to it.
     ("_stdio_safe", "why_slow.py", "agree.py"),
     ("_stdio_safe", "why_slow.py", "logtriage.py"),
     ("_stdio_safe", "why_slow.py", "netmesh.py"),
@@ -507,6 +513,7 @@ VERBATIM = [
     ("_stdio_safe", "why_slow.py", "manifest.py"),
     ("_stdio_safe", "why_slow.py", "rig.py"),
     ("_stdio_safe", "why_slow.py", "reckon.py"),
+    ("_stdio_safe", "why_slow.py", "plumb.py"),
     ("_WriteGuard", "why_slow.py", "agree.py"),
     ("_WriteGuard", "why_slow.py", "logtriage.py"),
     ("_WriteGuard", "why_slow.py", "netmesh.py"),
@@ -516,6 +523,7 @@ VERBATIM = [
     ("_WriteGuard", "why_slow.py", "skew.py"),
     ("_WriteGuard", "why_slow.py", "muster.py"),
     ("_WriteGuard", "why_slow.py", "reckon.py"),
+    ("_WriteGuard", "why_slow.py", "plumb.py"),
     ("expand_range", "agree.py", "reachable.py"),
     ("expand_range", "agree.py", "muster.py"),
     ("split_commas", "agree.py", "muster.py"),

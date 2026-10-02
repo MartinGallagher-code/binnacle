@@ -94,6 +94,18 @@ That is precisely why `logtriage` uses ordered regex masking rather than
 Drain-style clustering — see
 [why not Drain](tools/logtriage.md#why-not-drain).
 
+## The same trick for the page cache
+
+```bash
+agree script plumb --servers prod.txt --fleet-csv -- --csv
+```
+
+Hosts get grouped by **whether what they read is what is on their disk**.
+After a page-cache advisory this is the question that matters, and the
+answer is per host: the box whose `su` was rewritten in memory lands in a
+group of its own, named by the rule that caught it, while every box that
+merely has the vulnerable module loaded stays with the clean ones.
+
 ## The order to reach for them
 
 There is a natural sequence when something is wrong and you do not yet know
