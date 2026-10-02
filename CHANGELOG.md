@@ -8,6 +8,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`plumb`, the fourteenth instrument: does what this box reads match
+  what is on its disk?** Every file is read twice -- through the page cache,
+  the way every program reads it, and with `O_DIRECT`, past the cache, from
+  the disk -- and any difference is diagnosed: which copy is wrong, and what
+  most likely did it. 2026's page-cache privilege escalations -- Copy Fail
+  (CVE-2026-31431), Dirty Frag (CVE-2026-43284, CVE-2026-43500), Fragnesia
+  (CVE-2026-46300), DirtyClone (CVE-2026-43503) and pedit COW
+  (CVE-2026-46331) -- rewrite the cached copy of a file the attacker may only
+  read and leave the disk untouched, so an offline scan of the disk never
+  sees them, and nothing that waits for a write is ever woken. The large-folio writeback
+  bugs reported this year do the opposite: the disk holds zeros under a
+  cache that reads correctly until the next reboot.
+
+  **Which copy is wrong** is decided by the strongest evidence there is: the
+  digest dpkg or rpm recorded when it installed the file, zeros on one side
+  where the other holds data, and whether the file was written since boot --
+  if not, its cache was filled from this very disk, so a cache that
+  disagrees changed in memory. Nothing else is guessed; a difference none of
+  those can place is reported as one. **The likely cause** comes from the
+  shape of the difference and what the box knows: one flipped bit is memory
+  (with the EDAC counts, or the fact that there is no EDAC to report it),
+  whole pages are a page-cache bug, a few bytes at an ELF program's entry
+  point on a setuid file are a page-cache write -- with the entry-point
+  modules of the 2026 bugs this kernel has loaded or built in, and Dirty
+  Pipe if the version is in its range -- and zeros on disk under a write
+  made since boot are a lost write, with the ext4 and btrfs writeback bugs
+  named when the filesystem and kernel version are in their reported ranges.
+  The kernel log, the taint flags and md mismatch counts are read as
+  evidence too.
+
+  Twelve rules, cause first: a disk that gives two answers, a disk that will
+  not read, a disk copy that is wrong (the cache holds the only good copy,
+  so the fix says to rescue it before any reboot or cache drop), a privileged
+  file altered in memory, a file corrupted in memory, a difference nothing
+  can place, nothing compared, memory errors, kernel taint, corruption in
+  the kernel log, files that kept changing, and files not checked. It never
+  evicts anything itself: it says how (`dd iflag=nocache count=0`), when that
+  cannot work (a page another process has mapped), and when not to (while
+  another file's only good copy is in memory).
+
+  `O_DIRECT` is a request, not a guarantee, so everything known to serve it
+  from the cache anyway -- tmpfs, network filesystems, FUSE, ZFS, ext4
+  `data=journal`, DAX, compressed or inline extents, fscrypt and fs-verity
+  files -- is refused by name and counted as not checked, rather than
+  reported as an agreement that means nothing. The ioctl numbers for that
+  are worked out per architecture, so the checks hold on powerpc, where the
+  ext4 writeback bug was first seen. No root is needed for most of it;
+  without root, what could not be read is counted and named.
+
+  With no arguments it checks what an attack would aim at: setuid and
+  setgid programs, the auth files and PAM, the loader and libc, and boot
+  images written since boot. `--disk-view` reads the disk side from a copy
+  instead, which is how the suite tests the comparison without a broken
+  disk.
+
 - **`reckon`, the thirteenth instrument: what should this run have
   reached, and where did it fall short?** The load tools' own readings are
   relative -- `mx_achieved` to the target asked for, `mx_rel_median` and

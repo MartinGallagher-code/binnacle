@@ -82,6 +82,7 @@ ZERO_IS_MEANINGFUL = {
     ("netmesh", "--asym-pct"): "a threshold",
     ("netmesh", "--bloat-factor"): "a threshold",
     ("netmesh", "--flow-factor"): "a threshold",
+    ("plumb", "--max-mb"): "0 is documented as no ceiling",
     ("reachable", "--jobs"): "clamped to max(1, ...) where the pool is sized",
     ("reckon", "--window"): "0 is documented as everything the reports hold",
     ("reckon", "--short"): "a threshold; 0 means nothing is short",

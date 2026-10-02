@@ -8,7 +8,7 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/MartinGallagher-code/binnacle)](https://api.reuse.software/info/github.com/MartinGallagher-code/binnacle)
 
 A binnacle is the housing on a ship's deck that holds the instruments. This
-one holds thirteen, for Linux boxes, the fleets they belong to, and the networks
+one holds fourteen, for Linux boxes, the fleets they belong to, and the networks
 between them.
 
 | Tool | The question it answers |
@@ -26,6 +26,7 @@ between them.
 | `dredge` | Bring that answer back from every host, kept apart |
 | `rig` | Run that command with the settings in this file |
 | `reckon` | What should this run have reached, and where did it fall short? |
+| `plumb` | Does what this box reads match what is on its disk? |
 
 ```bash
 pip install binnacle
@@ -44,8 +45,8 @@ binnacle help          # every tool's --help, on one page
 binnacle copy netmesh  # netmesh.py, here, ready to scp somewhere
 ```
 
-`binnacle` is the housing rather than a fourteenth instrument -- one name to
-remember instead of thirteen, and the only thing that will tell you a module
+`binnacle` is the housing rather than a fifteenth instrument -- one name to
+remember instead of fourteen, and the only thing that will tell you a module
 was left behind at an older version.
 
 Every tool is one standalone file, so getting one onto a box that has never
@@ -105,7 +106,7 @@ agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- -
 command. It works because `why-slow --csv` is deterministic, so two hosts
 with the same problem emit byte-identical rows and land in the same group.
 
-## The thirteen, briefly
+## The fourteen, briefly
 
 ### why-slow
 
@@ -272,6 +273,24 @@ finding too -- the layout is wrong. `--overlay` writes the datacenter
 viewer's own results format, so achieved-against-possible paints straight
 onto the floor plan beside `mx export`'s overlays.
 
+### plumb
+
+Reads every file twice -- through the page cache, the way every program
+reads it, and with `O_DIRECT`, past the cache, from the disk -- and
+diagnoses any difference: **which copy is wrong, and what most likely did
+it**. 2026's run of page-cache privilege escalations (Copy Fail, Dirty Frag,
+Fragnesia, pedit COW) rewrite the cached copy of a setuid program and leave
+the disk untouched, so nothing on disk ever shows them; the large-folio
+writeback bugs do the opposite, leaving zeros on disk under a cache that
+still reads right until the next reboot. The package manager's digest, zeros
+on one side, and whether the file was written since boot say which copy is
+wrong; the shape of the difference says why -- one flipped bit is memory,
+whole pages are a kernel bug, a few bytes at a program's entry point are a
+page-cache write. With no arguments it checks what an attack would aim at:
+setuid programs, PAM, the loader, the auth files, and boot images written
+since boot. No root needed for most of it, and it never evicts anything
+itself: it says how to evict a bad copy, and when not to.
+
 ## Documentation
 
 Full docs at **[binnacle.readthedocs.io](https://binnacle.readthedocs.io)**,
@@ -282,7 +301,7 @@ usage, options and exit status, then a link to that tool's manual.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # fifteen suites, 629 checks
+bash tests/run_tests.sh          # sixteen suites, 674 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim
