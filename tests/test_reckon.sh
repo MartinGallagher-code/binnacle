@@ -729,6 +729,209 @@ t_iperf_reads_a_run_directory() {
 
 # --- outputs -----------------------------------------------------------------
 
+# --- since a baseline --------------------------------------------------------
+#
+# The baseline run is every flow at 104% -- inside the 105% that would make
+# it ABOVE_HARDWARE -- so a fall of 12 points lands at 92%, still above
+# --short.  That is the case the comparison exists for: a host going wrong
+# that no shortfall rule can see yet.
+
+# The human report with its wrapping undone, for phrases a line break
+# would otherwise split.
+flat() { "$PY" "$RK" "$@" | tr -s ' \n' '  '; }
+
+baseline() {
+    mxgen before --eff 104
+    rk floor.dc --mx before --run tue --json before.json --overlay before.tsv \
+        --quiet >/dev/null
+}
+
+t_a_host_that_fell_is_named_before_it_is_short() {
+    setup_run
+    baseline
+    mxgen now --eff 104 --host a1=92
+    out="$(findings floor.dc --mx now --baseline before.json)"
+    assert_contains "$out" "a1,1010,HOST_REGRESSED,WARN"
+    assert_contains "$out" "a1 fell from 104% to 92% of what its hardware allows since run tue, while the rest of r01 held"
+    assert_not_contains "$out" "HOST_SHORT"
+    # Nobody else moved, so nobody else is named.
+    assert_eq "$(grep -c REGRESSED <<<"$out")" "1"
+    # Without a baseline the same run is clean: 92% is not short.
+    out="$(findings floor.dc --mx now)"
+    assert_not_contains "$out" "a1,"
+}
+
+t_an_overlay_is_a_baseline_as_good_as_the_json() {
+    setup_run
+    baseline
+    mxgen now --eff 104 --host a1=92
+    findings floor.dc --mx now --baseline before.json > from-json
+    findings floor.dc --mx now --baseline before.tsv > from-overlay
+    cmp -s from-json from-overlay || fail "the two baselines disagree"
+    RECKON_BASELINE=before.tsv findings floor.dc --mx now > from-env
+    cmp -s from-json from-env || fail "RECKON_BASELINE is not --baseline"
+}
+
+t_a_rack_that_fell_is_one_finding_on_its_uplinks() {
+    setup_run
+    baseline
+    mxgen now --eff 104 --cross a=92
+    out="$(findings floor.dc --mx now --baseline before.json)"
+    assert_contains "$out" "GROUP_REGRESSED,WARN"
+    assert_contains "$out" "rack r01: 2 of its 2 hosts fell since run tue, median 104% to 92%, while the other racks held"
+    assert_contains "$out" "the flows crossing its boundary moved -12 points, the flows inside it held"
+    assert_contains "$out" "Capacity out of r01 went down between the runs"
+    assert_not_contains "$out" "HOST_REGRESSED"
+}
+
+t_a_rack_that_fell_inside_too_is_not_its_uplinks() {
+    setup_run
+    baseline
+    mxgen now --eff 104 --host a1=92 --host a2=92
+    out="$(findings floor.dc --mx now --baseline before.json)"
+    assert_contains "$out" "inside it (-12 points) and across its boundary (-12 points) alike"
+    assert_contains "$out" "Not its uplinks"
+}
+
+t_a_fleet_that_fell_is_one_finding() {
+    setup_run
+    baseline
+    mxgen now --eff 92
+    out="$(findings floor.dc --mx now --baseline before.json)"
+    assert_contains "$out" "FLEET_REGRESSED,WARN"
+    assert_contains "$out" "the fleet fell from 104% to 92% of what its hardware allows since run tue (median host; 6 of 6 hosts down 5 points or more)"
+    assert_eq "$(grep -c REGRESSED <<<"$out")" "1"
+}
+
+t_a_shortfall_says_what_it_was_before() {
+    # Below --short the shortfall rule has it already: one finding, with
+    # the old figure in it, not a second finding saying it fell.
+    setup_run
+    baseline
+    mxgen now --eff 104 --host a1=60
+    out="$(findings floor.dc --mx now --baseline before.json)"
+    assert_contains "$out" "a1,1010,HOST_SHORT,WARN"
+    assert_contains "$out" "; it was 104% in run tue"
+    assert_not_contains "$out" "REGRESSED"
+    mxgen low --eff 70
+    out="$(findings floor.dc --mx low --baseline before.json)"
+    assert_contains "$out" "FLEET_SHORT"
+    assert_contains "$out" "mostly against the uplinks; it was 104% in run tue"
+    assert_not_contains "$out" "FLEET_REGRESSED"
+}
+
+t_a_run_that_held_says_so() {
+    setup_run
+    baseline
+    mxgen now --eff 100
+    out="$(rk floor.dc --mx now --baseline before.json --quiet)"
+    assert_contains "$out" "and no host fell 5 points since run tue"
+    out="$(flat floor.dc --mx now --baseline before.json)"
+    assert_contains "$out" "run tue: 6 hosts in both; median host 104% then, 100% now; 0 fell 5 points or more"
+    # --drop moves the line: four points is a fall when 3 is the threshold.
+    out="$(findings floor.dc --mx now --baseline before.json --drop 3)"
+    assert_contains "$out" "FLEET_REGRESSED"
+}
+
+t_the_change_reaches_every_output() {
+    setup_run
+    baseline
+    mxgen now --eff 104 --host a1=92
+    rk floor.dc --mx now --baseline before.json --overlay ov.tsv --json out.json \
+        --flows flows.csv --quiet >/dev/null
+    "$PY" - ov.tsv out.json flows.csv <<'EOF'
+import csv, json, sys
+ov, js, fl = sys.argv[1:4]
+declared, change = set(), {}
+for line in open(ov):
+    cells = line.rstrip("\n").split("\t")
+    if cells[0] == "!test":
+        declared.add(cells[1])
+        if cells[1] == "reckon_change":
+            assert 'label="Efficiency change since run tue"' in cells, cells
+            assert "min=-50" in cells and "max=50" in cells, cells
+    elif cells[0] == "reckon_change":
+        change[cells[1]] = (float(cells[2]), cells[3])
+assert {"reckon_change", "reckon_peer_change"} <= declared, declared
+assert change["a1"] == (-12.0, "then=104.0"), change["a1"]
+assert change["b1"][0] == 0.0, change["b1"]
+doc = json.load(open(js))
+b = doc["baseline"]
+assert b["since"] == "run tue" and b["fell"] == ["a1"], b
+assert b["hosts_in_both"] == 6 and b["drop_pts"] == 5.0, b
+a1 = [h for h in doc["hosts"] if h["host"] == "a1"][0]
+assert round(a1["change_pts"]) == -12 and a1["baseline_efficiency_pct"] == 104.0
+rows = list(csv.DictReader(open(fl)))
+assert rows and "change_pts" in rows[0], rows[0].keys()
+assert any(r["src"] == "a1" and r["change_pts"].startswith("-12") for r in rows)
+EOF
+    assert_status $? 0
+    # Its --run label is in the JSON for the next run to name it by.
+    assert_contains "$(cat before.json)" '"label": "tue"'
+}
+
+t_a_baseline_that_cannot_be_compared_is_refused() {
+    setup_run
+    baseline
+    mxgen now --eff 104
+    "$PY" - before.json <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["meta"]["unit"] = "Mb/s"
+json.dump(d, open("iperf.json", "w"))
+d["meta"]["tool"] = "something-else"
+json.dump(d, open("other.json", "w"))
+for h in d["hosts"]:
+    h["efficiency_pct"] = None
+d["meta"]["tool"] = "reckon"
+d["meta"]["unit"] = "pps"
+json.dump(d, open("empty.json", "w"))
+EOF
+    printf 'host,pps\na1,1\n' > reports.csv
+    rk floor.dc --mx before --run mon --overlay mon.tsv --quiet >/dev/null
+    grep -v '^[#!]' mon.tsv | cat before.tsv - > two-runs.tsv
+    for case in "iperf.json|grade different workloads" \
+                "other.json|not reckon --json output" \
+                "empty.json|no host in it was compared" \
+                "reports.csv|not reckon --json or --overlay output" \
+                "missing.json|cannot read missing.json" \
+                "two-runs.tsv|holds 2 runs (mon, tue)"; do
+        set +e
+        out="$(rk floor.dc --mx now --baseline "${case%%|*}" 2>&1)"; rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "${case#*|}"
+    done
+}
+
+t_a_tampered_baseline_is_counted_not_believed() {
+    # A hand-edited baseline: NaN, a string, a bool, a negative.  Each of
+    # those hosts has no history -- not a fall to nothing, not a crash --
+    # and the report says how many values it could not read.
+    setup_run
+    baseline
+    mxgen now --eff 104 --host a1=92 --host b1=92
+    "$PY" - before.json <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+bad = {"a1": "NaN", "a2": True, "b1": -5, "b2": "fast"}
+for h in d["hosts"]:
+    if h["host"] in bad:
+        h["efficiency_pct"] = bad[h["host"]]
+d["hardware"]["hosts"]["c1"]["nic_gbps"] = 25
+d["hosts"].append({"host": "z9", "efficiency_pct": 99.0})
+d["hosts"].append({"efficiency_pct": 99.0})
+open("tampered.json", "w").write(json.dumps(d))
+EOF
+    out="$(flat floor.dc --mx now --baseline tampered.json)"
+    assert_contains "$out" "5 value(s) in the baseline are not numbers"
+    assert_contains "$out" "1 host(s) the baseline compared are not in this run: z9"
+    assert_contains "$out" "modelled at another NIC speed than in the baseline, so their change is partly the declaration: c1"
+    out="$(findings floor.dc --mx now --baseline tampered.json)"
+    assert_not_contains "$out" "a1,1010,HOST_REGRESSED"
+    assert_not_contains "$out" "b1,1010,HOST_REGRESSED"
+}
+
 t_the_overlay_declares_every_test_it_uses() {
     setup_run
     mxgen reports --host b2=45
@@ -806,7 +1009,8 @@ t_numbers_that_cannot_mean_anything_are_refused() {
     mxgen reports
     for args in "--mtu 0" "--mtu 70000" "--nic-gbps 0" "--nic-gbps -1" \
                 "--nic-gbps nan" "--window -1" "--short -5" \
-                "--fail 95" "--top -1"; do
+                "--fail 95" "--top -1" "--drop 0" "--drop -3" \
+                "--drop nan"; do
         set +e
         # Unquoted on purpose: each string is a whole argument list.
         # shellcheck disable=SC2086
@@ -900,6 +1104,16 @@ run_test "iperf sequential-pair alone"          t_iperf_sequential_pair_gives_ea
 run_test "iperf mtu from netmesh"               t_iperf_mtu_comes_from_netmesh_when_measured
 run_test "unmodellable iperf runs refused"      t_iperf_runs_reckon_cannot_model_are_refused
 run_test "iperf reads a run directory"          t_iperf_reads_a_run_directory
+run_test "a host that fell is named"         t_a_host_that_fell_is_named_before_it_is_short
+run_test "an overlay is a baseline too"         t_an_overlay_is_a_baseline_as_good_as_the_json
+run_test "a rack that fell, on its uplinks"     t_a_rack_that_fell_is_one_finding_on_its_uplinks
+run_test "a rack that fell inside too"          t_a_rack_that_fell_inside_too_is_not_its_uplinks
+run_test "a fleet that fell is one finding"     t_a_fleet_that_fell_is_one_finding
+run_test "a shortfall says what it was"         t_a_shortfall_says_what_it_was_before
+run_test "a run that held says so"              t_a_run_that_held_says_so
+run_test "the change reaches every output"      t_the_change_reaches_every_output
+run_test "an incomparable baseline refused"     t_a_baseline_that_cannot_be_compared_is_refused
+run_test "a tampered baseline is counted"       t_a_tampered_baseline_is_counted_not_believed
 run_test "the overlay declares its tests"       t_the_overlay_declares_every_test_it_uses
 run_test "the findings csv header"              t_the_findings_csv_has_the_house_header
 run_test "two reckonings are identical"         t_two_reckonings_of_one_run_are_identical

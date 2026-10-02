@@ -43,7 +43,7 @@ MUST_REFUSE = {
     ("muster", "--stale-lock"),
     ("netmesh", "--pps"), ("netmesh", "--interval"), ("netmesh", "--for"),
     ("netmesh", "--jobs"), ("netmesh", "--port"),
-    ("reckon", "--nic-gbps"), ("reckon", "--mtu"),
+    ("reckon", "--nic-gbps"), ("reckon", "--mtu"), ("reckon", "--drop"),
     ("resolve", "--timeout"), ("resolve", "--attempts"),
     ("skew", "--timeout"), ("skew", "--attempts"), ("skew", "--samples"),
 }

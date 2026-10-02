@@ -17,6 +17,7 @@ reckon floor.dc --iperf results/latest           # an iperf run against it
 reckon --nic-gbps 25 --mx reports/               # no layout: the NICs alone
 reckon floor.dc --mx reports/ --idle idle/       # and queueing, against netmesh
 reckon floor.dc --mx reports/ --overlay r.tsv    # paint it on the floor plan
+reckon floor.dc --mx reports/ --baseline tue.json # what changed since Tuesday
 ```
 
 ## The question the other tools leave open
@@ -233,6 +234,9 @@ the cause, and "short" is its symptom.
 | `HOST_SHORT` | a host below `--short` while the rest of its rack is not |
 | `GROUP_SHORT` | half a rack below `--short` while the other racks are not |
 | `FLEET_SHORT` | the median host below `--short` |
+| `HOST_REGRESSED` | a host fell `--drop` points since `--baseline` while its rack held |
+| `GROUP_REGRESSED` | half a rack fell `--drop` points while the other racks held |
+| `FLEET_REGRESSED` | the median host fell `--drop` points, still above `--short` |
 | `FLOW_SHORT` | flows below `--short` between hosts that are otherwise fine |
 | `LOSS_BELOW_CAPACITY` | ≥1% loss on flows the hardware has room for |
 | `QUEUEING` | loaded RTT ≥ `--bloat` × idle, and 50 µs more |
@@ -264,6 +268,66 @@ expected, and reported as INFO. A queue on a path the declared hardware has
 room for is traffic this test did not send, or a bottleneck the layout does
 not declare.
 
+## Comparing runs
+
+Raw rates do not compare across runs: a new target, packet size or window
+moves every one of them. **Efficiency does**, because each run is graded
+against its own expectation. So `reckon` keeps no history of its own; the
+reckoning you kept from an earlier run is the history:
+
+```bash
+reckon floor.dc --mx reports/ --run tue --json runs/tue.json
+# ... a week later, after a firmware roll-out ...
+reckon floor.dc --mx reports/ --run wed --baseline runs/tue.json
+```
+
+```text
+  WARN      host fell       wr01r03u05 fell from 99% to 91% of what its
+                            hardware allows since run tue, while the rest of
+                            r03 held
+```
+
+`--baseline` takes either of the files an earlier reckoning writes: its
+`--json`, or its `--overlay` (the file you probably kept for the viewer).
+`--run` names a run, and the next one says "since run tue"; without it,
+the comparison names the earlier run by its own last timestamp.
+
+Three rules read it, in the same order as the shortfalls and for the same
+reason — one fault that moved a whole rack is one finding, not one per
+host:
+
+- **`HOST_REGRESSED`** — a host fell `--drop` points (default 5) while the
+  rest of its rack, or with no rack the fleet, held. This is the one the
+  comparison exists for: a host at 91% is not short, and nothing else
+  would name it, but a host that was at 99% last week has started to go
+  wrong. The default is 5 rather than 10 for that reason: a healthy host
+  sits near 100%, and one that has fallen 10 points from there is already
+  below `--short`, where `HOST_SHORT` has it.
+- **`GROUP_REGRESSED`** — half a rack fell together while the other racks
+  held. A fall in the flows crossing its boundary, more than in the flows
+  inside it, is capacity out of the rack that went away between the runs: a
+  LAG member, an optic, ECMP. A fall inside and out alike is the switch or
+  something the rack's hosts share.
+- **`FLEET_REGRESSED`** — the median host fell. Every host at once is the
+  test's settings, a roll-out, or the switches; when the two runs were
+  described differently (another packet size, another window) it says so.
+
+A host already below `--short` is not reported a second time as fallen.
+Its shortfall finding carries its old figure instead — *"…; it was 98% in
+run tue"* — because a host at 61% that was at 98% last week is a new fault,
+and one that was at 60% is an old one.
+
+**Only what both runs compared is compared.** A host one of the two runs
+could not model has no change, not a fall to nothing. A host in the
+baseline that is missing from this run is listed. A host modelled at
+another NIC speed than last time is listed too, because part of its change
+is the declaration, and which declaration was right is not something
+`reckon` can know. A value in the baseline that is not a number (a
+hand-edited NaN, a string, a negative efficiency) is counted and left out,
+never read as a fall. A baseline from the other workload — an iperf
+reckoning against an mx run — is refused: UDP request rates and TCP goodput
+grade different things.
+
 ## Painting it on the floor
 
 `--overlay` writes the viewer's own results format — the one `mx export` and
@@ -280,12 +344,17 @@ importer:
 | `reckon_added_rtt` | host | loaded RTT minus idle, worst peer (with `--idle`) |
 | `reckon_peer_efficiency` | flow | one flow, with `peer=`, so the viewer draws it |
 | `reckon_peer_added_rtt` | flow | the same for RTT (with `--idle`) |
+| `reckon_change` | host | efficiency now minus then, in points, with `then=` (with `--baseline`) |
+| `reckon_peer_change` | flow | the same for one flow (with `--baseline`) |
 
 Efficiency arrives on a diverging ramp pinned at 0–200%, for the reason
 `mx_achieved` does: 100% is *what this hardware should do*, the midpoint
 rather than the top, and a host above it is as much a finding as one below.
-`--prefix` renames the tests, and `--run LABEL` tags every sample so several
-runs can be kept in one file.
+The change since a baseline is on the same ramp centred on *no change*, from
+−50 to +50 points: a fall of a few points is visibly coloured, and a
+50-point one is already a fault. `--prefix` renames the
+tests, and `--run LABEL` tags every sample so several runs can be kept in
+one file.
 
 ## Other outputs
 
@@ -297,7 +366,9 @@ runs can be kept in one file.
   efficiency, the limit and the link it is on, loss, RTT against idle, and
   the MTU with where it came from.
 - **`--json`** — all of it, with the hardware as the model used it and where
-  each figure came from.
+  each figure came from, the `--run` label, and with `--baseline` each
+  host's and flow's figure then and the change since, and a `baseline`
+  block with who fell, who rose, and what could not be compared.
 
 Blank means not measured in all of them. A flow with no expectation has an
 empty `expected`, not a zero, and its limit says `UNMODELLED`.

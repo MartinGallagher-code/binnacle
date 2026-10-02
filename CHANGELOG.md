@@ -117,6 +117,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   10 G hosts on one 10 G uplink each, 97,656.25 requests/s across racks and
   390,625 inside them -- and holds the tool to them.
 
+- **`reckon --baseline`: what changed since an earlier run.** Raw rates do
+  not compare across runs with different targets, packet sizes or
+  windows; efficiency does, because each run is graded against its own
+  expectation. So an earlier reckoning's `--json` or `--overlay` -- the
+  file already kept -- is the history, and `reckon` keeps none of its own.
+  Three rules read it, in the shortfalls' own order so that one fault that
+  moved a whole rack is one finding: `HOST_REGRESSED` (a host fell
+  `--drop` points, default 5, while its rack held -- the case nothing else
+  can see, a host at 91% that was at 99%), `GROUP_REGRESSED` (half a rack
+  fell; its cross-boundary flows falling more than its inside ones puts it
+  on the uplinks) and `FLEET_REGRESSED` (the median host fell, with the two
+  runs' descriptions when they differ). A host already short is not
+  reported twice: its `HOST_SHORT`, `GROUP_SHORT` or `FLEET_SHORT` finding
+  carries "it was 98% in run tue" instead.
+
+  Only what both runs compared is compared: a host either run could not
+  model has no change rather than a fall to nothing, hosts missing from
+  this run and hosts modelled at another NIC speed than then are listed,
+  values that are not numbers are counted and left out, and a baseline of
+  the other workload (iperf against mx) is refused. `--run` is now written
+  into `--json` so the next run can say "since run tue". New outputs:
+  `reckon_change` and `reckon_peer_change` overlays (points, a diverging
+  ramp from -50 to +50), a `was` column in the hosts table, a BASELINE
+  line, and `baseline_efficiency_pct` / `change_pts` in `--json` and
+  `--flows`.
+
 - **The `.dc` layout parser is now held identical in two files.**
   `manifest`'s parser is copied verbatim into `reckon`, and the drift check
   compares all eight functions, so the two can never read one layout two

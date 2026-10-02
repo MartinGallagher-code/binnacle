@@ -202,7 +202,8 @@ names to `why-slow` and `during`:
 ```bash
 netmesh check --reports idle/ $(cat hosts.txt)
 mx run --for 120
-reckon floor.dc --mx reports/ --idle idle/ --overlay reckon.tsv
+reckon floor.dc --mx reports/ --idle idle/ --overlay reckon.tsv \
+       --run wed --baseline runs/tue.json   # and what changed since Tuesday
 ```
 
 ## Everything is CSV, and rendering is separate
