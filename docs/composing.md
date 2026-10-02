@@ -183,6 +183,7 @@ different pair of tools -- with `during` watching while they run:
 | How many packets per second under load? | [`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator) |
 | What was each box doing while that ran? | `during` |
 | Was that what the hardware should do? | `reckon` |
+| What will it do at a rate nobody ran? | `reckon --ramp` |
 | What did the load do to the latency? | `netmesh run --baseline` |
 | Do the boxes agree what time it is? | `skew` |
 | Which settings actually matter? | [`doehelper`](https://doehelper.com) |
@@ -205,6 +206,11 @@ mx run --for 120
 reckon floor.dc --mx reports/ --idle idle/ --overlay reckon.tsv \
        --run wed --baseline runs/tue.json   # and what changed since Tuesday
 ```
+
+Several runs at a rising rate -- one `mx` history stepped with `mx reload`
+-- make a ramp, and `reckon --ramp` fits a model to it: where the fabric
+stops keeping up, how its p99 grows on the way, and, with `--predict`, what
+it will do at a rate the ramp did not run.
 
 ## Everything is CSV, and rendering is separate
 

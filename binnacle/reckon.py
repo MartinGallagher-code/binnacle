@@ -8,6 +8,7 @@ Usage: reckon floor.dc --mx reports/               an mx run against the hardwar
        reckon --nic-gbps 25 --mx reports/          no layout: the NICs alone
        reckon floor.dc --mx reports/ --idle idle/  add queueing, from netmesh
        reckon floor.dc --mx reports/ --overlay r.tsv   paint it on the floor
+       reckon floor.dc --ramp reports/ --predict 8000  fit a model to a ramp
        reckon --rules                              every rule and its thresholds
        reckon --explain RULE_ID                    why one rule exists
 
@@ -34,6 +35,8 @@ Inputs:
                                          (RECKON_GROUP_KIND, default rack)
       --baseline FILE    an earlier reckoning's --json or --overlay: say
                          which hosts fell since         (RECKON_BASELINE)
+      --ramp PATH...     mx reports of a ramp -- one history whose rate
+                         steps up, or a directory per step: fit a model
 
 Judgement:
       --window S         seconds of mx history, 0 for all  (RECKON_WINDOW, 60)
@@ -45,6 +48,8 @@ Judgement:
                                                         (RECKON_MTU, 1500)
       --drop PTS         a fall of this many points since --baseline is a
                          regression                       (RECKON_DROP, 5)
+      --keep-up PCT      a ramp step keeps up when it delivers this much of
+                         what it asked                (RECKON_KEEP_UP, 98)
 
 Output:
       --top N            worst hosts and flows to list     (RECKON_TOP, 10)
@@ -54,6 +59,8 @@ Output:
       --flows [PATH]     one row per flow, as CSV
       --csv [PATH]       findings as CSV, same shape as why-slow's
       --json [PATH]      hardware, assumptions, flows, hosts and findings
+      --predict PPS      with --ramp: what the model expects at this rate
+                         per flow                        (RECKON_PREDICT)
       --min-severity L   info | warn | critical -- hide findings below L
       --all              also list the rules that were skipped, and why
       --quiet            the verdict and the findings, nothing else
@@ -803,8 +810,9 @@ MX_MARK = ("rep_size", "target_pps", "rep_pps")
 NETMESH_MARK = ("probe", "rtt_p50_us", "jitter_us")
 
 
-def load_mx(paths, window, rename):
-    files = _csv_paths(paths, "--mx")
+def _mx_rows(paths, flag):
+    """Every row of every mx report under PATHS, checked to be mx's."""
+    files = _csv_paths(paths, flag)
     rows = []
     for path in files:
         header, found = _read_csv(path)
@@ -826,8 +834,18 @@ def load_mx(paths, window, rename):
     if not rows:
         die("the mx reports hold no rows -- give the agents an interval or "
             "two, then collect them (mx collect)")
+    return rows, len(files)
+
+
+def load_mx(paths, window, rename):
+    rows, files = _mx_rows(paths, "--mx")
+    return _mx_run(rows, files, window, rename)
+
+
+def _mx_run(rows, files, window, rename):
+    """One run out of mx rows: each flow's rates averaged over the window."""
     run = Run("mx", "pps")
-    run.files = len(files)
+    run.files = files
     latest = max(r["_ts"] for r in rows)
     if window > 0:
         # The same cut `mx summarize --window` makes, from the newest row
@@ -1723,6 +1741,415 @@ def compare_baseline(c, b):
             c.base_nic.append(name)
 
 
+# ---------------------------------------------------------------------------
+# A ramp: a model fitted from several runs at rising rates
+# ---------------------------------------------------------------------------
+#
+# One run is one point, and one point fits nothing.  mx's own advice for
+# finding the limit is a ramp -- the same matrix at rising rates -- and a
+# ramp is enough to fit, for every host and for the fleet:
+#
+#   delivered(x) = x, up to a ceiling C: the most it ever delivered.  C is a
+#                  measurement only when some step asked for more than it
+#                  got; until then it is a lower bound, and said to be.
+#   p99(x)       = r0 + b * u / (1 - u),   u = delivered / C
+#
+# The second is the shape of one queue filling (M/M/1): flat at low load,
+# then climbing ever faster towards the ceiling.  The knee is where it
+# reaches --bloat times r0.  Every step is then left out in turn and
+# predicted from the rest, so a model that cannot predict its own steps is
+# reported as that, not as a model.
+
+RAMP_GAP = 3            # intervals of silence that end a step
+RAMP_SPAN = 3           # hosts changing within this many intervals: one change
+DEFAULT_KEEP_UP = 98.0
+FIT_TOLERANCE = 15.0    # % a left-out step's delivered rate may be off by
+P99_TOLERANCE = 30.0    # the same for its p99, a noisier number
+QUEUE_EARLY = 50.0      # a knee below this % of the ceiling is early
+U_MAX = 0.98            # past this fraction of the ceiling a step is at it
+ERRATIC_MARGIN = 2.0    # points of delivery between steps that are noise
+
+Point = namedtuple("Point", "x y p99 flows agent core step")
+
+
+def _target_key(r):
+    v = _float(r.get("target_pps"))
+    return "max" if v is None else "%g" % v
+
+
+def _ramp_segments(rows):
+    """One report history cut into steps.
+
+    A step ends where the targets change -- a new `mx run` or an `mx
+    reload` -- or where the history goes quiet for RAMP_GAP intervals.
+    Hosts restart a few seconds apart, so changes within RAMP_SPAN
+    intervals of each other are one change, and the rows between the first
+    host's and the last host's are left out: some of them were on the old
+    rate and some on the new, and they belong to neither step.
+    """
+    by_host = {}
+    for r in rows:
+        by_host.setdefault(r["host"], []).append(r)
+    gaps = []
+    for rs in by_host.values():
+        ts = sorted(set(r["_ts"] for r in rs))
+        gaps.extend(b - a for a, b in zip(ts, ts[1:]))
+    interval = _median(gaps) or 1.0
+    marks = []
+    for rs in by_host.values():
+        conf = {}
+        for r in rs:
+            if (r.get("dir") == "tx" and r.get("peer") not in (None, "", "*")
+                    and _float(r.get("pps")) is not None):
+                conf.setdefault(r["_ts"], set()).add(_target_key(r))
+        prev = prev_ts = None
+        for ts in sorted(conf):
+            now = frozenset(conf[ts])
+            if prev is not None and (now != prev
+                                     or ts - prev_ts > RAMP_GAP * interval):
+                marks.append(ts)
+            prev, prev_ts = now, ts
+    # Measured from a change's first mark, not its latest: hosts that
+    # restart a few seconds apart, step after step, would otherwise chain
+    # one step's change into the next and leave nothing between them.
+    spans = []
+    for m in sorted(marks):
+        if spans and m - spans[-1][0] <= RAMP_SPAN * interval:
+            spans[-1][1] = m
+        else:
+            spans.append([m, m])
+    edges = [float("-inf")] + [x for sp in spans for x in sp] + [float("inf")]
+    segments = []
+    for lo, hi in zip(edges[0::2], edges[1::2]):
+        seg = [r for r in rows if lo <= r["_ts"] < hi]
+        # Each host's first interval in a step is its start-up -- the agent
+        # was restarted or the run had just begun -- so it is left out
+        # wherever there is a second one to keep.
+        first = {}
+        for r in seg:
+            if r["host"] not in first or r["_ts"] < first[r["host"]]:
+                first[r["host"]] = r["_ts"]
+        many = set(r["host"] for r in seg if r["_ts"] > first[r["host"]])
+        seg = [r for r in seg
+               if not (r["host"] in many and r["_ts"] == first[r["host"]])]
+        if seg:
+            segments.append(seg)
+    return segments
+
+
+class Step(object):
+    def __init__(self, label, run):
+        self.label = label
+        self.run = run
+        self.c = None
+        self.fleet = None       # Point, per flow
+        self.hosts = {}         # host -> Point, the host's totals
+
+
+def load_ramp(paths, rename):
+    """Every step of a ramp, from report histories or one directory each."""
+    steps = []
+    for path in paths:
+        rows, files = _mx_rows([path], "--ramp")
+        for seg in _ramp_segments(rows):
+            run = _mx_run(seg, files, 0, rename)
+            if not run.flows:
+                continue
+            keys = sorted(set(_target_key(r) for r in seg
+                              if r.get("dir") == "tx"
+                              and _float(r.get("pps")) is not None),
+                          key=lambda k: (k == "max", _float(k) or 0))
+            label = (keys[0] + ("" if keys[0] == "max" else " pps")
+                     if len(keys) == 1 else "%d rates" % len(keys))
+            if len(paths) > 1:
+                label = "%s %s" % (os.path.basename(os.path.normpath(path)),
+                                   label)
+            steps.append(Step(label, run))
+    seen = {}
+    for s in steps:
+        seen[s.label] = seen.get(s.label, 0) + 1
+        if seen[s.label] > 1:
+            s.label += " #%d" % seen[s.label]
+    if len(steps) < 2:
+        die("a ramp needs two steps or more at different rates, and %s "
+            "holds %d -- step the rate with `mx reload` or a new `mx run`, "
+            "or give one reports directory per step"
+            % (" ".join(paths), len(steps)))
+    shapes = set((f.size, f.rep_size) for s in steps for f in s.run.flows)
+    if len(shapes) > 1:
+        die("the steps use different packet sizes (%s): a ramp varies the "
+            "rate and nothing else, or its points are not on one curve"
+            % ", ".join("%d/%d B" % sh for sh in sorted(shapes)))
+    return steps
+
+
+def _ramp_points(step):
+    """A step reduced to each host's point (its totals) and the fleet's.
+
+    The fleet's is the median host's, per flow -- the reading the per-run
+    rules make.  An average would let one slow host or rack bend the
+    fleet's curve into two knees, and the host and rack rules are where an
+    outlier is named.
+    """
+    flows = [f for f in step.run.flows if f.achieved is not None]
+    for name in sorted(set(f.src for f in flows)):
+        out = [f for f in flows if f.src == name]
+        # A layered run has one layer's flows on the wire at a time.
+        layers = len(set(f.layer for f in out)) or 1
+        demands = [f.demand for f in out]
+        cpu = step.run.cpu.get(name) or {}
+        step.hosts[name] = Point(
+            None if any(d is None for d in demands) else sum(demands) / layers,
+            sum(f.achieved for f in out) / layers,
+            _median([f.rtt_p99 for f in out if f.rtt_p99 is not None]),
+            len(out) / float(layers), cpu.get("agent"), cpu.get("core"),
+            step.label)
+    pts = list(step.hosts.values())
+    if pts:
+        step.fleet = Point(
+            None if any(p.x is None for p in pts)
+            else _median([p.x / p.flows for p in pts]),
+            _median([p.y / p.flows for p in pts]),
+            _median([p.p99 for p in pts if p.p99 is not None]),
+            1.0, None, None, step.label)
+
+
+def _queue_fit(pts):
+    """r0 and b for p99 = r0 + b * u / (1 - u), by least squares.
+
+    Linear in r0 and b once u is known, so it is solved exactly.  Neither
+    may go negative: a p99 that falls as load rises is no queue, and is
+    fitted as flat rather than as a negative one.
+    """
+    if len(pts) < 2:
+        return None
+    g = [u / (1.0 - u) for u, _ in pts]
+    p = [v for _, v in pts]
+    n = float(len(pts))
+    sg, sp = sum(g), sum(p)
+    sgg = sum(x * x for x in g)
+    sgp = sum(x * y for x, y in zip(g, p))
+    den = n * sgg - sg * sg
+    if den <= 1e-12 * max(1.0, sgg):
+        return None
+    b = (n * sgp - sg * sp) / den
+    r0 = (sp - b * sg) / n
+    if b < 0:
+        b, r0 = 0.0, sp / n
+    elif r0 < 0:
+        r0, b = 0.0, sgp / sgg
+    resid = [v - (r0 + b * x) for x, v in zip(g, p)]
+    rms = (math.sqrt(sum(e * e for e in resid) / n) if len(pts) > 2
+           else None)
+    return {"r0": r0, "b": b, "rms": rms}
+
+
+def fit_curve(points, keep_up, bloat):
+    """The model for one host, or for the fleet, from one point per step."""
+    keep = keep_up / 100.0
+    short = [p for p in points if p.x is None or p.y < keep * p.x]
+    kept = [p for p in points if not (p.x is None or p.y < keep * p.x)]
+    top = max(points, key=lambda p: (p.y, p.step))
+    fit = {"steps": len(points), "reached": bool(short), "ceiling": top.y,
+           "ceiling_step": top.step, "ceiling_point": top,
+           "r0": None, "b": None, "rms": None, "curve_points": 0,
+           "knee": None, "p99_base": None}
+    asked = [p.x for p in short if p.x is not None]
+    lowest_short = min(asked) if asked else float("inf")
+    below = [p.x for p in kept if p.x < lowest_short]
+    fit["sustained"] = max(below) if below else None
+    fit["first_short"] = min(asked) if asked else None
+    fit["first_short_step"] = (min((p for p in short if p.x is not None),
+                                   key=lambda p: p.x).step if asked else None)
+    # Kept up at a rate above one that fell short: the steps are not one
+    # fabric at rising load, whatever else they are.
+    # Only by more than ERRATIC_MARGIN points: steps either side of the
+    # --keep-up line by a fraction of a point are noise on the line, not
+    # a fabric that got better under more load.
+    worst_short = dict((p.step, p.y / p.x) for p in short if p.x)
+    fit["erratic"] = sorted(
+        k.step for k in kept if k.x >= lowest_short and any(
+            ratio * 100.0 + ERRATIC_MARGIN < k.y / k.x * 100.0
+            for st, ratio in worst_short.items()
+            if [q.x for q in short if q.step == st][0] < k.x))
+    # Asked for more than the ceiling step did, and delivered: past the
+    # ceiling the model says "the ceiling", and a fabric that collapses
+    # delivers less.  And how many steps sit at the ceiling at all -- one
+    # alone pins it, and nothing else in the ramp can confirm it.
+    beyond = [p for p in short if p is not top
+              and (p.x is None or (top.x is not None and p.x > top.x))]
+    fit["beyond"] = [(p.step, p.y) for p in beyond]
+    fit["at_ceiling"] = len([p for p in short if p.y >= keep * top.y])
+    if fit["reached"] and top.y > 0:
+        pts = [(p.y / top.y, p.p99) for p in kept
+               if p.p99 is not None and p.y / top.y < U_MAX]
+        q = _queue_fit(pts)
+        if q:
+            fit.update(q)
+            fit["curve_points"] = len(pts)
+            # The knee is --bloat times the low-load p99: the fitted r0, or
+            # -- when the fit pinned r0 at zero, which no real path has --
+            # the lowest step's own measured p99.
+            low = min((p for p in kept if p.p99 is not None),
+                      key=lambda p: p.x, default=None)
+            base = q["r0"] if q["r0"] > 0 else (low.p99 if low else None)
+            fit["p99_base"] = base
+            if q["b"] > 0 and base:
+                gk = (bloat * base - q["r0"]) / q["b"]
+                if gk > 0:
+                    fit["knee"] = top.y * gk / (1.0 + gk)
+    return fit
+
+
+def predict_at(fit, x, kept_max):
+    """(delivered, p99) the model expects when x is asked for.
+
+    Beyond what the ramp asked, with no ceiling found, there is nothing to
+    predict from: None, not an extrapolation dressed as a prediction.
+    """
+    c = fit["ceiling"]
+    if fit["reached"]:
+        y = min(x, c)
+        p99 = None
+        if fit["b"] is not None and c > 0 and x / c < U_MAX:
+            u = x / c
+            p99 = fit["r0"] + fit["b"] * u / (1.0 - u)
+        return y, p99
+    if kept_max is not None and x <= kept_max:
+        return x, None
+    return None, None
+
+
+def leave_one_out(points, keep_up, bloat):
+    """Each step predicted by a model fitted to the others.
+
+    Returns (worst delivered error %, worst p99 error %, steps predicted).
+    """
+    errs_y, errs_p = [], []
+    for i, p in enumerate(points):
+        if p.x is None:
+            continue
+        rest = points[:i] + points[i + 1:]
+        if len(rest) < 2:
+            continue
+        f = fit_curve(rest, keep_up, bloat)
+        kept_max = max([q.x for q in rest if q.x is not None]
+                       or [None]) if not f["reached"] else None
+        y, p99 = predict_at(f, p.x, kept_max)
+        if y is not None and p.y > 0:
+            errs_y.append(abs(y - p.y) / p.y * 100.0)
+        if p99 is not None and p.p99:
+            errs_p.append(abs(p99 - p.p99) / p.p99 * 100.0)
+    return (max(errs_y) if errs_y else None,
+            max(errs_p) if errs_p else None, len(errs_y))
+
+
+def _check(fit, points, keep_up, bloat):
+    """Delivered and p99 are checked apart: a fabric whose throughput is
+    one clean curve and whose tail latency is noise has a model good for
+    one and not the other, and says which."""
+    worst_y, worst_p, n = leave_one_out(points, keep_up, bloat)
+    fit["loo_delivered_pct"], fit["loo_p99_pct"] = worst_y, worst_p
+    fit["loo_steps"] = n
+    # Without a ceiling the model is "it delivered what it asked", which
+    # every kept-up step agrees with by definition: nothing was checked.
+    if not fit["reached"] or len(points) < 3 or n < 2:
+        fit["check_delivered"] = "unchecked"
+    elif worst_y is not None and worst_y <= FIT_TOLERANCE:
+        fit["check_delivered"] = "validated"
+    else:
+        fit["check_delivered"] = "failed"
+    if worst_p is None or fit["check_delivered"] == "unchecked":
+        fit["check_p99"] = "unchecked"
+    else:
+        fit["check_p99"] = ("validated" if worst_p <= P99_TOLERANCE
+                            else "failed")
+    parts = (fit["check_delivered"], fit["check_p99"])
+    fit["check"] = ("failed" if "failed" in parts else
+                    "validated" if parts[0] == "validated" else "unchecked")
+
+
+class RampModel(object):
+    def __init__(self, steps, hw, args):
+        self.steps = steps
+        self.hw = hw
+        self.args = args
+        self.fleet = None
+        self.hosts = {}         # host -> fit
+        self.hw_host = {}       # host -> what the hardware allows it, total
+        self.hw_flow = None     # ... and a flow, on average
+        self.hw_limit = {}      # host -> (limit, on) at that ceiling
+        self.explained = set()
+        self.prediction = None
+        self.notes = []
+        self.cpu_fleet = False
+
+
+def hardware_ceiling(step, hw, args):
+    """What the declared hardware allows each host with every flow unpaced:
+    the most the top of a ramp could ever reach."""
+    syn = Run("mx", "pps")
+    syn.seen, syn.reported = set(step.run.seen), set(step.run.reported)
+    for f in step.run.flows:
+        g = Flow(f.src, f.dst)
+        g.layer, g.group, g.size, g.rep_size = f.layer, f.group, f.size, f.rep_size
+        syn.flows.append(g)
+    syn.layers = step.run.layers
+    c = analyse(syn, hw, None, 0, args)
+    hosts = dict((n, h.expected) for n, h in c.hosts.items()
+                 if h.expected is not None)
+    limits = dict((n, (h.limit, h.limit_on)) for n, h in c.hosts.items())
+    # The median host's, per flow: the same reading the fleet's points are.
+    per = []
+    for n, total in hosts.items():
+        out = [f for f in syn.flows if f.src == n]
+        layers = len(set(f.layer for f in out)) or 1
+        if out:
+            per.append(total / (len(out) / float(layers)))
+    return hosts, (_median(per) if per else None), limits
+
+
+def fit_ramp(steps, hw, args):
+    m = RampModel(steps, hw, args)
+    for s in steps:
+        s.c = analyse(s.run, hw, None, 0, args)
+        _ramp_points(s)
+    widest = max(steps, key=lambda s: (len(s.run.flows), s.label))
+    m.hw_host, m.hw_flow, m.hw_limit = hardware_ceiling(widest, hw, args)
+    # The ramp's own timestamp, for --csv: the newest row in any step.
+    m.run = max(steps, key=lambda s: s.run.last_ts or 0).run
+    fleet_pts = [s.fleet for s in steps if s.fleet is not None]
+    m.fleet = fit_curve(fleet_pts, args.keep_up, args.bloat)
+    _check(m.fleet, fleet_pts, args.keep_up, args.bloat)
+    m.fleet["kept_max"] = max([p.x for p in fleet_pts if p.x is not None]
+                              or [None])
+    names = sorted(set(n for s in steps for n in s.hosts))
+    for name in names:
+        pts = [s.hosts[name] for s in steps if name in s.hosts]
+        if len(pts) < 2:
+            m.notes.append("%s is in only one step and has no model" % name)
+            continue
+        f = fit_curve(pts, args.keep_up, args.bloat)
+        _check(f, pts, args.keep_up, args.bloat)
+        f["flows"] = _median([p.flows for p in pts])
+        f["kept_max"] = max([p.x for p in pts if p.x is not None] or [None])
+        f["group"] = hw.hosts[name].group if name in hw.hosts else None
+        cp = f["ceiling_point"]
+        f["cpu_bound"] = bool(f["reached"] and (
+            (cp.agent or 0) >= AGENT_CPU_BOUND
+            or (cp.core or 0) >= CPU_CORE_BOUND))
+        m.hosts[name] = f
+    if args.predict:
+        x = args.predict
+        y, p99 = predict_at(m.fleet, x, m.fleet["kept_max"])
+        hosts = {}
+        for name, f in sorted(m.hosts.items()):
+            hy, hp = predict_at(f, x * f["flows"], f["kept_max"])
+            hosts[name] = (hy, hp)
+        m.prediction = {"pps": x, "delivered": y, "p99": p99, "hosts": hosts}
+    return m
+
+
 def _host_limit(flows):
     """The limit most of a host's own flows run into, and on what.
 
@@ -1864,6 +2291,50 @@ RULES = [
          "the model says a link is full that is expected; where it says "
          "there is room, something the layout does not declare is."
          % MIN_ADDED_RTT_US),
+    # --ramp: a model fitted from several runs.  Data problems first, then
+    # causes, then the shortfalls they explain -- the order the per-run
+    # rules use.
+    Rule("RAMP_ERRATIC", "steps disagree",
+         "The fleet kept up at a rate above one where it fell short.  A "
+         "fabric under rising load does not do that, so something else "
+         "changed between the steps -- other traffic, a flapping link, a "
+         "host restarted -- and the fitted model averages over it."),
+    Rule("RAMP_CPU", "test host CPU",
+         "A host whose ceiling came with its mx agent at >= %.0f%% of a "
+         "core, or a core at >= %.0f%%: mx summarize's own lines.  That "
+         "ceiling is the test host's, not the network's."
+         % (AGENT_CPU_BOUND, CPU_CORE_BOUND)),
+    Rule("COLLAPSE", "collapse",
+         "A step that asked for more than the ceiling step and delivered "
+         "less than --short of the ceiling: past its limit the fabric does "
+         "less work, not the same.  The model stops at the ceiling; this is "
+         "what lies beyond it."),
+    Rule("FIT_CHECK", "model check",
+         "Every step is left out in turn and predicted from the others.  A "
+         "delivered rate off by more than %g%%, or a p99 off by more than "
+         "%g%%, means the model does not describe the runs; fewer than "
+         "three steps means it was fitted and never checked."
+         % (FIT_TOLERANCE, P99_TOLERANCE)),
+    Rule("HOST_CEILING", "host ceiling",
+         "A host that saturates below --short of its rack-mates -- or, with "
+         "no rack, the fleet -- per flow.  The fault is on that host or its "
+         "link: it runs out of room before its neighbours do."),
+    Rule("GROUP_CEILING", "rack ceiling",
+         "A rack whose hosts saturate below --short of the other racks', "
+         "per flow.  Its uplinks, its switch, or what its hosts share."),
+    Rule("FLEET_CEILING", "fleet ceiling",
+         "Where the whole fleet saturates, against what the declared "
+         "hardware allows with every flow unpaced.  Below --short of it is "
+         "a WARN: the fabric runs out before its hardware does."),
+    Rule("RAMP_NOT_SATURATED", "never saturated",
+         "No step asked for more than it got, so the ceiling is somewhere "
+         "above the top step and the model has none to fit: a lower bound, "
+         "said as one."),
+    Rule("QUEUES_EARLY", "queues early",
+         "The fitted p99 reaches --bloat times its low-load value below "
+         "%.0f%% of the ceiling: queues build long before the fabric is "
+         "full -- shallow buffers, interrupt coalescing, a policer."
+         % QUEUE_EARLY),
 ]
 RULE_BY_ID = dict((r.id, r) for r in RULES)
 PRECEDENCE = [r.id for r in RULES]
@@ -2555,6 +3026,292 @@ def r_queueing(c):
                     "")], None
 
 
+# --ramp.  The same shape as the per-run rules: a host against its
+# rack-mates, a rack against the other racks, the fleet last -- with the
+# test hosts' own CPU first, because a ceiling that is the agent's says
+# nothing about the network.
+
+def _per_flow(m, names=None):
+    return dict((n, f["ceiling"] / f["flows"]) for n, f in m.hosts.items()
+                if f["flows"] and n not in m.explained
+                and (names is None or n in names))
+
+
+def _pps(v):
+    return fmt_rate(v, "pps")
+
+
+def r_ramp_erratic(m):
+    bad = m.fleet["erratic"]
+    if not bad:
+        return [], None
+    return [Finding(RULE_BY_ID["RAMP_ERRATIC"], WARN, "*",
+                    "the fleet kept up at %s but fell short at %s, a lower "
+                    "rate: the steps are not one fabric under rising load"
+                    % (", ".join(bad), m.fleet["first_short_step"]),
+                    "Look at what changed between those steps: other "
+                    "traffic on the fabric, a link that flapped (the "
+                    "interface counters, through `dredge`), a host that "
+                    "restarted.  Run the steps again in order, back to "
+                    "back, and the model fits one fabric.")], None
+
+
+def r_collapse(m):
+    f = m.fleet
+    if not f["reached"]:
+        return None, "no ceiling: nothing lies beyond it"
+    worst = min(f["beyond"], key=lambda sy: (sy[1], sy[0]), default=None)
+    if worst is None:
+        return [], None
+    pct = worst[1] / f["ceiling"] * 100.0
+    if pct >= m.args.short:
+        return [], None
+    return [Finding(RULE_BY_ID["COLLAPSE"], WARN, "*",
+                    "past its ceiling the fleet delivers less, not the same: "
+                    "at step %s it delivered %s per flow, %.0f%% of the %s it "
+                    "reached at step %s" % (worst[0], _pps(worst[1]), pct,
+                                            _pps(f["ceiling"]),
+                                            f["ceiling_step"]),
+                    "Overload costs this fleet throughput: drops and the "
+                    "work of dropping feed on each other.  Keep the senders "
+                    "paced below the sustained rate, and look at where the "
+                    "packets die under overload -- `during` on a receiver "
+                    "(softirq, ring and backlog drops) at that step.")], None
+
+
+def r_fit_check(m):
+    f = m.fleet
+    if not f["reached"]:
+        return None, "no ceiling: a model of delivered = asked has nothing to check"
+    if f["check"] == "validated":
+        return [], None
+    if f["check"] == "unchecked":
+        return [Finding(RULE_BY_ID["FIT_CHECK"], INFO, "*",
+                        "with %d steps the model is fitted but not checked: "
+                        "leaving one out leaves too few to predict it from"
+                        % f["steps"],
+                        "Add steps -- three or more, spread across the range "
+                        "-- so each can be predicted from the others.")], None
+    parts = []
+    if f["loo_delivered_pct"] is not None:
+        parts.append("delivered off by up to %.0f%%" % f["loo_delivered_pct"])
+    if f["loo_p99_pct"] is not None:
+        parts.append("p99 off by up to %.0f%%" % f["loo_p99_pct"])
+    say = ("the model does not predict its own steps: leaving each out, %s "
+           "(it allows %g%% and %g%%)"
+           % (" and ".join(parts), FIT_TOLERANCE, P99_TOLERANCE))
+    if f["check_delivered"] == "validated":
+        say = ("the model predicts delivered within %.0f%% but not p99: "
+               "leaving each step out, p99 was off by up to %.0f%% (it "
+               "allows %g%%)" % (f["loo_delivered_pct"], f["loo_p99_pct"],
+                                 P99_TOLERANCE))
+        fix = ("Trust its delivered rates and ceiling; not its latency.  A "
+               "p99 that jumps between neighbouring steps is noise the "
+               "steps are too short to average out -- give each more report "
+               "intervals -- or a test host's own CPU queueing the packets.")
+    elif f["at_ceiling"] == 1:
+        say += ("; only step %s sits at the ceiling, so leaving it out "
+                "leaves nothing that shows it" % f["ceiling_step"])
+        fix = ("Put more steps near the ceiling -- between %s and %s per "
+               "flow -- so it is pinned by more than one.  Do not trust "
+               "predictions from this model until a ramp passes."
+               % (_pps(f["sustained"]), _pps(f["first_short"])))
+    else:
+        fix = ("The steps do not lie on one curve: steps too short to "
+               "settle (give each several report intervals), a fabric that "
+               "changed during the ramp, or a ceiling that is a test host's "
+               "CPU.  Do not trust predictions from this model until a ramp "
+               "passes.")
+    return [Finding(RULE_BY_ID["FIT_CHECK"], WARN, "*", say, fix)], None
+
+
+def r_ramp_cpu(m):
+    reached = [n for n, f in m.hosts.items() if f["reached"]]
+    if not reached:
+        return None, "no host reached its ceiling"
+    bound = sorted(n for n in reached if m.hosts[n]["cpu_bound"])
+    if not bound:
+        return [], None
+    m.explained.update(bound)
+    fix = ("Give mx more workers (`--workers`, one per core) or each host "
+           "fewer flows (`--peers`) and ramp again: the network's ceiling "
+           "is above this one.  `mx hints --pps-per-host N` does the "
+           "arithmetic.")
+    if len(bound) * 2 >= len(reached):
+        m.cpu_fleet = True
+        return [Finding(RULE_BY_ID["RAMP_CPU"], WARN, "*",
+                        "%d of the %d hosts that saturated did so with their "
+                        "mx agent or a core out of CPU (%s): the ramp "
+                        "measured the test hosts, not the network"
+                        % (len(bound), len(reached), _names(bound)), fix)], None
+    out = []
+    for n in bound:
+        f = m.hosts[n]
+        cp = f["ceiling_point"]
+        out.append(Finding(RULE_BY_ID["RAMP_CPU"], WARN, n,
+                           "%s saturated at %s per flow (%s in all) with its "
+                           "agent at %s of a core and its busiest core at %s: "
+                           "that ceiling is its CPU's"
+                           % (n, _pps(f["ceiling"] / (f["flows"] or 1)),
+                              _pps(f["ceiling"]), _pct(cp.agent),
+                              _pct(cp.core)), fix))
+    return out, None
+
+
+def r_host_ceiling(m):
+    per = _per_flow(m)
+    out = []
+    for name in sorted(per, key=lambda n: (per[n], n)):
+        f = m.hosts[name]
+        if not f["reached"] or name in m.explained:
+            continue
+        group = f["group"]
+        mates = [per[n] for n in per if n != name and group is not None
+                 and m.hosts[n]["group"] == group]
+        if mates:
+            ref = _median(mates)
+            where = "the rest of %s" % m.hw.groups[group].label
+        else:
+            ref = _median([v for n, v in per.items() if n != name])
+            where = "the rest of the fleet"
+        if not ref:
+            continue
+        pct = per[name] / ref * 100.0
+        if pct >= m.args.short:
+            continue
+        m.explained.add(name)
+        sev = CRITICAL if pct < m.args.fail else WARN
+        out.append(Finding(RULE_BY_ID["HOST_CEILING"], sev, name,
+                           "%s saturates at %s per flow while %s reaches %s "
+                           "(%.0f%%)" % (name, _pps(per[name]), where,
+                                         _pps(ref), pct),
+                           "The fault is on %s or its link: it runs out of "
+                           "room before its neighbours do.  `why-slow --ssh "
+                           "%s` for the box, `during` around one step of the "
+                           "ramp for what limited it, and `ethtool -S` on "
+                           "its NIC for drops." % (name, name)))
+    return out, None
+
+
+def r_group_ceiling(m):
+    if not m.hw.groups:
+        return None, "no racks: no layout, or none that holds a measured host"
+    kind = m.hw.group_kind
+    out = []
+    for gname in sorted(m.hw.groups):
+        per = _per_flow(m)
+        members = [n for n in m.hw.groups[gname].hosts if n in per]
+        if len(members) < 2 or not any(m.hosts[n]["reached"]
+                                       for n in members):
+            continue
+        mine = _median([per[n] for n in members])
+        others = _median([v for n, v in per.items()
+                          if m.hosts[n]["group"] != gname])
+        if not others:
+            continue
+        pct = mine / others * 100.0
+        if pct >= m.args.short:
+            continue
+        m.explained.update(members)
+        g = m.hw.groups[gname]
+        on_uplinks = len([n for n in members
+                          if (m.hw_limit.get(n) or (None,))[0] == UPLINK])
+        if on_uplinks * 2 >= len(members) and g.uplink_bps:
+            fix = ("The hardware puts %s's limit on its uplinks, and they "
+                   "run out before the other racks' do: an uplink or LAG "
+                   "member down, an optic negotiated lower, ECMP hashing onto "
+                   "fewer links than are cabled." % g.label)
+        else:
+            fix = ("Not a limit the layout declares: what %s's hosts share "
+                   "-- the switch, their NIC driver and firmware, their "
+                   "settings (`agree` against a host in another rack) -- or "
+                   "uplinks it does not declare." % g.label)
+        sev = CRITICAL if pct < m.args.fail else WARN
+        out.append(Finding(RULE_BY_ID["GROUP_CEILING"], sev, "*",
+                           "%s %s saturates at %s per flow while the other "
+                           "%ss reach %s (%.0f%%)" % (kind, g.label, _pps(mine),
+                                                       kind, _pps(others), pct),
+                           fix))
+    return out, None
+
+
+def r_fleet_ceiling(m):
+    f = m.fleet
+    if not f["reached"]:
+        return None, "the fleet never saturated"
+    if not m.hw_flow:
+        return None, "no hardware to compare the ceiling with"
+    pct = f["ceiling"] / m.hw_flow * 100.0
+    if pct >= m.args.short or m.cpu_fleet:
+        return [], None
+    small = all(fl.size < 512 for s in m.steps for fl in s.run.flows)
+    pps_declared = any(h.nic_pps for h in m.hw.hosts.values())
+    fix = ("The whole fleet runs out before its hardware does, together, "
+           "which one faulty part does not do: the NIC driver and firmware, "
+           "the hosts' interrupt and queue settings, or the switches.")
+    if small and not pps_declared:
+        fix = ("Small packets: a NIC reaches its packet rate long before its "
+               "bit rate, and no host declares nic_mpps=.  Declare it to "
+               "model that; then what is left is the hosts' per-packet cost "
+               "(`during` at the top step).")
+    return [Finding(RULE_BY_ID["FLEET_CEILING"], WARN, "*",
+                    "the median host saturates at %s per flow, %.0f%% of the "
+                    "%s the declared hardware allows it"
+                    % (_pps(f["ceiling"]), pct, _pps(m.hw_flow)), fix)], None
+
+
+def r_ramp_not_saturated(m):
+    f = m.fleet
+    loose = sorted(n for n, h in m.hosts.items() if not h["reached"])
+    if f["reached"] and not loose:
+        return [], None
+    if not f["reached"]:
+        return [Finding(RULE_BY_ID["RAMP_NOT_SATURATED"], INFO, "*",
+                        "no step asked for more than the fleet delivered: it "
+                        "kept up to %s per flow, and its ceiling is somewhere "
+                        "above that" % _pps(f["kept_max"]),
+                        "Add steps above %s per flow -- or one unpaced step, "
+                        "`mx gen --pps max` -- until DELIVERED stops keeping "
+                        "up with REQUESTS." % _pps(f["kept_max"]))], None
+    return [Finding(RULE_BY_ID["RAMP_NOT_SATURATED"], INFO, "*",
+                    "%d host(s) never saturated, so their ceilings are lower "
+                    "bounds: %s" % (len(loose), _names(loose)), "")], None
+
+
+def r_queues_early(m):
+    f = m.fleet
+    if not f["reached"]:
+        return None, "no ceiling: the queue curve is measured against it"
+    if f["b"] is None:
+        return None, ("fewer than two steps below the ceiling to fit the "
+                      "queue curve to")
+    if f["knee"] is None:
+        return [], None
+    pct = f["knee"] / f["ceiling"] * 100.0
+    if pct >= QUEUE_EARLY:
+        return [], None
+    return [Finding(RULE_BY_ID["QUEUES_EARLY"], WARN, "*",
+                    "queues build early: p99 reaches %gx its low-load %s at "
+                    "%s per flow, %.0f%% of the ceiling"
+                    % (m.args.bloat, fmt_us(f["p99_base"]), _pps(f["knee"]),
+                       pct),
+                    "A queue long before the fabric is full: shallow switch "
+                    "buffers meeting bursts, interrupt coalescing on the "
+                    "hosts (`ethtool -c`), or a policer.  `netmesh run "
+                    "--baseline` under a step at the knee names the hop the "
+                    "latency appears at.")], None
+
+
+RAMP_EVALUATORS = [
+    ("RAMP_ERRATIC", r_ramp_erratic), ("RAMP_CPU", r_ramp_cpu),
+    ("COLLAPSE", r_collapse), ("FIT_CHECK", r_fit_check),
+    ("HOST_CEILING", r_host_ceiling),
+    ("GROUP_CEILING", r_group_ceiling), ("FLEET_CEILING", r_fleet_ceiling),
+    ("RAMP_NOT_SATURATED", r_ramp_not_saturated),
+    ("QUEUES_EARLY", r_queues_early),
+]
+
+
 EVALUATORS = [
     ("LINK_SPEED", r_link_speed), ("NO_REPORT", r_no_report),
     ("UNMODELLED", r_unmodelled), ("NOT_IN_LAYOUT", r_not_in_layout),
@@ -2569,12 +3326,12 @@ EVALUATORS = [
 ]
 
 
-def evaluate(c):
+def evaluate(c, evaluators=None):
     """Run the rules in precedence order: causes first, so a host already
     explained -- its link came up slow, its agent ran out of CPU -- is not
     reported again as merely short."""
     findings, skipped = [], []
-    for rid, fn in EVALUATORS:
+    for rid, fn in (evaluators or EVALUATORS):
         found, why = fn(c)
         if found is None:
             skipped.append((RULE_BY_ID[rid], why))
@@ -2601,6 +3358,15 @@ LEADS = {
     "HOST_REGRESSED": "A host fell since the baseline.",
     "GROUP_REGRESSED": "A whole rack fell since the baseline.",
     "FLEET_REGRESSED": "The whole fleet fell since the baseline.",
+    "RAMP_ERRATIC": "The steps of the ramp disagree with each other.",
+    "FIT_CHECK": "The fitted model does not describe the ramp.",
+    "RAMP_CPU": "The ramp found the test hosts' limit, not the network's.",
+    "COLLAPSE": "Past its ceiling the fleet delivers less, not the same.",
+    "HOST_CEILING": "One host saturates before the rest.",
+    "GROUP_CEILING": "A whole rack saturates before the rest.",
+    "FLEET_CEILING": "The fleet saturates below its hardware.",
+    "RAMP_NOT_SATURATED": "The ramp never reached a ceiling.",
+    "QUEUES_EARLY": "Queues build long before the fabric is full.",
     "FLOW_SHORT": "Some paths fall short while the hosts at both ends are "
                   "fine.",
     "LOSS_BELOW_CAPACITY": "Packets are lost below capacity.",
@@ -3132,6 +3898,343 @@ def render_overlay(c, prefix, run_label, path):
 
 
 # ---------------------------------------------------------------------------
+# --ramp output
+# ---------------------------------------------------------------------------
+
+def ramp_verdict(m, findings):
+    serious = [f for f in findings if f.severity in (CRITICAL, WARN)]
+    if serious:
+        f = serious[0]
+        return "%s: %s." % (LEADS[f.rule.id].rstrip("."), f.say)
+    f = m.fleet
+    if not f["reached"]:
+        return ("The fleet kept up at every step, to %s per flow: its "
+                "ceiling is above the ramp." % _pps(f["kept_max"]))
+    text = "The fleet "
+    if f["sustained"] is not None:
+        text += "sustains %s per flow and " % _pps(f["sustained"])
+    text += "saturates at %s" % _pps(f["ceiling"])
+    if m.hw_flow:
+        text += " (%.0f%% of its hardware)" % (f["ceiling"] / m.hw_flow * 100)
+    if f["knee"] is not None:
+        text += "; p99 grows %gx by %s" % (m.args.bloat, _pps(f["knee"]))
+    if f["check"] == "validated":
+        text += ".  The model predicts its own steps within %.0f%%" % (
+            f["loo_delivered_pct"] or 0.0)
+    return text + "."
+
+
+def _ramp_limit(m, name):
+    f = m.hosts[name]
+    if not f["reached"]:
+        return "not reached"
+    if f["cpu_bound"]:
+        cp = f["ceiling_point"]
+        return "test host CPU (agent %s, core %s)" % (_pct(cp.agent),
+                                                    _pct(cp.core))
+    # Not "the uplinks": the hardware's limit is what the ceiling would be
+    # if the hardware were all there was, and the ceiling is measured
+    # against it, not explained by it.
+    hw = m.hw_host.get(name)
+    if not hw:
+        return "-"
+    text = "%.0f%% of its hardware" % (f["ceiling"] / hw * 100.0)
+    lim = m.hw_limit.get(name)
+    if lim and lim[0] not in (None, TARGET, UNMODELLED, UNBOUNDED):
+        text += ", %s" % limit_text(lim[0], lim[1], m)
+    return text
+
+
+def _check_text(f):
+    if f["check"] == "validated":
+        return "validated"
+    if f["check"] == "failed":
+        return "FAILED"
+    return "unchecked"
+
+
+def render_ramp_human(m, findings, skipped, args, C):
+    shape = sorted(set((int(fl.size), int(fl.rep_size))
+                       for s in m.steps for fl in s.run.flows))[0]
+    hosts = sorted(set(n for s in m.steps for n in s.hosts))
+    out = ["%s -- ramp of %d steps, %d hosts, mx %d B requests, %d B replies"
+           % (PROG, len(m.steps), len(hosts), shape[0], shape[1]), ""]
+    out.append("  %s  %s" % (C.bold("VERDICT"),
+                             _wrap(ramp_verdict(m, findings), 11)))
+    out.append("")
+    floor = SEVERITY_ORDER[args.min_severity]
+    shown = [f for f in findings if SEVERITY_ORDER[f.severity] >= floor]
+    for f in shown:
+        tag = {CRITICAL: C.crit("CRITICAL"), WARN: C.warn("WARN    "),
+               INFO: C.info("INFO    ")}[f.severity]
+        out.append("  %s  %-15s %s" % (tag, f.rule.title, _wrap(f.say, 28)))
+    if args.all:
+        for r, why in skipped:
+            out.append("  %s   %-15s %s" % (C.dim("skipped"), r.title,
+                                            C.dim(_wrap(why, 28))))
+    if shown or args.all:
+        out.append("")
+    if not args.quiet:
+        width = max([len(s.label) for s in m.steps] + [4])
+        out.append("  STEPS, per flow")
+        out.append("    %-*s  %12s  %12s  %7s  %8s"
+                   % (width, "step", "asked", "delivered", "kept up", "p99"))
+        for s in m.steps:
+            p = s.fleet
+            if p is None:
+                continue
+            kept = ("%.0f%%" % (p.y / p.x * 100.0)) if p.x else "-"
+            out.append("    %-*s  %12s  %12s  %7s  %8s"
+                       % (width, s.label, _pps(p.x), _pps(p.y), kept,
+                          fmt_us(p.p99)))
+        out.append("")
+        out += _ramp_model_lines(m, args)
+        out += _ramp_host_lines(m, args)
+        out += _ramp_prediction_lines(m)
+        for note in m.notes:
+            out.append("  NOTE       " + _wrap(note, 13))
+        if m.notes:
+            out.append("")
+    out.append("  %s" % C.bold("WHAT TO DO NEXT"))
+    fixes = [f.fix for f in shown if f.fix and f.severity != INFO]
+    fixes += [f.fix for f in shown if f.fix and f.severity == INFO]
+    if not fixes:
+        out.append("    %s" % _wrap(
+            "Nothing to chase.  Keep this ramp's --json: its ceiling and "
+            "knee are what the next ramp is compared with, and --predict "
+            "says what a rate you have not run should do.", 4))
+    else:
+        seen = set()
+        for fix in fixes:
+            if fix in seen:
+                continue
+            seen.add(fix)
+            out.append("    * %s" % _wrap(fix, 6))
+            if len(seen) == 4:
+                break
+    out.append("")
+    return "\n".join(out)
+
+
+def _ramp_model_lines(m, args):
+    f = m.fleet
+    out = ["  MODEL, the fleet per flow"]
+    if f["reached"]:
+        line = "%s, at step %s" % (_pps(f["ceiling"]), f["ceiling_step"])
+        if m.hw_flow:
+            line += "; the hardware allows %s (%.0f%%)" % (
+                _pps(m.hw_flow), f["ceiling"] / m.hw_flow * 100.0)
+        out.append("    ceiling    " + _wrap(line, 15))
+        out.append("    sustains   " + _wrap(
+            "%s; first falls short at %s" % (_pps(f["sustained"]),
+                                             _pps(f["first_short"]))
+            if f["sustained"] is not None else
+            "falls short from the first step (%s)" % _pps(f["first_short"]),
+            15))
+    else:
+        out.append("    ceiling    " + _wrap(
+            "not reached: above %s, the most any step asked for"
+            % _pps(f["kept_max"]), 15))
+    if f["b"] is not None:
+        rms = (", rms %s" % fmt_us(f["rms"])) if f["rms"] is not None else ""
+        out.append("    p99        " + _wrap(
+            "%s + %s x u/(1-u), u = delivered / ceiling (%d steps%s)"
+            % (fmt_us(f["r0"]), fmt_us(f["b"]), f["curve_points"], rms), 15))
+        if f["knee"] is not None:
+            out.append("    knee       " + _wrap(
+                "p99 reaches %gx at %s, %.0f%% of the ceiling"
+                % (args.bloat, _pps(f["knee"]),
+                   f["knee"] / f["ceiling"] * 100.0), 15))
+        else:
+            out.append("    knee       p99 does not grow below the ceiling")
+    elif f["reached"]:
+        out.append("    p99        fewer than two steps below the ceiling "
+                   "to fit it to")
+    parts = []
+    if f["loo_delivered_pct"] is not None:
+        parts.append("delivered within %.0f%%" % f["loo_delivered_pct"])
+    if f["loo_p99_pct"] is not None:
+        parts.append("p99 within %.0f%%" % f["loo_p99_pct"])
+    verdict = ("delivered %s, p99 %s" % (f["check_delivered"], f["check_p99"])
+               if f["check_delivered"] != f["check_p99"] else f["check"])
+    out.append("    checked    " + _wrap(
+        "each step left out and predicted from the others: %s -- %s"
+        % (", ".join(parts) or "nothing could be predicted", verdict), 15))
+    out.append("")
+    return out
+
+
+def _ramp_host_lines(m, args):
+    names = sorted(m.hosts, key=lambda n: (
+        m.hosts[n]["ceiling"] / (m.hosts[n]["flows"] or 1), n))[:args.top]
+    if not names:
+        return []
+    width = max([len(n) for n in names] + [4])
+    out = ["  HOSTS, lowest ceiling first (per flow)",
+           "    %-*s  %13s  %12s  %10s  %s"
+           % (width, "host", "ceiling", "knee", "check", "against")]
+    for n in names:
+        f = m.hosts[n]
+        per = f["ceiling"] / (f["flows"] or 1)
+        cell = _pps(per) if f["reached"] else ">" + _pps(per)
+        knee = _pps(f["knee"] / f["flows"]) if f["knee"] and f["flows"] else "-"
+        out.append("    %-*s  %13s  %12s  %10s  %s"
+                   % (width, n, cell, knee, _check_text(f), _ramp_limit(m, n)))
+    out.append("")
+    return out
+
+
+def _ramp_prediction_lines(m):
+    pr = m.prediction
+    if pr is None:
+        return []
+    out = ["  PREDICTED at %s per flow" % _pps(pr["pps"])]
+    if pr["delivered"] is None:
+        out.append("    " + _wrap(
+            "beyond the ramp: no step asked for this much and no ceiling was "
+            "found, so there is nothing to predict it from", 4))
+    else:
+        at = (" -- at the ceiling, where p99 is the queue's, not the curve's"
+              if m.fleet["reached"] and pr["pps"] >= m.fleet["ceiling"] * U_MAX
+              else "")
+        out.append("    " + _wrap(
+            "the fleet delivers %s per flow, p99 %s%s"
+            % (_pps(pr["delivered"]), fmt_us(pr["p99"]), at), 4))
+        cd, cp = m.fleet["check_delivered"], m.fleet["check_p99"]
+        if cd != "validated":
+            out.append("    " + _wrap(
+                "-- from a model that %s its own check: a rough guide, not "
+                "a prediction" % ("failed" if cd == "failed"
+                                  else "has not passed"), 4))
+        elif cp == "failed" and pr["p99"] is not None:
+            out.append("    " + _wrap(
+                "-- the delivered rate passed its check; the p99 did not, "
+                "and is a rough guide", 4))
+        short = sorted((n for n, (y, _p) in pr["hosts"].items()
+                        if y is not None
+                        and y < pr["pps"] * m.hosts[n]["flows"] * 0.98),
+                       key=lambda n: n)
+        if short:
+            out.append("    " + _wrap(
+                "%d host(s) fall short of it: %s"
+                % (len(short), _names(short)), 4))
+    out.append("")
+    return out
+
+
+def _fit_record(f, flows=None):
+    rec = dict((k, f.get(k)) for k in (
+        "steps", "reached", "ceiling", "ceiling_step", "sustained",
+        "first_short", "erratic", "r0", "b", "rms", "curve_points", "knee",
+        "check", "check_delivered", "check_p99", "loo_delivered_pct",
+        "loo_p99_pct", "loo_steps", "kept_max", "at_ceiling", "p99_base"))
+    rec["beyond"] = [{"step": st, "delivered": y} for st, y in f.get("beyond") or []]
+    rec["r0_us"], rec["b_us"] = rec.pop("r0"), rec.pop("b")
+    rec["p99_base_us"] = rec.pop("p99_base")
+    rec["rms_us"] = rec.pop("rms")
+    if flows:
+        rec["flows"] = flows
+        rec["ceiling_per_flow"] = f["ceiling"] / flows
+    return rec
+
+
+def render_ramp_json(m, findings, skipped, path):
+    doc = {
+        "meta": {"tool": "reckon", "version": VERSION, "mode": "ramp",
+                 "unit": "pps", "layout": m.hw.layout,
+                 "keep_up_pct": m.args.keep_up, "bloat": m.args.bloat,
+                 "short_pct": m.args.short, "label": m.args.run,
+                 "ts": _stamp(m) or None},
+        "steps": [{
+            "label": s.label, "first_ts": s.run.first_ts,
+            "last_ts": s.run.last_ts, "flows": len(s.run.flows),
+            "asked_per_flow": s.fleet.x if s.fleet else None,
+            "delivered_per_flow": s.fleet.y if s.fleet else None,
+            "p99_us": s.fleet.p99 if s.fleet else None,
+        } for s in m.steps],
+        "model": {
+            "form": {"delivered": "min(asked, ceiling)",
+                     "p99_us": "r0 + b * u / (1 - u), u = delivered / ceiling"},
+            "fleet": dict(_fit_record(m.fleet),
+                          hardware_per_flow=m.hw_flow),
+            "hosts": dict((n, dict(
+                _fit_record(f, f["flows"]),
+                group=f["group"], cpu_bound=f["cpu_bound"],
+                hardware_total=m.hw_host.get(n)))
+                for n, f in sorted(m.hosts.items())),
+        },
+        "prediction": None if m.prediction is None else {
+            "pps_per_flow": m.prediction["pps"],
+            "delivered_per_flow": m.prediction["delivered"],
+            "p99_us": m.prediction["p99"],
+            "model_check": m.fleet["check"],
+            "delivered_check": m.fleet["check_delivered"],
+            "p99_check": m.fleet["check_p99"],
+            "hosts": dict((n, {"delivered_total": y, "p99_us": p})
+                          for n, (y, p) in m.prediction["hosts"].items()),
+        },
+        "notes": m.notes,
+        "findings": [{"rule_id": f.rule.id, "severity": f.severity,
+                      "host": f.host, "title": f.rule.title,
+                      "detail": f.say, "fix": f.fix} for f in findings],
+        "skipped": [{"rule_id": r.id, "reason": why} for r, why in skipped],
+    }
+    text = json.dumps(doc, indent=2, sort_keys=True)
+    if path:
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    else:
+        sys.stdout.write(text + "\n")
+
+
+def render_ramp_overlay(m, prefix, run_label, path):
+    lines = ["# reckon %s -- the model fitted to a ramp of %d steps"
+             % (VERSION, len(m.steps)),
+             "# steps: %s" % ", ".join(s.label for s in m.steps),
+             "# model: delivered = min(asked, ceiling); "
+             "p99 = r0 + b * u / (1 - u), u = delivered / ceiling"]
+    if m.hw.layout:
+        lines.append("# layout %s" % m.hw.layout)
+    tests = [
+        ("ceiling", 'unit=pps\thigher=good\tagg=min\tdecimals=0\tshort=CEIL\t'
+                    'label="Most it delivered per flow, ramp"'),
+        ("ceiling_efficiency", 'unit=%\thigher=good\tpalette=rdbu\tmin=0\t'
+                               'max=200\tagg=median\tdecimals=0\tshort=CEFF\t'
+                               'label="Ceiling vs what the hardware allows"'),
+        ("knee", 'unit=pps\thigher=good\tagg=min\tdecimals=0\tshort=KNEE\t'
+                 'label="Per-flow rate where p99 grows %gx"' % m.args.bloat),
+    ]
+    for name, meta in tests:
+        lines.append("!test\t%s%s\t%s" % (prefix, name, meta))
+    extra = ("\trun=%s" % _meta_value(run_label)) if run_label else ""
+
+    def sample(test, target, value, **meta):
+        bits = "".join("\t%s=%s" % (k, _meta_value(v))
+                       for k, v in sorted(meta.items()) if v not in (None, ""))
+        lines.append("%s%s\t%s\t%s%s%s" % (prefix, test, target, value, bits,
+                                           extra))
+
+    for n, f in sorted(m.hosts.items()):
+        if not f["flows"]:
+            continue
+        per = f["ceiling"] / f["flows"]
+        sample("ceiling", n, "%.0f" % per,
+               reached="yes" if f["reached"] else "no",
+               check=f["check"], limit=_ramp_limit(m, n))
+        hw = m.hw_host.get(n)
+        if f["reached"] and hw:
+            sample("ceiling_efficiency", n, "%.1f" % (f["ceiling"] / hw * 100))
+        if f["knee"] is not None:
+            sample("knee", n, "%.0f" % (f["knee"] / f["flows"]))
+    text = "\n".join(lines) + "\n"
+    if path:
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    else:
+        sys.stdout.write(text)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -3162,6 +4265,7 @@ def build_parser():
     p.add_argument("--group-kind", metavar="KIND",
                    default=_env("GROUP_KIND", DEFAULT_GROUP_KIND))
     p.add_argument("--baseline", metavar="FILE", default=_env("BASELINE"))
+    p.add_argument("--ramp", nargs="+", metavar="PATH")
     p.add_argument("--window", type=int, metavar="S",
                    default=_env_num("WINDOW", int, DEFAULT_WINDOW))
     p.add_argument("--short", type=float, metavar="PCT",
@@ -3174,6 +4278,10 @@ def build_parser():
                    default=_env_num("MTU", int, DEFAULT_MTU))
     p.add_argument("--drop", type=float, metavar="PTS",
                    default=_env_num("DROP", float, DEFAULT_DROP))
+    p.add_argument("--keep-up", type=float, metavar="PCT",
+                   default=_env_num("KEEP_UP", float, DEFAULT_KEEP_UP))
+    p.add_argument("--predict", type=float, metavar="PPS",
+                   default=_env_num("PREDICT", float, None))
     p.add_argument("--top", type=int, metavar="N",
                    default=_env_num("TOP", int, DEFAULT_TOP))
     p.add_argument("--overlay", nargs="?", const="", metavar="PATH")
@@ -3239,9 +4347,24 @@ def check_args(args):
         die("--top must be 0 or more")
     if not args.group_kind:
         die("--group-kind needs a container kind, such as rack")
-    if bool(args.mx) == bool(args.iperf):
+    if not (math.isfinite(args.keep_up) and 0 < args.keep_up <= 100):
+        die("--keep-up must be a percentage above 0 and at most 100, not %g"
+            % args.keep_up)
+    if args.predict is not None and not (math.isfinite(args.predict)
+                                         and args.predict > 0):
+        die("--predict must be a rate above zero, not %g" % args.predict)
+    if [bool(args.mx), bool(args.iperf), bool(args.ramp)].count(True) != 1:
         die("give one run to compare: --mx reports/ or --iperf FILE "
-            "(reckon them one at a time)")
+            "(reckon them one at a time) -- or one ramp to fit, --ramp")
+    if args.ramp:
+        for flag, value in (("--baseline", args.baseline),
+                            ("--idle", args.idle), ("--flows", args.flows)):
+            if value is not None:
+                die("%s is for one run; --ramp fits a model to several"
+                    % flag)
+    elif args.predict is not None:
+        die("--predict needs --ramp: a model fitted to a ramp to predict "
+            "from")
 
 
 def main(argv=None):
@@ -3269,6 +4392,8 @@ def main(argv=None):
     def rename(name):
         return names.get(name, name)
 
+    if args.ramp:
+        return main_ramp(args, layout, rename)
     if args.mx:
         run = load_mx(args.mx, args.window, rename)
     else:
@@ -3326,6 +4451,35 @@ def main(argv=None):
         worst = max(SEVERITY_ORDER[f.severity] for f in findings)
         # 10/20 rather than 1/2, so a severity can never be mistaken for a
         # usage error or for "nothing to compare".
+        return {3: 20, 2: 10, 1: 0}[worst]
+    return 0
+
+
+def main_ramp(args, layout, rename):
+    speeds = load_speeds(args.speeds, rename) if args.speeds else None
+    steps = load_ramp(args.ramp, rename)
+    names = sorted(set(n for s in steps for n in (s.run.seen | s.run.reported)))
+    hw = build_hardware(names, layout, speeds, args)
+    args.min_severity = {"info": INFO, "warn": WARN,
+                         "critical": CRITICAL}[args.min_severity]
+    m = fit_ramp(steps, hw, args)
+    findings, skipped = evaluate(m, RAMP_EVALUATORS)
+    if args.overlay is not None:
+        with _WriteGuard(args.overlay or None):
+            render_ramp_overlay(m, args.prefix, args.run, args.overlay or None)
+    if args.csv is not None:
+        with _WriteGuard(args.csv or None):
+            render_csv(m, findings, args.csv or None)
+    if args.json is not None:
+        with _WriteGuard(args.json or None):
+            render_ramp_json(m, findings, skipped, args.json or None)
+    if not [v for v in (args.overlay, args.csv, args.json) if v == ""]:
+        use_color = (not args.no_color and not os.environ.get("NO_COLOR")
+                     and sys.stdout.isatty())
+        sys.stdout.write(render_ramp_human(m, findings, skipped, args,
+                                           Colors(use_color)) + "\n")
+    if args.exit_code and findings:
+        worst = max(SEVERITY_ORDER[f.severity] for f in findings)
         return {3: 20, 2: 10, 1: 0}[worst]
     return 0
 

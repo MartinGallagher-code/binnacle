@@ -143,6 +143,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line, and `baseline_efficiency_pct` / `change_pts` in `--json` and
   `--flows`.
 
+- **`reckon --ramp`: a model of the network, fitted to its own runs.** One
+  run says what the fabric did at one rate; a ramp -- the same matrix at a
+  rising rate, collected with `mx reload` so the reports stay one history,
+  or one reports directory per step -- says what it does at any rate.
+  `reckon` finds the steps in the history (a change in the targets a host
+  sends at, or a gap of more than three intervals; hosts restarting seconds
+  apart are one change, and each host's start-up interval is left out) and
+  fits, for every host and for the fleet: **delivered = min(asked,
+  ceiling)**, with the ceiling only called one when a step asked for more
+  and fell short of `--keep-up` (98%), and **p99 = r0 + b * u / (1 - u)**
+  over the steps that kept up, with the **knee** where the p99 reaches
+  `--bloat` times its low-load value. The fleet is the median host per flow,
+  held against `reckon`'s own hardware expectation with every flow unpaced.
+
+  The model is checked rather than believed: **each step is left out and
+  predicted from the others**, delivered within 15% and p99 within 30%,
+  judged apart, and a ramp with fewer than three steps or no ceiling is
+  *unchecked*, never validated by default. Nine rules read it, in the same
+  cause-first order as a single run: `RAMP_ERRATIC` (a step kept up above
+  one that fell short), `RAMP_CPU` (the ceiling is the test host's CPU, on
+  mx's own lines), `COLLAPSE` (past the ceiling it delivers less, not the
+  same), `FIT_CHECK`, `HOST_CEILING`, `GROUP_CEILING`, `FLEET_CEILING`,
+  `RAMP_NOT_SATURATED` (a lower bound, said as one) and `QUEUES_EARLY` (the
+  knee below half the ceiling). `--predict PPS` says what one flow gets at a
+  rate nobody ran, and will not extrapolate past the ramp. New outputs: the
+  STEPS, MODEL, HOSTS and PREDICTED report sections, a `ramp` mode in
+  `--json`, and `reckon_ceiling`, `reckon_ceiling_efficiency` and
+  `reckon_knee` overlays. New flags: `--ramp`, `--keep-up`
+  (`RECKON_KEEP_UP`) and `--predict` (`RECKON_PREDICT`).
+
+  Tested against a real loopback ramp of mx agents as well as synthetic
+  ones, where it named the test hosts' CPU as the ceiling, an overload
+  collapse past it, and queues building at 40% of it -- and in the suite,
+  against curves worked out by hand (r0 40 us, b 10 us, knee 64.62 kpps),
+  with each of ten deliberate breakages of the fit caught by a test.
+
 - **The `.dc` layout parser is now held identical in two files.**
   `manifest`'s parser is copied verbatim into `reckon`, and the drift check
   compares all eight functions, so the two can never read one layout two
