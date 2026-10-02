@@ -270,7 +270,10 @@ came up slow, a test host out of CPU, one host, one rack's uplinks, the whole
 fleet, or a single path. A flow that *beats* the declared hardware is a
 finding too -- the layout is wrong. `--overlay` writes the datacenter
 viewer's own results format, so achieved-against-possible paints straight
-onto the floor plan beside `mx export`'s overlays.
+onto the floor plan beside `mx export`'s overlays. `--baseline` takes an
+earlier run's reckoning and says which hosts, racks or fleet fell since --
+efficiency compares across runs with different targets where raw rates
+cannot, so a host slipping from 99% to 91% is named before it is short.
 
 ## Documentation
 
@@ -282,7 +285,7 @@ usage, options and exit status, then a link to that tool's manual.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # fifteen suites, 629 checks
+bash tests/run_tests.sh          # fifteen suites, 639 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

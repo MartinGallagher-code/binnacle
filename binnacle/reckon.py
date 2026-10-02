@@ -32,6 +32,8 @@ Inputs:
                                                        (RECKON_NIC_GBPS)
       --group-kind KIND  the container whose uplinks its servers share
                                          (RECKON_GROUP_KIND, default rack)
+      --baseline FILE    an earlier reckoning's --json or --overlay: say
+                         which hosts fell since         (RECKON_BASELINE)
 
 Judgement:
       --window S         seconds of mx history, 0 for all  (RECKON_WINDOW, 60)
@@ -41,6 +43,8 @@ Judgement:
                                                         (RECKON_BLOAT, 4)
       --mtu N            MTU where the layout and netmesh say nothing
                                                         (RECKON_MTU, 1500)
+      --drop PTS         a fall of this many points since --baseline is a
+                         regression                       (RECKON_DROP, 5)
 
 Output:
       --top N            worst hosts and flows to list     (RECKON_TOP, 10)
@@ -73,6 +77,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from collections import namedtuple
 
 VERSION = "0.8.0"
@@ -102,6 +107,7 @@ DEFAULT_BLOAT = 4.0          # netmesh's own --bloat-factor
 DEFAULT_MTU = 1500
 DEFAULT_TOP = 10
 DEFAULT_PREFIX = "reckon_"
+DEFAULT_DROP = 5.0
 DEFAULT_GROUP_KIND = "rack"
 
 # A flow this far above its expected rate carried more than the declared
@@ -741,7 +747,7 @@ class Flow(object):
                  "sent", "loss", "rtt_p50", "rtt_p99", "size", "rep_size",
                  "samples", "coef", "expected", "limit", "limit_on",
                  "efficiency", "idle_p50", "added_rtt", "mtu", "mtu_from",
-                 "modelled")
+                 "modelled", "then", "change")
 
     def __init__(self, src, dst):
         for key in self.__slots__:
@@ -1225,6 +1231,179 @@ def load_names(path):
 
 
 # ---------------------------------------------------------------------------
+# A baseline: an earlier reckoning of the same fabric
+# ---------------------------------------------------------------------------
+#
+# Raw rates do not compare across runs -- a new target, packet size or
+# window moves every one of them -- but efficiency does: each run is graded
+# against its own expectation.  So the --json or --overlay kept from an
+# earlier run is all a comparison needs, and reckon keeps no state of its
+# own: the file you kept is the history.
+
+class Baseline(object):
+    def __init__(self, path):
+        self.path = path
+        self.label = None       # its --run label, or its iperf run id
+        self.ts = None          # its run's last timestamp
+        self.unit = None
+        self.describe = None
+        self.hosts = {}         # host -> efficiency %, None if not compared
+        self.nic = {}           # host -> NIC Gb/s its model used
+        self.flows = {}         # (src, dst, layer) -> efficiency %
+        self.bad = 0            # values that were not numbers, left out
+
+    def since(self):
+        if self.label:
+            return "run %s" % self.label
+        if self.ts is not None:
+            return "the run of %s" % time.strftime("%Y-%m-%d %H:%M UTC",
+                                                    time.gmtime(self.ts))
+        return _label(os.path.basename(self.path)) or self.path
+
+
+def _finite_number(v):
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
+
+
+def _base_value(b, v):
+    """A number the baseline holds, or None.  Blank is "not compared" and
+    stays None quietly; anything else that is not a number -- a string, a
+    bool, NaN, a negative efficiency -- is counted, so a hand-edited or
+    truncated file says it was, instead of reading as a host that fell to
+    nothing."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, str):
+        try:
+            v = float(v)
+        except ValueError:
+            b.bad += 1
+            return None
+    if not _finite_number(v) or v < 0:
+        b.bad += 1
+        return None
+    return float(v)
+
+
+def _label(text):
+    # One line of plain words: it is printed in prose and in an overlay
+    # label, and a tab in either breaks the line it is on.
+    return " ".join(str(text).split()) or None
+
+
+def _baseline_json(b, text):
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        die("%s: not valid JSON (%s)" % (b.path, exc))
+    meta = doc.get("meta") if isinstance(doc, dict) else None
+    if not isinstance(meta, dict) or meta.get("tool") != "reckon":
+        die("%s: JSON, but not reckon --json output" % b.path)
+    for key in ("label", "run"):
+        if isinstance(meta.get(key), str) and _label(meta[key]):
+            b.label = _label(meta[key])
+            break
+    b.ts = meta.get("ts") if _finite_number(meta.get("ts")) else None
+    b.unit = meta.get("unit") if isinstance(meta.get("unit"), str) else None
+    if isinstance(meta.get("describe"), str):
+        b.describe = meta["describe"]
+    hosts = doc.get("hosts")
+    for h in hosts if isinstance(hosts, list) else []:
+        if not (isinstance(h, dict) and isinstance(h.get("host"), str)):
+            b.bad += 1
+            continue
+        b.hosts[h["host"]] = _base_value(b, h.get("efficiency_pct"))
+    hw = doc.get("hardware")
+    hw_hosts = hw.get("hosts") if isinstance(hw, dict) else None
+    for name, h in (hw_hosts.items() if isinstance(hw_hosts, dict) else ()):
+        if isinstance(h, dict):
+            nic = _base_value(b, h.get("nic_gbps"))
+            if nic:
+                b.nic[name] = nic
+    flows = doc.get("flows")
+    for f in flows if isinstance(flows, list) else []:
+        if not (isinstance(f, dict) and isinstance(f.get("src"), str)
+                and isinstance(f.get("dst"), str)):
+            b.bad += 1
+            continue
+        eff = _base_value(b, f.get("efficiency_pct"))
+        if eff is not None:
+            layer = f.get("layer")
+            b.flows[(f["src"], f["dst"],
+                     "" if layer is None else str(layer))] = eff
+
+
+def _baseline_overlay(b, text):
+    lines = text.splitlines()
+    # Line two is "# <how the run was described>; N hosts, N flows, ...".
+    if len(lines) > 1 and lines[1].startswith("# ") and "; " in lines[1]:
+        b.describe = lines[1][2:].rsplit("; ", 1)[0]
+    prefix = None
+    for line in lines:
+        parts = line.split("\t")
+        if parts[0] == "!test" and len(parts) > 1 \
+                and parts[1].endswith("expected"):
+            prefix = parts[1][:-len("expected")]
+            for kv in parts[2:]:
+                if kv.startswith("unit="):
+                    b.unit = kv[len("unit="):]
+            break
+    if prefix is None:
+        die("%s: a reckon overlay with no expected test in it" % b.path)
+    runs = set()
+    for line in lines:
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        test, target, value = parts[0], parts[1], parts[2]
+        meta = {}
+        for kv in parts[3:]:
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                meta[k] = v[1:-1] if len(v) > 1 and v[0] == v[-1] == '"' else v
+        if meta.get("run"):
+            runs.add(_label(meta["run"]))
+        if test == prefix + "efficiency":
+            b.hosts[target] = _base_value(b, value)
+        elif test == prefix + "nic_gbps":
+            nic = _base_value(b, value)
+            if nic:
+                b.nic[target] = nic
+        elif test == prefix + "peer_efficiency" and meta.get("peer"):
+            eff = _base_value(b, value)
+            if eff is not None:
+                b.flows[(target, meta["peer"], meta.get("layer", ""))] = eff
+    # --run exists so several runs can share one overlay file.  As a
+    # baseline that file is ambiguous -- which run is "then"? -- and taking
+    # whichever line came last would mix two runs into one history.
+    if len(runs) > 1:
+        die("%s holds %d runs (%s): a baseline is one run -- split it, or "
+            "give that run's own --json" % (b.path, len(runs),
+                                            ", ".join(sorted(runs))))
+    if runs:
+        b.label = runs.pop()
+
+
+def load_baseline(path):
+    text = _read_text(path)
+    b = Baseline(path)
+    if text.lstrip().startswith("{"):
+        _baseline_json(b, text)
+    elif text.startswith("# reckon "):
+        _baseline_overlay(b, text)
+    else:
+        die("%s: not reckon --json or --overlay output -- a baseline is an "
+            "earlier reckoning, not a run's own reports" % path)
+    if not any(v is not None for v in b.hosts.values()):
+        die("%s: no host in it was compared, so there is nothing to compare "
+            "this run with" % path)
+    return b
+
+
+# ---------------------------------------------------------------------------
 # The model: what each flow could have had
 # ---------------------------------------------------------------------------
 #
@@ -1412,7 +1591,7 @@ def _flow_mtu(f, hw, idle, default):
 class HostStat(object):
     __slots__ = ("name", "expected", "achieved", "efficiency", "compared",
                  "short", "limit", "limit_on", "verdict", "reported",
-                 "added_rtt", "group")
+                 "added_rtt", "group", "then", "change")
 
     def __init__(self, name):
         for key in self.__slots__:
@@ -1434,6 +1613,9 @@ class Analysis(object):
         self.explained = set()
         self.assumptions = []
         self.compared = []
+        self.baseline = None
+        self.base_missing = []      # compared then, not in this run at all
+        self.base_nic = []          # modelled at another NIC speed then
 
 
 def analyse(run, hw, idle, idle_dropped, args):
@@ -1511,6 +1693,34 @@ def analyse(run, hw, idle, idle_dropped, args):
             hs.verdict = "OK"
     c.assumptions = assumptions(c)
     return c
+
+
+def compare_baseline(c, b):
+    """Each host's and flow's efficiency then, and the change since.
+
+    Only where both runs compared it: a host the baseline could not model,
+    or one this run cannot, has no change rather than a fall to nothing.
+    """
+    c.baseline = b
+    for name, hs in c.hosts.items():
+        hs.then = b.hosts.get(name)
+        if hs.then is not None and hs.efficiency is not None:
+            hs.change = hs.efficiency - hs.then
+    for f in c.compared:
+        f.then = b.flows.get((f.src, f.dst, f.layer or ""))
+        if f.then is not None:
+            f.change = f.efficiency - f.then
+    c.base_missing = sorted(n for n, v in b.hosts.items()
+                            if v is not None and n not in c.hosts)
+    # A host graded against another NIC speed than last time has a change
+    # that is partly the declaration -- said, not corrected for: which of
+    # the two was right is not something reckon can know.
+    for name in sorted(c.hosts):
+        hh = c.hw.hosts.get(name)
+        then = b.nic.get(name)
+        if (hh is not None and hh.nic_bps and then
+                and abs(hh.nic_bps / 1e9 - then) > 0.01 * then):
+            c.base_nic.append(name)
 
 
 def _host_limit(flows):
@@ -1626,6 +1836,22 @@ RULES = [
     Rule("FLEET_SHORT", "fleet short",
          "The median host short of --short: the whole fabric falls below "
          "its hardware at once, which no single faulty part does."),
+    Rule("HOST_REGRESSED", "host fell",
+         "A host whose efficiency fell --drop points or more since "
+         "--baseline while the rest of its rack -- or, with no rack, the "
+         "fleet -- held.  Raw rates do not compare across runs with "
+         "different targets; efficiency does, so this catches a host going "
+         "wrong before it falls below --short."),
+    Rule("GROUP_REGRESSED", "rack fell",
+         "Half or more of a rack's hosts fell --drop points since "
+         "--baseline while the other racks held.  The flows crossing its "
+         "boundary falling more than the flows inside it puts the change "
+         "on its uplinks."),
+    Rule("FLEET_REGRESSED", "fleet fell",
+         "The median host fell --drop points since --baseline but is still "
+         "above --short -- below it, FLEET_SHORT says so, with the "
+         "baseline's figure beside it.  Every host at once is something "
+         "they all share: the test's settings, a roll-out, the switches."),
     Rule("FLOW_SHORT", "path short",
          "Flows short between hosts that are otherwise fine: a path, not a "
          "host -- an ECMP member, a cable, one spine."),
@@ -1919,9 +2145,9 @@ def r_host_short(c):
         out.append(Finding(RULE_BY_ID["HOST_SHORT"], sev, name,
                            "%s reaches %.0f%% of what its hardware allows "
                            "(median of its flows; limit %s) while %s is at "
-                           "%.0f%%" % (name, eff,
-                                       limit_text(hs.limit, hs.limit_on, c),
-                                       where, ref),
+                           "%.0f%%%s" % (name, eff,
+                                         limit_text(hs.limit, hs.limit_on, c),
+                                         where, ref, _was(c, [hs.then])),
                            "The fault is on %s or its link, not the fabric: "
                            "`why-slow --ssh %s` for the box, `during` around "
                            "a rerun for what limited it, and `ethtool -S` on "
@@ -2010,6 +2236,7 @@ def r_group_short(c):
                    "and their common NIC, driver, firmware and settings "
                    "(`agree` across them finds the one that differs from "
                    "the healthy racks)." % g.label)
+        say += _was(c, [c.hosts[h].then for h in short])
         out.append(Finding(RULE_BY_ID["GROUP_SHORT"], sev, "*", say, fix))
     return out, None
 
@@ -2060,8 +2287,193 @@ def r_fleet_short(c):
                         TARGET: "targets the hardware has room for",
                         NIC: "the NICs", NIC_PPS: "the NICs' packet rate",
                         UPLINK: "the uplinks",
-                    }.get(top, "nothing declared")),
+                    }.get(top, "nothing declared"))
+                    + _was(c, [h.then for n, h in c.hosts.items()
+                               if h.efficiency is not None
+                               and n not in c.explained]),
                     fix)], None
+
+
+# What changed since --baseline.  These run after the shortfalls, and the
+# same way: a host first against its rack-mates, a rack against the other
+# racks, the fleet last -- so one fault that moved a whole rack is one
+# finding, not one per host.  A host a cause above already explained is not
+# looked at again; its finding carries its old figure instead (_was).
+
+def _was(c, thens):
+    """'; it was N% in <baseline>' -- the shortfall's history, when there is
+    one.  A host at 61% that was at 98% last week is a new fault; one that
+    was at 60% is an old one, and those get chased differently."""
+    if c.baseline is None:
+        return ""
+    then = _median([v for v in thens if v is not None])
+    if then is None:
+        return ""
+    return "; it was %.0f%% in %s" % (then, c.baseline.since())
+
+
+def _pts(v):
+    n = int(round(v))
+    return "%+d point%s" % (n, "" if abs(n) == 1 else "s")
+
+
+def _moved(who, v):
+    return ("%s held" % who if int(round(v)) == 0
+            else "%s moved %s" % (who, _pts(v)))
+
+
+def _no_baseline(c):
+    if c.baseline is None:
+        return "no --baseline: nothing earlier to compare with"
+    if not any(h.change is not None for h in c.hosts.values()):
+        return "no host was compared in both this run and the baseline"
+    return None
+
+
+def _changes(c):
+    return dict((n, h.change) for n, h in c.hosts.items()
+                if h.change is not None and n not in c.explained)
+
+
+def r_host_regressed(c):
+    why = _no_baseline(c)
+    if why:
+        return None, why
+    drop = c.args.drop
+    changes = _changes(c)
+    out = []
+    for name in sorted(changes, key=lambda n: (changes[n], n)):
+        if changes[name] > -drop:
+            break
+        hs = c.hosts[name]
+        mates = [changes[n] for n in changes
+                 if n != name and hs.group is not None
+                 and c.hosts[n].group == hs.group]
+        if mates:
+            ref = _median(mates)
+            where = "the rest of %s" % c.hw.groups[hs.group].label
+        else:
+            ref = _median([v for n, v in changes.items() if n != name])
+            where = "the rest of the fleet"
+        # Its neighbours fell with it: that is the rack's finding or the
+        # fleet's, below, not this host's.
+        if ref is None or ref <= -drop:
+            continue
+        c.explained.add(name)
+        say = ("%s fell from %.0f%% to %.0f%% of what its hardware allows "
+               "since %s, while %s"
+               % (name, hs.then, hs.efficiency, c.baseline.since(),
+                  _moved(where, ref)))
+        if name in c.base_nic:
+            say += (" -- and its NIC is modelled at another speed than "
+                    "then, so part of the fall is the declaration")
+        sev = CRITICAL if hs.efficiency < c.args.fail else WARN
+        out.append(Finding(RULE_BY_ID["HOST_REGRESSED"], sev, name, say,
+                           "Something changed on %s between the runs and not "
+                           "on its neighbours: `agree` across it and a "
+                           "rack-mate for the setting that differs (driver, "
+                           "firmware, MTU, offloads), `ethtool -S` on its NIC "
+                           "for errors that are new, and --speeds for the "
+                           "rate its link negotiated." % name))
+    return out, None
+
+
+def r_group_regressed(c):
+    why = _no_baseline(c)
+    if why:
+        return None, why
+    if not c.hw.groups:
+        return None, "no racks: no layout, or none that holds a measured host"
+    drop = c.args.drop
+    kind = c.hw.group_kind
+    changes = _changes(c)
+    out = []
+    for gname in sorted(c.hw.groups):
+        g = c.hw.groups[gname]
+        members = [h for h in g.hosts if h in changes]
+        if len(members) < 2:
+            continue
+        fell = [h for h in members if changes[h] <= -drop]
+        if len(fell) < 2 or len(fell) * 2 < len(members):
+            continue
+        others = _median([v for n, v in changes.items()
+                          if c.hosts[n].group != gname])
+        if others is None or others <= -drop:
+            continue
+        cross, inside = [], []
+        for f in c.compared:
+            if (f.change is None or f.src in c.explained
+                    or f.dst in c.explained):
+                continue
+            a = c.hw.hosts[f.src].group == gname
+            b = c.hw.hosts[f.dst].group == gname
+            if a and b:
+                inside.append(f.change)
+            elif a or b:
+                cross.append(f.change)
+        c.explained.update(fell)
+        then = _median([c.hosts[h].then for h in fell])
+        now = _median([c.hosts[h].efficiency for h in fell])
+        mc, mi = _median(cross), _median(inside)
+        head = ("%s %s: %d of its %d hosts fell since %s, median %.0f%% to "
+                "%.0f%%, while %s"
+                % (kind, g.label, len(fell), len(members),
+                   c.baseline.since(), then, now,
+                   _moved("the other %ss" % kind, others)))
+        if mc is not None and (mi is None or mi - mc >= drop):
+            say = head + ("; %s, %s"
+                          % (_moved("the flows crossing its boundary", mc),
+                             _moved("the flows inside it", mi)
+                             if mi is not None else
+                             "and none inside it were compared both times"))
+            fix = ("Capacity out of %s went down between the runs: an uplink "
+                   "or LAG member down, an optic that renegotiated lower, or "
+                   "ECMP hashing its flows onto fewer links.  `netmesh paths "
+                   "--compare` shows whether the paths out of it changed."
+                   % g.label)
+        else:
+            say = head + ("; inside it (%s) and across its boundary (%s) alike"
+                          % (_pts(mi) if mi is not None else "-",
+                             _pts(mc) if mc is not None else "-"))
+            fix = ("Not its uplinks -- traffic that stays inside %s fell "
+                   "too.  What its hosts share changed: the switch (its "
+                   "configuration or firmware), or a change rolled out to "
+                   "these hosts and not the others; `agree` across one of "
+                   "them and a host in a rack that held finds it." % g.label)
+        sev = CRITICAL if now < c.args.fail else WARN
+        out.append(Finding(RULE_BY_ID["GROUP_REGRESSED"], sev, "*", say, fix))
+    return out, None
+
+
+def r_fleet_regressed(c):
+    why = _no_baseline(c)
+    if why:
+        return None, why
+    changes = _changes(c)
+    if len(changes) < 2:
+        return None, "fewer than two hosts compared in both runs"
+    drop = c.args.drop
+    if _median(list(changes.values())) > -drop:
+        return [], None
+    now = _median([c.hosts[n].efficiency for n in changes])
+    if now < c.args.short:
+        return [], None         # FLEET_SHORT has said so, with the old figure
+    then = _median([c.hosts[n].then for n in changes])
+    fell = len([v for v in changes.values() if v <= -drop])
+    say = ("the fleet fell from %.0f%% to %.0f%% of what its hardware allows "
+           "since %s (median host; %d of %d hosts down %g points or more)"
+           % (then, now, c.baseline.since(), fell, len(changes), drop))
+    if c.baseline.describe and c.baseline.describe != c.run.describe():
+        say += ("; the runs differ -- that one was %s, this one %s"
+                % (c.baseline.describe, c.run.describe()))
+    if c.base_nic:
+        say += ("; %d host(s) are modelled at another NIC speed than then"
+                % len(c.base_nic))
+    return [Finding(RULE_BY_ID["FLEET_REGRESSED"], WARN, "*", say,
+                    "Every host fell together, which no single faulty part "
+                    "does.  Look for what changed for all of them between the "
+                    "runs: the test's own settings, a driver, firmware or "
+                    "kernel roll-out, or the switches' configuration.")], None
 
 
 def r_flow_short(c):
@@ -2149,6 +2561,9 @@ EVALUATORS = [
     ("ABOVE_HARDWARE", r_above), ("IDLE_OVERLAP", r_idle_overlap),
     ("CPU_BOUND", r_cpu_bound), ("HOST_SHORT", r_host_short),
     ("GROUP_SHORT", r_group_short), ("FLEET_SHORT", r_fleet_short),
+    ("HOST_REGRESSED", r_host_regressed),
+    ("GROUP_REGRESSED", r_group_regressed),
+    ("FLEET_REGRESSED", r_fleet_regressed),
     ("FLOW_SHORT", r_flow_short), ("LOSS_BELOW_CAPACITY", r_loss),
     ("QUEUEING", r_queueing),
 ]
@@ -2183,6 +2598,9 @@ LEADS = {
     "HOST_SHORT": "The shortfall is on a host, not the fabric.",
     "GROUP_SHORT": "The shortfall is a whole rack.",
     "FLEET_SHORT": "The whole fleet falls short of its hardware.",
+    "HOST_REGRESSED": "A host fell since the baseline.",
+    "GROUP_REGRESSED": "A whole rack fell since the baseline.",
+    "FLEET_REGRESSED": "The whole fleet fell since the baseline.",
     "FLOW_SHORT": "Some paths fall short while the hosts at both ends are "
                   "fine.",
     "LOSS_BELOW_CAPACITY": "Packets are lost below capacity.",
@@ -2201,9 +2619,13 @@ def verdict_line(c, findings):
     if not effs:
         return ("Nothing could be compared: no flow has both a measurement "
                 "and an expectation.")
+    since = ""
+    if _no_baseline(c) is None:
+        since = ", and no host fell %g points since %s" % (
+            c.args.drop, c.baseline.since())
     return ("Every host is within %g%% of what its hardware allows (median "
-            "host %.0f%%): the fabric delivers what it was built to."
-            % (c.args.short, _median(effs)))
+            "host %.0f%%)%s: the fabric delivers what it was built to."
+            % (c.args.short, _median(effs), since))
 
 
 # ---------------------------------------------------------------------------
@@ -2300,7 +2722,40 @@ def render_hardware(c):
         out.append("  EXPECTED   no flow could be compared")
     for note in run.notes:
         out.append("  NOTE       " + _wrap(note, 13))
+    out += render_baseline(c)
     out.append("")
+    return out
+
+
+def render_baseline(c):
+    b = c.baseline
+    if b is None:
+        return []
+    both = [h for h in c.hosts.values() if h.change is not None]
+    if both:
+        drop = c.args.drop
+        line = ("%s: %d hosts in both; median host %.0f%% then, %.0f%% now; "
+                "%d fell %g points or more, %d rose as much"
+                % (b.since(), len(both), _median([h.then for h in both]),
+                   _median([h.efficiency for h in both]),
+                   len([h for h in both if h.change <= -drop]), drop,
+                   len([h for h in both if h.change >= drop])))
+    else:
+        line = "%s: no host was compared in both runs" % b.since()
+    out = ["  BASELINE   " + _wrap(line, 13)]
+    notes = []
+    if c.base_missing:
+        notes.append("%d host(s) the baseline compared are not in this run: "
+                     "%s" % (len(c.base_missing), _names(c.base_missing)))
+    if c.base_nic:
+        notes.append("%d host(s) are modelled at another NIC speed than in "
+                     "the baseline, so their change is partly the "
+                     "declaration: %s" % (len(c.base_nic), _names(c.base_nic)))
+    if b.bad:
+        notes.append("%d value(s) in the baseline are not numbers and are "
+                     "left out" % b.bad)
+    for note in notes:
+        out.append("  NOTE       " + _wrap(note, 13))
     return out
 
 
@@ -2316,13 +2771,17 @@ def render_hosts(c, top):
     # 100%, and a host that is itself slow has them all.  Its column says
     # so, or b1 at 559k of 781k reading "98%" looks like arithmetic gone
     # wrong.
+    # With a baseline, what the same median was then, beside it.
+    was = c.baseline is not None
     out = ["  HOSTS, worst first"]
-    out.append("    %-*s  %12s  %12s  %6s  %s"
-               % (width, "host", "expected", "achieved", "median", "limit"))
+    out.append("    %-*s  %12s  %12s  %6s%s  %s"
+               % (width, "host", "expected", "achieved", "median",
+                  "  %6s" % "was" if was else "", "limit"))
     for h in rows:
-        out.append("    %-*s  %12s  %12s  %6s  %s"
+        out.append("    %-*s  %12s  %12s  %6s%s  %s"
                    % (width, h.name, fmt_rate(h.expected, unit),
                       fmt_rate(h.achieved, unit), _pct(h.efficiency),
+                      "  %6s" % _pct(h.then) if was else "",
                       limit_text(h.limit, h.limit_on, c)))
     out.append("")
     return out
@@ -2389,8 +2848,8 @@ def render_human(c, findings, skipped, args, C):
     if not fixes:
         out.append("    %s" % _wrap(
             "Nothing to chase: the run reached what its hardware allows.  "
-            "Keep this run's --overlay; the next one painted beside it shows "
-            "what changed.", 4))
+            "Keep this run's --json: given to the next run as --baseline, "
+            "it says which hosts fell since.", 4))
     else:
         seen = set()
         for fix in fixes:
@@ -2434,7 +2893,8 @@ def render_csv(c, findings, path):
 FLOW_FIELDS = ["src", "dst", "layer", "unit", "demand", "expected",
                "achieved", "sent", "efficiency_pct", "limit", "limit_on",
                "loss_pct", "rtt_p50_us", "idle_rtt_p50_us", "added_rtt_us",
-               "mtu", "mtu_from", "samples"]
+               "mtu", "mtu_from", "samples", "baseline_efficiency_pct",
+               "change_pts"]
 
 
 def _cell(v, fmt="%.3f"):
@@ -2457,7 +2917,8 @@ def flow_record(f, unit):
         "limit_on": _on_text(f.limit_on), "loss_pct": f.loss,
         "rtt_p50_us": f.rtt_p50, "idle_rtt_p50_us": f.idle_p50,
         "added_rtt_us": f.added_rtt, "mtu": f.mtu, "mtu_from": f.mtu_from,
-        "samples": f.samples,
+        "samples": f.samples, "baseline_efficiency_pct": f.then,
+        "change_pts": f.change,
     }
 
 
@@ -2474,13 +2935,32 @@ def render_flows_csv(c, path):
             fh.close()
 
 
+def _baseline_record(c):
+    b = c.baseline
+    if b is None:
+        return None
+    both = [h for h in c.hosts.values() if h.change is not None]
+    return {
+        "path": b.path, "since": b.since(), "label": b.label, "ts": b.ts,
+        "describe": b.describe, "unit": b.unit, "hosts_in_both": len(both),
+        "median_then_pct": _median([h.then for h in both]),
+        "median_now_pct": _median([h.efficiency for h in both]),
+        "drop_pts": c.args.drop,
+        "fell": sorted(h.name for h in both if h.change <= -c.args.drop),
+        "rose": sorted(h.name for h in both if h.change >= c.args.drop),
+        "not_in_this_run": c.base_missing,
+        "nic_changed": c.base_nic, "unreadable_values": b.bad,
+    }
+
+
 def render_json(c, findings, skipped, path):
     hw = c.hw
     doc = {
         "meta": {"tool": "reckon", "version": VERSION, "ts": _stamp(c) or None,
                  "source": c.run.source, "unit": c.run.unit,
                  "describe": c.run.describe(), "mode": c.run.mode,
-                 "run": c.run.run_id, "window": c.run.window,
+                 "run": c.run.run_id, "label": c.args.run,
+                 "window": c.run.window,
                  "layout": hw.layout, "short_pct": c.args.short,
                  "fail_pct": c.args.fail, "notes": c.run.notes},
         "assumptions": c.assumptions,
@@ -2506,7 +2986,9 @@ def render_json(c, findings, skipped, path):
             "limit_on": _on_text(h.limit_on), "verdict": h.verdict,
             "reported": h.reported, "compared_flows": h.compared,
             "short_flows": h.short, "added_rtt_us": h.added_rtt,
+            "baseline_efficiency_pct": h.then, "change_pts": h.change,
         } for _n, h in sorted(c.hosts.items())],
+        "baseline": _baseline_record(c),
         "flows": [flow_record(f, c.run.unit) for f in
                   sorted(c.run.flows, key=lambda f: (f.src, f.dst, f.layer or ""))],
         "findings": [{"rule_id": f.rule.id, "severity": f.severity,
@@ -2550,6 +3032,17 @@ def overlay_tests(c):
         tests.append(("added_rtt", 'unit=us\thigher=bad\tagg=max\tdecimals=0\t'
                                    'short=+RTT\tlabel="RTT added under load, '
                                    'worst peer"'))
+    # The change since --baseline, in points of efficiency, on a diverging
+    # ramp centred on "no change".  +/-50 is the ends: a fall that size is
+    # already a fault, and a wider scale would leave a fall of --drop's few
+    # points all but uncoloured.
+    since = None
+    if c.baseline is not None:
+        since = c.baseline.since().replace('"', "'")
+        tests.append(("change", 'unit=points\thigher=good\tpalette=rdbu\t'
+                                'min=-50\tmax=50\tagg=median\tdecimals=0\t'
+                                'short=CHG\tlabel="Efficiency change since %s"'
+                      % since))
     peer = [("peer_efficiency", 'unit=%\thigher=good\tpalette=rdbu\tmin=0\t'
                                 'max=200\tagg=median\tdecimals=0\tshort=EFF\t'
                                 'label="Flow vs what the hardware allows"')]
@@ -2557,6 +3050,11 @@ def overlay_tests(c):
         peer.append(("peer_added_rtt", 'unit=us\thigher=bad\tagg=max\t'
                                        'decimals=0\tshort=+RTT\t'
                                        'label="RTT added under load, one peer"'))
+    if since is not None:
+        peer.append(("peer_change", 'unit=points\thigher=good\tpalette=rdbu\t'
+                                    'min=-50\tmax=50\tagg=median\tdecimals=0\t'
+                                    'short=CHG\tlabel="Flow efficiency change '
+                                    'since %s"' % since))
     return tests, peer
 
 
@@ -2614,12 +3112,17 @@ def render_overlay(c, prefix, run_label, path):
                    source=hh.nic_source)
         if h.added_rtt is not None and c.idle is not None:
             sample("added_rtt", name, "%.0f" % h.added_rtt)
+        if h.change is not None:
+            sample("change", name, "%.1f" % h.change, then="%.1f" % h.then)
     for f in sorted(c.compared, key=lambda f: (f.src, f.dst, f.layer or "")):
         sample("peer_efficiency", f.src, "%.1f" % f.efficiency, peer=f.dst,
                layer=f.layer, limit=limit_text(f.limit, f.limit_on, c))
         if f.added_rtt is not None and c.idle is not None:
             sample("peer_added_rtt", f.src, "%.0f" % f.added_rtt, peer=f.dst,
                    layer=f.layer)
+        if f.change is not None:
+            sample("peer_change", f.src, "%.1f" % f.change, peer=f.dst,
+                   layer=f.layer, then="%.1f" % f.then)
     text = "\n".join(lines) + "\n"
     if path:
         with io.open(path, "w", encoding="utf-8") as fh:
@@ -2658,6 +3161,7 @@ def build_parser():
                    default=_env_num("NIC_GBPS", float, None))
     p.add_argument("--group-kind", metavar="KIND",
                    default=_env("GROUP_KIND", DEFAULT_GROUP_KIND))
+    p.add_argument("--baseline", metavar="FILE", default=_env("BASELINE"))
     p.add_argument("--window", type=int, metavar="S",
                    default=_env_num("WINDOW", int, DEFAULT_WINDOW))
     p.add_argument("--short", type=float, metavar="PCT",
@@ -2668,6 +3172,8 @@ def build_parser():
                    default=_env_num("BLOAT", float, DEFAULT_BLOAT))
     p.add_argument("--mtu", type=int, metavar="N",
                    default=_env_num("MTU", int, DEFAULT_MTU))
+    p.add_argument("--drop", type=float, metavar="PTS",
+                   default=_env_num("DROP", float, DEFAULT_DROP))
     p.add_argument("--top", type=int, metavar="N",
                    default=_env_num("TOP", int, DEFAULT_TOP))
     p.add_argument("--overlay", nargs="?", const="", metavar="PATH")
@@ -2723,6 +3229,9 @@ def check_args(args):
                     ("--bloat", args.bloat)):
         if not math.isfinite(v) or v < 0:
             die("%s must be a number, 0 or more, not %g" % (flag, v))
+    if not (math.isfinite(args.drop) and args.drop > 0):
+        die("--drop must be a number of points above zero, not %g"
+            % args.drop)
     if args.fail > args.short:
         die("--fail (%g) is the lower line and --short (%g) the upper"
             % (args.fail, args.short))
@@ -2765,6 +3274,12 @@ def main(argv=None):
     else:
         run = load_iperf(args.iperf, args.iperf_mode, rename)
     speeds = load_speeds(args.speeds, rename) if args.speeds else None
+    base = load_baseline(args.baseline) if args.baseline else None
+    if base is not None and base.unit and base.unit != run.unit:
+        die("%s is a run measured in %s and this one is in %s: an mx run's "
+            "efficiency and an iperf run's grade different workloads, and "
+            "comparing them would report the change of workload as a change "
+            "in the fabric" % (args.baseline, base.unit, run.unit))
     hw = build_hardware(sorted(run.seen | run.reported), layout, speeds, args)
     idle, dropped = None, 0
     if args.idle:
@@ -2775,6 +3290,8 @@ def main(argv=None):
                          "critical": CRITICAL}[args.min_severity]
 
     c = analyse(run, hw, idle, dropped, args)
+    if base is not None:
+        compare_baseline(c, base)
     findings, skipped = evaluate(c)
 
     if args.overlay is not None:
