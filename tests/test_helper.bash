@@ -45,6 +45,8 @@ setup_env() {
     unset RECKON_LAYOUT RECKON_IPERF_MODE RECKON_NIC_GBPS RECKON_GROUP_KIND
     unset RECKON_WINDOW RECKON_SHORT RECKON_FAIL RECKON_BLOAT RECKON_MTU
     unset RECKON_TOP RECKON_PREFIX RECKON_RUN RECKON_MIN_SEVERITY
+    unset PLUMB_MAX_MB PLUMB_MIN_SEVERITY PLUMB_PROC PLUMB_SYS
+    unset PLUMB_DPKG_INFO PLUMB_DISK_VIEW
     export LANG=C
 }
 
@@ -880,6 +882,107 @@ for o in overrides:
     try:
         f[k] = json.loads(v)
     except ValueError:
+        f[k] = v
+with open(path, "w") as fh:
+    json.dump(f, fh)
+EOF
+}
+
+# plumb_facts_json FILE [key=value ...] -- a plumb fact dict for a box whose
+# files all agree, with overrides applied.  Three keys add a file rather
+# than replace one, each laid over a default so a rule test states only the
+# evidence it is about:
+#   +differ=JSON   a differing file -- by default 4 bytes at the entry
+#                  point of a setuid program, written since boot, with no
+#                  package to say which copy is right
+#   +skip=JSON     a file that was not checked (default: needs root)
+#   +moving=JSON   a file that kept changing while it was read
+# The merge is deep, so '+differ={"diff":{"single_bit":true}}' changes one
+# field of the difference and keeps the rest.  ctx.kernel_log takes counts
+# per category -- 'ctx.kernel_log={"filesystem":2}' -- or a whole record.
+plumb_facts_json() {
+    local path="$1"; shift
+    "$PY" - "$path" "$@" <<'EOF'
+import copy, json, sys
+path, overrides = sys.argv[1], sys.argv[2:]
+
+
+def ok(p, role):
+    return {"path": p, "status": "ok", "size": 4096, "mode": "755", "uid": 0,
+            "role": role, "written_since_boot": False, "fstype": "ext4",
+            "mount": "/"}
+
+
+def log(**counts):
+    return dict([("source", "dmesg")] + [
+        (k, {"count": counts.get(k, 0),
+             "lines": ["[  12.345] example %s line" % k] if counts.get(k)
+             else []})
+        for k in ("memory", "pagecache", "filesystem", "storage")])
+
+
+f = {
+  "sys.hostname": "testbox", "sys.kernel": "6.12.0-test",
+  "sys.btime": 1786000000, "sys.euid": 0,
+  "run.targets": "default", "run.max_mb": 256, "run.disk_view": None,
+  "run.bytes_read": 12582912,
+  "files.all": [ok("/etc/passwd", "auth"), ok("/usr/bin/su", "setuid"),
+                ok("/usr/lib/x86_64-linux-gnu/libc.so.6", "loader")],
+  "ctx.mapped_complete": True,
+  "ctx.edac": {"controllers": 2, "ce": 0, "ue": 0},
+  "ctx.taint": 0,
+  "ctx.kernel_log": log(),
+  "ctx.modules": {"algif_aead": "available", "esp4": "available",
+                  "esp6": "available", "rxrpc": "available",
+                  "xt_TEE": "available", "act_pedit": "available"},
+  "ctx.userns": True,
+  "ctx.md": [],
+}
+DIFFER = {
+  "path": "/usr/bin/passwd", "status": "differ", "size": 68208,
+  "mode": "4755", "uid": 0, "role": "setuid", "written_since_boot": True,
+  "fstype": "ext4", "mount": "/",
+  "diff": {"ranges": [[17616, 17620]], "n_ranges": 1, "bytes": 4,
+           "approx": False, "disk_zero": False, "cache_zero": False,
+           "single_bit": False, "page_aligned": False,
+           "first": {"offset": 17616, "disk": "f3 0f 1e fa",
+                     "cache": "90 90 90 90"}},
+  "disk_sha256": "a" * 64, "cache_sha256": "b" * 64,
+  "disk_unstable": False, "cache_unstable": False,
+  "elf": {"entry_off": 17616, "at_entry": True, "header": False},
+  "script": False, "mapped": [],
+}
+SKIP = {"path": "/etc/shadow", "status": "skipped", "skip": "perm",
+        "reason": "open: permission denied", "role": "auth"}
+MOVING = {"path": "/var/log/app.log", "status": "moving", "role": "file",
+          "reason": "changed on every one of 3 reads"}
+
+
+def merge(base, extra):
+    out = copy.deepcopy(base)
+    for k, v in extra.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+for o in overrides:
+    k, v = o.split("=", 1)
+    try:
+        v = json.loads(v)
+    except ValueError:
+        pass
+    if k == "+differ":
+        f["files.all"].append(merge(DIFFER, v))
+    elif k == "+skip":
+        f["files.all"].append(merge(SKIP, v))
+    elif k == "+moving":
+        f["files.all"].append(merge(MOVING, v))
+    elif k == "ctx.kernel_log" and isinstance(v, dict) and "source" not in v:
+        f[k] = log(**v)
+    else:
         f[k] = v
 with open(path, "w") as fh:
     json.dump(f, fh)

@@ -45,6 +45,9 @@ keywords = [
     "resolver",
     "ssh",
     "log-analysis",
+    "page-cache",
+    "data-integrity",
+    "corruption",
     "linux",
     "observability",
     "sre",
@@ -109,6 +112,7 @@ manifest = "binnacle.manifest:main"
 dredge = "binnacle.dredge:main"
 rig = "binnacle.rig:main"
 reckon = "binnacle.reckon:main"
+plumb = "binnacle.plumb:main"
 
 [tool.setuptools]
 packages = ["binnacle"]
