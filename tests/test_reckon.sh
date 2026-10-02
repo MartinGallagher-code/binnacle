@@ -932,6 +932,358 @@ EOF
     assert_not_contains "$out" "b1,1010,HOST_REGRESSED"
 }
 
+# --- a ramp: a model fitted to several runs ---------------------------------
+#
+# mx reports of a ramp, written to a model with known parameters so the fit
+# can be held to them: every host delivers min(asked, its ceiling) per flow,
+# and its p99 is r0 + b * u / (1 - u) with u = delivered / ceiling -- 20x
+# r0 once a step is at the ceiling.  With the defaults (ceiling 70000, r0
+# 40 us, b 10 us) the knee at --bloat 4 is worked by hand: u/(1-u) =
+# 3 * 40 / 10 = 12, so u = 12/13 and the knee is 70000 * 12/13 = 64615.4.
+# One history whose rate steps up back to back (an `mx reload` ramp) unless
+# --gap, --dirs or --stagger say otherwise.
+write_rampgen() {
+    cat > "$TEST_TMPDIR/rampgen.py" <<'EOF'
+import argparse, csv, os, random
+F = ["ts", "host", "dir", "peer", "size", "rep_size", "target_pps", "pps",
+     "mbps", "rep_pps", "rep_mbps", "loss_pct", "rtt_avg_us", "rtt_p50_us",
+     "rtt_p99_us", "rtt_max_us", "cpu_pct", "cpu_max_pct", "agent_cpu_pct",
+     "workers", "layer"]
+p = argparse.ArgumentParser()
+p.add_argument("dir")
+p.add_argument("--steps", default="20000,40000,60000,80000,max")
+p.add_argument("--hosts", default="a1,a2,b1,b2,c1,c2")
+p.add_argument("--ceiling", type=float, default=70000.0)
+p.add_argument("--host", action="append", default=[])
+p.add_argument("--rack", action="append", default=[])
+p.add_argument("--r0", type=float, default=40.0)
+p.add_argument("--b", type=float, default=10.0)
+p.add_argument("--cpu", action="append", default=[])
+p.add_argument("--interval", type=int, default=5)
+p.add_argument("--per-step", type=int, default=4)
+p.add_argument("--gap", type=int, default=0)
+p.add_argument("--start", type=int, default=1000)
+p.add_argument("--dirs", action="store_true")
+p.add_argument("--size", type=int, default=1434)
+p.add_argument("--rep", type=int, default=34)
+p.add_argument("--noise", type=float, default=0.0)
+p.add_argument("--pstep", action="append", default=[])
+p.add_argument("--swap", default="")
+p.add_argument("--dip", action="append", default=[])
+p.add_argument("--stagger", type=int, default=0)
+p.add_argument("--warmup", type=float, default=1.0)
+a = p.parse_args()
+hosts = a.hosts.split(",")
+kv = lambda items: dict(i.split("=", 1) for i in items)
+hostc = dict((k, float(v)) for k, v in kv(a.host).items())
+rackc = dict((k, float(v)) for k, v in kv(a.rack).items())
+cpu = dict((k, float(v)) for k, v in kv(a.cpu).items())
+rng = random.Random(7)
+steps = a.steps.split(",")
+if a.swap:
+    i, j = (int(x) for x in a.swap.split(":"))
+    steps[i], steps[j] = steps[j], steps[i]
+
+dips = dict((int(k), float(v)) for k, v in kv(a.dip).items())
+pstep = dict((int(k), float(v)) for k, v in kv(a.pstep).items())
+
+def ceil(h, si=None):
+    if si in dips:
+        return dips[si]
+    return hostc.get(h, rackc.get(h[0], a.ceiling))
+
+def noisy(v):
+    return v * (1 + a.noise / 100.0 * (2 * rng.random() - 1)) if a.noise else v
+
+ts = a.start
+writers = {}
+for si, step in enumerate(steps):
+    T = None if step == "max" else float(step)
+    d = os.path.join(a.dir, "step%d" % si) if a.dirs else a.dir
+    os.makedirs(d, exist_ok=True)
+    for k in range(a.per_step):
+        for h in hosts:
+            path = os.path.join(d, h + ".csv")
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as fh:
+                w = csv.writer(fh)
+                if new:
+                    w.writerow(F)
+                C = ceil(h, si)
+                sat = False
+                for peer in hosts:
+                    if peer == h:
+                        continue
+                    got = C if T is None else min(T, C)
+                    sat = sat or T is None or T > C
+                    u = got / C
+                    p99 = a.r0 * 20 if u >= 0.98 else a.r0 + a.b * u / (1 - u)
+                    w.writerow([ts + hosts.index(h) * a.stagger, h, "tx", peer, a.size, a.rep,
+                                "" if T is None else "%g" % T,
+                                "%.1f" % (T if T is not None else got),
+                                "", "%.1f" % noisy(got * (a.warmup if k == 0 else 1)),
+                                "", "0.000", "",
+                                "%.0f" % a.r0, "%.4f" % (noisy(p99) * pstep.get(si, 1.0)), "",
+                                "", "", "", "", ""])
+                agent = cpu.get(h, 20.0) if sat else 20.0
+                w.writerow([ts + hosts.index(h) * a.stagger, h, "host", "*", a.size, a.rep, "", "", "", "",
+                            "", "", "", "", "", "", "25", "30",
+                            "%.0f" % agent, "4", ""])
+        ts += a.interval
+    ts += a.gap
+EOF
+}
+
+rampgen() { "$PY" "$TEST_TMPDIR/rampgen.py" "$@"; }
+
+setup_ramp() {
+    setup_run
+    write_rampgen
+}
+
+# One fit as `name=value ...` from the --json model, for a case to assert on.
+model() {
+    "$PY" - "$@" <<'EOF'
+import json, subprocess, sys
+doc = json.loads(subprocess.run(sys.argv[1:], stdout=subprocess.PIPE,
+                                check=True).stdout)
+f = doc["model"]["fleet"]
+r = lambda v: "-" if v is None else "%.2f" % v
+print("steps=%d ceiling=%s r0=%s b=%s knee=%s sustained=%s first_short=%s "
+      "check=%s" % (len(doc["steps"]), r(f["ceiling"]), r(f["r0_us"]),
+                    r(f["b_us"]), r(f["knee"]), r(f["sustained"]),
+                    r(f["first_short"]), f["check"]))
+EOF
+}
+
+t_a_ramp_is_fitted_and_held_to_the_numbers() {
+    setup_ramp
+    rampgen ramp
+    out="$(model "$PY" "$RK" floor.dc --ramp ramp --json)"
+    assert_eq "$out" "steps=5 ceiling=70000.00 r0=40.00 b=10.00 knee=64615.38 sustained=60000.00 first_short=80000.00 check=validated"
+    out="$(rk floor.dc --ramp ramp --predict 50000 | tr -s ' \n' '  ')"
+    # 50000 is u = 5/7, so u/(1-u) = 2.5 and p99 = 40 + 25.
+    assert_contains "$out" "the fleet delivers 50.00 kpps per flow, p99 65 us"
+    assert_contains "$out" "p99 reaches 4x at 64.62 kpps, 92% of the ceiling"
+    assert_contains "$out" "delivered within 0%, p99 within 0% -- validated"
+}
+
+t_the_three_shapes_of_a_ramp_fit_one_model() {
+    # Back to back (mx reload), with gaps between runs, one directory per
+    # step, and hosts restarting seconds apart: one fabric, one model.
+    # And each step's first interval -- the agents starting, here at a
+    # fifth of the rate -- is not part of it.
+    setup_ramp
+    rampgen back
+    rampgen gaps --gap 600
+    rampgen dirs --dirs
+    rampgen stag --stagger 2
+    rampgen warm --warmup 0.2
+    want="$(model "$PY" "$RK" floor.dc --ramp back --json)"
+    assert_eq "$(model "$PY" "$RK" floor.dc --ramp gaps --json)" "$want"
+    assert_eq "$(model "$PY" "$RK" floor.dc --ramp dirs/step0 dirs/step1 \
+        dirs/step2 dirs/step3 dirs/step4 --json)" "$want"
+    assert_eq "$(model "$PY" "$RK" floor.dc --ramp stag --json)" "$want"
+    assert_eq "$(model "$PY" "$RK" floor.dc --ramp warm --json)" "$want"
+}
+
+t_a_host_that_saturates_early_is_named() {
+    setup_ramp
+    rampgen ramp --ceiling 150000 --steps 40000,80000,120000,160000,max \
+        --host a1=60000
+    out="$(findings floor.dc --ramp ramp)"
+    assert_contains "$out" "a1,1095,HOST_CEILING,CRITICAL"
+    assert_contains "$out" "a1 saturates at 60.00 kpps per flow while the rest of r01 reaches 150.00 kpps (40%)"
+    # The median host is the fleet's reading, so one slow host does not
+    # drag the fleet's ceiling down with it.
+    assert_eq "$(grep -c '^[a-z*0-9]*,1095,' <<<"$out")" "1"
+}
+
+t_a_rack_that_saturates_early_is_one_finding() {
+    setup_ramp
+    rampgen ramp --ceiling 150000 --steps 40000,80000,120000,160000,max \
+        --rack a=60000
+    out="$(findings floor.dc --ramp ramp)"
+    assert_contains "$out" "GROUP_CEILING,CRITICAL"
+    assert_contains "$out" "rack r01 saturates at 60.00 kpps per flow while the other racks reach 150.00 kpps (40%)"
+    assert_contains "$out" "The hardware puts r01's limit on its uplinks"
+    assert_not_contains "$out" "HOST_CEILING"
+    assert_not_contains "$out" "FIT_CHECK"
+}
+
+t_a_ceiling_that_is_the_test_hosts_cpu() {
+    setup_ramp
+    rampgen one --ceiling 150000 --steps 40000,80000,120000,160000,max \
+        --host a1=60000 --cpu a1=97
+    out="$(findings floor.dc --ramp one)"
+    assert_contains "$out" "a1,1095,RAMP_CPU,WARN"
+    assert_contains "$out" "a1 saturated at 60.00 kpps per flow (300.00 kpps in all) with its agent at 97% of a core"
+    # Explained by its CPU, so not also a host fault.
+    assert_not_contains "$out" "HOST_CEILING"
+    rampgen all --cpu a1=97 --cpu a2=97 --cpu b1=97 --cpu b2=97 \
+        --cpu c1=97 --cpu c2=97
+    out="$(findings floor.dc --ramp all)"
+    assert_contains "$out" "6 of the 6 hosts that saturated did so with their mx agent or a core out of CPU"
+    assert_contains "$out" "the ramp measured the test hosts, not the network"
+    # A fleet held back by its own test agents is not the hardware's
+    # shortfall, whatever the ceiling against the hardware says.
+    assert_not_contains "$out" "FLEET_CEILING"
+}
+
+t_a_ramp_that_never_saturates_says_so() {
+    setup_ramp
+    rampgen ramp --ceiling 150000 --steps 20000,40000,60000
+    out="$(findings floor.dc --ramp ramp)"
+    assert_contains "$out" "RAMP_NOT_SATURATED,INFO"
+    assert_contains "$out" "it kept up to 60.00 kpps per flow, and its ceiling is somewhere above that"
+    assert_not_contains "$out" "FIT_CHECK"
+    out="$(rk floor.dc --ramp ramp --predict 100000 | tr -s ' \n' '  ')"
+    assert_contains "$out" "The fleet kept up at every step, to 60.00 kpps per flow: its ceiling is above the ramp."
+    assert_contains "$out" "beyond the ramp: no step asked for this much and no ceiling was found"
+    out="$(model "$PY" "$RK" floor.dc --ramp ramp --json)"
+    assert_contains "$out" "ceiling=60000.00 r0=- b=- knee=- sustained=60000.00 first_short=- check=unchecked"
+}
+
+t_steps_that_disagree_are_named_and_noise_is_not() {
+    setup_ramp
+    rampgen bad --ceiling 150000 --steps 40000,80000,120000,160000 \
+        --dip 1=60000
+    out="$(findings floor.dc --ramp bad)"
+    assert_contains "$out" "RAMP_ERRATIC,WARN"
+    assert_contains "$out" "the fleet kept up at 120000 pps but fell short at 80000 pps, a lower rate"
+    # Either side of the --keep-up line by a fraction of a point is noise
+    # on the line: 97.9% then 98.3% is not a fabric that improved.
+    rampgen near --ceiling 150000 --steps 40000,80000,120000,160000 \
+        --dip 1=78350 --dip 2=118000
+    assert_not_contains "$(findings floor.dc --ramp near)" "RAMP_ERRATIC"
+}
+
+t_overload_collapse_and_a_one_step_ceiling() {
+    # Unpaced, the fleet delivers less than it did paced at its ceiling --
+    # and with only one step at the ceiling, leaving it out leaves nothing
+    # that shows it, which the check says.
+    setup_ramp
+    rampgen ramp --ceiling 55000 --steps 20000,40000,60000,max --dip 3=30000
+    out="$(findings floor.dc --ramp ramp)"
+    assert_contains "$out" "COLLAPSE,WARN"
+    assert_contains "$out" "at step max it delivered 30.00 kpps per flow, 55% of the 55.00 kpps it reached at step 60000 pps"
+    assert_contains "$out" "only step 60000 pps sits at the ceiling, so leaving it out leaves nothing that shows it"
+}
+
+t_queues_that_build_early_are_named() {
+    # b = 200, r0 = 40: u/(1-u) = 3 * 40 / 200 = 0.6, u = 0.375 -- the
+    # knee at 37.5% of a 150000 ceiling, 56250.
+    setup_ramp
+    rampgen ramp --ceiling 150000 --steps 30000,60000,90000,120000,max --b 200
+    out="$(findings floor.dc --ramp ramp)"
+    assert_contains "$out" "QUEUES_EARLY,WARN"
+    assert_contains "$out" "p99 reaches 4x its low-load 40 us at 56.25 kpps per flow"
+}
+
+t_a_model_that_does_not_fit_its_steps_says_so() {
+    setup_ramp
+    rampgen two --ceiling 150000 --steps 60000,max
+    out="$(findings floor.dc --ramp two)"
+    assert_contains "$out" "FIT_CHECK,INFO"
+    assert_contains "$out" "with 2 steps the model is fitted but not checked"
+    # Throughput on one curve, one step's p99 three times off it: the
+    # model is good for one and not the other, and says which.
+    rampgen p99 --ceiling 150000 --steps 30000,60000,90000,120000,max \
+        --pstep 2=3
+    out="$(findings floor.dc --ramp p99)"
+    assert_contains "$out" "FIT_CHECK,WARN"
+    assert_contains "$out" "the model predicts delivered within 0% but not p99"
+    out="$(rk floor.dc --ramp p99 --predict 50000 | tr -s ' \n' '  ')"
+    assert_contains "$out" "the delivered rate passed its check; the p99 did not"
+}
+
+t_a_knee_when_the_fit_pins_r0_at_zero() {
+    setup_ramp
+    rampgen ramp --ceiling 150000 --steps 30000,60000,90000,120000,max \
+        --b 40 --pstep 0=0.01 --pstep 1=0.2
+    rk floor.dc --ramp ramp --json m.json --quiet >/dev/null
+    "$PY" - m.json <<'EOF'
+import json, sys
+f = json.load(open(sys.argv[1]))["model"]["fleet"]
+assert f["r0_us"] == 0.0, f["r0_us"]
+assert abs(f["p99_base_us"] - 0.5) < 1e-9, f["p99_base_us"]
+assert abs(f["knee"] - 5646.69) < 0.01, f["knee"]
+EOF
+    assert_status $? 0
+}
+
+t_a_ramp_reaches_every_output() {
+    setup_ramp
+    rampgen ramp --host a1=30000
+    rk floor.dc --ramp ramp --predict 50000 --json m.json --overlay m.tsv \
+        --csv m.csv --run wk40 --quiet >/dev/null
+    "$PY" - m.json m.tsv <<'EOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["meta"]["mode"] == "ramp" and doc["meta"]["label"] == "wk40"
+assert set(doc["model"]["form"]) == {"delivered", "p99_us"}, doc["model"]["form"]
+a1 = doc["model"]["hosts"]["a1"]
+assert a1["reached"] and round(a1["ceiling_per_flow"]) == 30000, a1
+assert doc["prediction"]["pps_per_flow"] == 50000.0
+assert doc["prediction"]["delivered_check"] == "validated", doc["prediction"]
+assert any(f["rule_id"] == "HOST_CEILING" for f in doc["findings"])
+declared, used = set(), set()
+for line in open(sys.argv[2]):
+    cells = line.rstrip("\n").split("\t")
+    if line.startswith("#") or not line.strip():
+        continue
+    if cells[0] == "!test":
+        declared.add(cells[1])
+        continue
+    used.add(cells[0])
+    assert "run=wk40" in cells, cells
+assert used <= declared, used - declared
+assert {"reckon_ceiling", "reckon_knee"} <= used, used
+EOF
+    assert_status $? 0
+    assert_eq "$(head -1 m.csv)" "host,ts,rule_id,severity,title,detail,fix"
+    rk floor.dc --ramp ramp --json m2.json --overlay m2.tsv --csv m2.csv \
+        --predict 50000 --run wk40 --quiet >/dev/null
+    for x in json tsv csv; do
+        cmp -s "m.$x" "m2.$x" || fail "two fits of one ramp differ ($x)"
+    done
+}
+
+t_a_ramp_needs_no_layout() {
+    # The model is the data's; the hardware is only what it is held to.
+    setup_ramp
+    rampgen ramp
+    out="$(model "$PY" "$RK" --ramp ramp --json)"
+    assert_contains "$out" "ceiling=70000.00"
+    out="$(rk --ramp ramp --all | tr -s ' \n' '  ')"
+    assert_contains "$out" "fleet ceiling no hardware to compare the ceiling with"
+}
+
+t_a_ramp_that_cannot_be_fitted_is_refused() {
+    setup_ramp
+    mxgen single
+    rampgen small --dirs --size 64 --rep 64
+    rampgen big --dirs
+    for case in "--ramp single|a ramp needs two steps or more" \
+                "--ramp small/step0 big/step1|the steps use different packet sizes" \
+                "--ramp small --mx single|give one run to compare" \
+                "--ramp small --idle single|--idle is for one run" \
+                "--ramp small --flows f.csv|--flows is for one run" \
+                "--ramp small --baseline x.json|--baseline is for one run" \
+                "--mx single --predict 5000|--predict needs --ramp" \
+                "--ramp small --keep-up 0|--keep-up must be a percentage" \
+                "--ramp small --keep-up 150|--keep-up must be a percentage" \
+                "--ramp small --predict 0|--predict must be a rate above zero" \
+                "--ramp small --predict nan|--predict must be a rate above zero"; do
+        set +e
+        # shellcheck disable=SC2086
+        out="$(rk floor.dc ${case%%|*} 2>&1)"; rc=$?
+        set -e
+        assert_status $rc 2
+        assert_contains "$out" "${case#*|}"
+    done
+}
+
 t_the_overlay_declares_every_test_it_uses() {
     setup_run
     mxgen reports --host b2=45
@@ -1114,6 +1466,20 @@ run_test "a run that held says so"              t_a_run_that_held_says_so
 run_test "the change reaches every output"      t_the_change_reaches_every_output
 run_test "an incomparable baseline refused"     t_a_baseline_that_cannot_be_compared_is_refused
 run_test "a tampered baseline is counted"       t_a_tampered_baseline_is_counted_not_believed
+run_test "a ramp is fitted to the numbers"      t_a_ramp_is_fitted_and_held_to_the_numbers
+run_test "three ramp shapes, one model"         t_the_three_shapes_of_a_ramp_fit_one_model
+run_test "a host saturating early"              t_a_host_that_saturates_early_is_named
+run_test "a rack saturating early"              t_a_rack_that_saturates_early_is_one_finding
+run_test "a ceiling that is the CPU"            t_a_ceiling_that_is_the_test_hosts_cpu
+run_test "a ramp that never saturates"          t_a_ramp_that_never_saturates_says_so
+run_test "steps that disagree"                  t_steps_that_disagree_are_named_and_noise_is_not
+run_test "overload collapse"                    t_overload_collapse_and_a_one_step_ceiling
+run_test "queues that build early"              t_queues_that_build_early_are_named
+run_test "a model that does not fit"            t_a_model_that_does_not_fit_its_steps_says_so
+run_test "a knee when r0 is pinned at zero"     t_a_knee_when_the_fit_pins_r0_at_zero
+run_test "a ramp reaches every output"          t_a_ramp_reaches_every_output
+run_test "a ramp needs no layout"               t_a_ramp_needs_no_layout
+run_test "an unfittable ramp is refused"        t_a_ramp_that_cannot_be_fitted_is_refused
 run_test "the overlay declares its tests"       t_the_overlay_declares_every_test_it_uses
 run_test "the findings csv header"              t_the_findings_csv_has_the_house_header
 run_test "two reckonings are identical"         t_two_reckonings_of_one_run_are_identical

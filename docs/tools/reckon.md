@@ -18,6 +18,7 @@ reckon --nic-gbps 25 --mx reports/               # no layout: the NICs alone
 reckon floor.dc --mx reports/ --idle idle/       # and queueing, against netmesh
 reckon floor.dc --mx reports/ --overlay r.tsv    # paint it on the floor plan
 reckon floor.dc --mx reports/ --baseline tue.json # what changed since Tuesday
+reckon floor.dc --ramp reports/ --predict 8000  # a model, from a ramp of runs
 ```
 
 ## The question the other tools leave open
@@ -327,6 +328,141 @@ hand-edited NaN, a string, a negative efficiency) is counted and left out,
 never read as a fall. A baseline from the other workload — an iperf
 reckoning against an mx run — is refused: UDP request rates and TCP goodput
 grade different things.
+
+## Fitting a model to a ramp
+
+One run says what the fabric did at one rate. A **ramp** — the same matrix
+run at a rising rate, step after step — says what it does at any rate, and
+`--ramp` fits that as a model: where each host and the fleet stop keeping up,
+how the p99 grows on the way there, and what to expect at a rate nobody ran.
+
+```bash
+mx gen --servers servers.txt --pps 20000 && mx start
+sleep 60
+for pps in 40000 60000 80000 100000; do
+    mx gen --servers servers.txt --pps $pps && mx reload && sleep 60
+done
+mx gen --servers servers.txt --pps max && mx reload && sleep 60   # unpaced
+mx collect && mx stop
+reckon floor.dc --ramp reports/ --predict 50000
+```
+
+Collect it with **`mx reload`**, not one `mx run` per step: `mx start` wipes
+each host's report and a reload keeps it, so the whole ramp is one history
+whose rate steps up, and `reckon` finds the steps in it — wherever the set of
+targets a host is sending at changes, or the reports go quiet for more than a
+few intervals. Hosts that restart a few seconds apart are one step change,
+not several. Each host's first interval in a step is its agents starting and
+is left out, as are the intervals the change landed in. A ramp kept as **one
+reports directory per step** works too: `--ramp step1/ step2/ step3/`. Every
+step must use one packet size; a ramp varies the rate and nothing else, and
+one that varies more is refused.
+
+```text
+reckon.py -- ramp of 5 steps, 6 hosts, mx 1434 B requests, 34 B replies
+
+  VERDICT  One host saturates before the rest: b1 saturates at 30.00 kpps per
+           flow while the rest of r02 reaches 70.00 kpps (43%).
+
+  STEPS, per flow
+    step              asked     delivered  kept up       p99
+    20000 pps    20.00 kpps    20.00 kpps     100%     44 us
+    40000 pps    40.00 kpps    40.00 kpps     100%     53 us
+    60000 pps    60.00 kpps    60.00 kpps     100%    100 us
+    80000 pps    80.00 kpps    70.00 kpps      88%    800 us
+    max                   -    70.00 kpps        -    800 us
+
+  MODEL, the fleet per flow
+    ceiling    70.00 kpps, at step max; the hardware allows 156.25 kpps (45%)
+    sustains   60.00 kpps; first falls short at 80.00 kpps
+    p99        40 us + 10 us x u/(1-u), u = delivered / ceiling (3 steps, rms
+               0 us)
+    knee       p99 reaches 4x at 64.62 kpps, 92% of the ceiling
+    checked    each step left out and predicted from the others: delivered
+               within 0%, p99 within 0% -- validated
+```
+
+### The model
+
+Two parts, each the simplest thing that describes a link filling up:
+
+- **Delivered = min(asked, ceiling).** The ceiling is the most the host, or
+  the fleet, ever delivered. It is only a ceiling if some step asked for more
+  and fell short — delivered less than `--keep-up` (98%) of what it asked;
+  when every step kept up, the ceiling is somewhere above the ramp and the
+  report says so, as a lower bound, rather than inventing one.
+- **p99 = r0 + b · u / (1 − u)**, with *u* the delivered rate over the
+  ceiling: a floor `r0` that is the path with nothing queued, and a queue
+  that grows without bound as the link fills — the shape of a single server
+  queue. It is fitted by least squares to the steps that kept up, below 98%
+  of the ceiling, and neither term may go negative. The **knee** is the rate
+  where the p99 reaches `--bloat` times its low-load value: past it, latency
+  is mostly queue.
+
+Each host is fitted on its own totals, and per flow. The fleet is **the
+median host**, per flow: one slow host or rack would bend a mean, and a
+fault the size of one host or one rack is what the host and rack rules are
+for. The hardware the fleet is held against is `reckon`'s own expectation
+with every flow unpaced — the fair share of the links each flow crosses.
+
+### Checking it
+
+A model fitted to its own points always fits them, so each step is **left
+out in turn and predicted from the others**. The delivered rate must come
+within 15% and the p99 within 30%, and the two are judged apart: a model
+whose ceiling is right and whose latency curve is not says so, and a
+`--predict` from it gives the rate and flags the p99. With fewer than three
+steps, or no ceiling reached, there is nothing independent to check against,
+and the model is **unchecked** — never "validated" by default. A ceiling
+that only one step reached is said to be one: leave that step out and
+nothing else in the ramp confirms it.
+
+### What it finds
+
+| Rule | Fires when |
+|---|---|
+| `RAMP_ERRATIC` | a step kept up at a rate above one that fell short, by more than 2 points |
+| `RAMP_CPU` | a ceiling reached with the mx agent at ≥75% of a core, or a core at ≥85% |
+| `COLLAPSE` | a step past the ceiling delivered below `--short` of it |
+| `FIT_CHECK` | a step left out is mispredicted, or there are too few steps to check |
+| `HOST_CEILING` | a host saturates below `--short` of its rack-mates' ceiling |
+| `GROUP_CEILING` | a rack saturates below `--short` of the other racks' |
+| `FLEET_CEILING` | the fleet saturates below `--short` of what the hardware allows |
+| `RAMP_NOT_SATURATED` | no step asked for more than it got |
+| `QUEUES_EARLY` | the knee is below 50% of the ceiling |
+
+The same precedence as a single run: a host whose agent ran out of CPU at its
+ceiling is `RAMP_CPU`, not `HOST_CEILING`, and a rack that saturated early is
+one `GROUP_CEILING`, not a finding per host. A step that kept up above one
+that did not is not a fabric under rising load — something else changed
+between the steps — and a step either side of the `--keep-up` line by a
+fraction of a point is noise on the line, not that.
+
+### Predicting
+
+`--predict PPS` asks the model what one flow gets at that rate, for the fleet
+and for every host, and names the hosts whose own ceiling falls short of it.
+Below the ceiling it is the rate asked, at the fitted p99; above, it is the
+ceiling. It will not extrapolate past what was measured: a ramp that never
+saturated has no ceiling and so no curve, and predicts the rate alone, only
+up to its top step — above that nothing says where the ceiling is. A p99
+within 2% of the ceiling, where the curve runs off to infinity, is left
+blank rather than guessed. A prediction from a model that failed its check,
+or was never checked, says so beside the figure.
+
+`--json` carries every step, the fleet's and each host's fit (`r0_us`,
+`b_us`, the ceiling and whether it was reached, the knee, the
+leave-one-out errors and both checks) and the prediction. `--overlay` paints
+the hosts' fits beside a run's:
+
+| Overlay | Per | What it is |
+|---|---|---|
+| `reckon_ceiling` | host | the most it delivered per flow, with `reached=` and `check=` |
+| `reckon_ceiling_efficiency` | host | that ceiling against what its hardware allows, % |
+| `reckon_knee` | host | the per-flow rate where its p99 reaches `--bloat` times idle |
+
+`--baseline`, `--idle` and `--flows` are for one run, and are refused with
+`--ramp`.
 
 ## Painting it on the floor
 

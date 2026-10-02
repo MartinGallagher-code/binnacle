@@ -275,6 +275,11 @@ onto the floor plan beside `mx export`'s overlays. `--baseline` takes an
 earlier run's reckoning and says which hosts, racks or fleet fell since --
 efficiency compares across runs with different targets where raw rates
 cannot, so a host slipping from 99% to 91% is named before it is short.
+`--ramp` fits a model to several runs at a rising rate: where each host and
+the fleet stop keeping up, how the p99 grows on the way there, the knee where
+latency becomes mostly queue -- each step left out and predicted from the
+others to check it -- and with `--predict`, what to expect at a rate nobody
+ran.
 
 ### plumb
 
@@ -304,7 +309,7 @@ usage, options and exit status, then a link to that tool's manual.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # sixteen suites, 684 checks
+bash tests/run_tests.sh          # sixteen suites, 698 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim
