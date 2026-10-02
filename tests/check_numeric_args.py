@@ -43,6 +43,7 @@ MUST_REFUSE = {
     ("muster", "--stale-lock"),
     ("netmesh", "--pps"), ("netmesh", "--interval"), ("netmesh", "--for"),
     ("netmesh", "--jobs"), ("netmesh", "--port"),
+    ("reckon", "--nic-gbps"), ("reckon", "--mtu"),
     ("resolve", "--timeout"), ("resolve", "--attempts"),
     ("skew", "--timeout"), ("skew", "--attempts"), ("skew", "--samples"),
 }
@@ -82,6 +83,11 @@ ZERO_IS_MEANINGFUL = {
     ("netmesh", "--bloat-factor"): "a threshold",
     ("netmesh", "--flow-factor"): "a threshold",
     ("reachable", "--jobs"): "clamped to max(1, ...) where the pool is sized",
+    ("reckon", "--window"): "0 is documented as everything the reports hold",
+    ("reckon", "--short"): "a threshold; 0 means nothing is short",
+    ("reckon", "--fail"): "a threshold; 0 means nothing fails",
+    ("reckon", "--bloat"): "a threshold; 0 means every RTT is a queue",
+    ("reckon", "--top"): "0 shows no rows",
     ("reachable", "--timeout"): "clamped to max(1, ...) for ConnectTimeout",
     ("reachable", "--ping-timeout"): "handed to ping, which rejects its own",
     ("reachable", "--ping-count"): "0 means do not ping",
@@ -106,6 +112,7 @@ BASE = {
     "logtriage": [_EMPTY],
     "muster": ["status", "--pool", _EMPTY],
     "netmesh": ["gen", "a=1.1.1.1", "b=2.2.2.2", "--mesh", _MESH],
+    "reckon": ["--mx", _EMPTY],
     "resolve": ["--no-exec"],
     "skew": ["--no-exec"],
 }

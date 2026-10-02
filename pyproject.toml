@@ -33,6 +33,8 @@ keywords = [
     "troubleshooting",
     "performance",
     "benchmark",
+    "throughput",
+    "capacity",
     "bottleneck",
     "profiling",
     "network",
@@ -106,6 +108,7 @@ muster = "binnacle.muster:main"
 manifest = "binnacle.manifest:main"
 dredge = "binnacle.dredge:main"
 rig = "binnacle.rig:main"
+reckon = "binnacle.reckon:main"
 
 [tool.setuptools]
 packages = ["binnacle"]

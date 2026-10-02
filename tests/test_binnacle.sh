@@ -42,7 +42,7 @@ pkg_tool_count() {
 
 t_lists_every_installed_tool() {
     out="$(bn)"
-    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge rig; do
+    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge rig reckon; do
         assert_contains "$out" "$tool"
     done
 }
@@ -78,7 +78,7 @@ t_help_covers_every_tool() {
     out="$(bn help)"
     # Each tool's help is its own module docstring, so its usage line is
     # the thing to look for -- and under its own name, not binnacle's.
-    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge rig; do
+    for tool in why-slow agree logtriage netmesh reachable resolve during skew muster manifest dredge rig reckon; do
         assert_contains "$out" "usage: $tool"
     done
 }

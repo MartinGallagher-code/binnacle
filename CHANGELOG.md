@@ -8,6 +8,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`reckon`, the thirteenth instrument: what should this run have
+  reached, and where did it fall short?** The load tools' own readings are
+  relative -- `mx_achieved` to the target asked for, `mx_rel_median` and
+  `iperf_rel_median` to the fleet's median -- and a fleet running at half
+  its NICs sits at 100% of both. `reckon` is the absolute reading: the
+  datacenter layout `manifest` already reads, with the hardware written on
+  it as ordinary attributes (`nic_gbps=`, optionally `nic_mpps=` and
+  `mtu=`, on the servers; `uplinks=` and `uplink_gbps=` on the racks), says
+  what each flow could have had, and a run is graded against that.
+
+  It reads matrix_orchestrator's `reports/`, iperf-orchestrator's
+  export-overlay or run directory, and netmesh reports from an idle run as
+  the latency floor. **Each flow's expected rate is its max-min fair
+  share** of the links it crosses -- sender's NIC out, receiver's NIC in,
+  and the rack uplinks when it leaves its rack, with an mx flow's replies
+  crossing the same links back -- or its target, if that is lower. The
+  wire arithmetic is the tools' own: mx's 66 B of framing per packet, TCP
+  goodput as (MTU - 52) / (MTU + 38) of the wire. Layered mx runs share
+  only within a layer; iperf's parallel, sequential-host and
+  sequential-pair modes each share what actually ran at once, and a
+  rolling run, whose overlaps are not recorded, is refused rather than
+  guessed at.
+
+  The gap is diagnosed cause first: a link that negotiated below the
+  layout (`--speeds`, from a `dredge --tsv` table), a host that never
+  reported, a test agent out of CPU (matrix_orchestrator's own lines), one
+  host against its rack-mates, one rack against the other racks -- its
+  uplinks if its cross-rack flows are worse than its inside ones, its
+  switch if both are -- the whole fleet, a single path, loss with capacity
+  to spare, and queues on paths the hardware has room for. A flow that
+  **beats** the declared hardware is never clipped to 100%: it means the
+  layout is wrong, and says so first.
+
+  Nothing is guessed. A host with no speed gets no expectation, not a
+  default one; a value that is not a number (`nic_gbps=25g`,
+  `uplinks=eight`) is named and treated as undeclared; netmesh rows taken
+  while the run was on the wire are left out of the idle floor and
+  counted; and every modelling assumption -- the spine taken as
+  non-blocking, ACKs not counted -- is printed under ASSUMED and written
+  into the overlay's header.
+
+  `--overlay` writes the datacenter viewer's own results format, the one
+  `mx export` and `export-overlay` write, so `reckon_efficiency` (a
+  diverging ramp pinned at 0-200%, as `mx_achieved` is), `reckon_limit`,
+  `reckon_verdict` and a per-flow `reckon_peer_efficiency` paint straight
+  onto the floor plan. `--csv` shares why-slow's findings header,
+  `--flows` is one row per flow, and `--json` carries the hardware as the
+  model used it and where each figure came from. Two reckonings of one run
+  are byte-identical.
+
+  The test suite works the expectations out by hand -- three racks of two
+  10 G hosts on one 10 G uplink each, 97,656.25 requests/s across racks and
+  390,625 inside them -- and holds the tool to them.
+
+- **The `.dc` layout parser is now held identical in two files.**
+  `manifest`'s parser is copied verbatim into `reckon`, and the drift check
+  compares all eight functions, so the two can never read one layout two
+  ways.
+
 - **`rig`, the twelfth instrument: run a command with its settings kept
   in a file.** The flags a tool needs are written down once, one a line,
   by four rules -- `jobs=20` is `--jobs 20`, `verbose` is `--verbose`,
