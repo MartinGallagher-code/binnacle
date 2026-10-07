@@ -972,6 +972,7 @@ p.add_argument("--swap", default="")
 p.add_argument("--dip", action="append", default=[])
 p.add_argument("--stagger", type=int, default=0)
 p.add_argument("--warmup", type=float, default=1.0)
+p.add_argument("--join", action="append", default=[])
 a = p.parse_args()
 hosts = a.hosts.split(",")
 kv = lambda items: dict(i.split("=", 1) for i in items)
@@ -986,6 +987,7 @@ if a.swap:
 
 dips = dict((int(k), float(v)) for k, v in kv(a.dip).items())
 pstep = dict((int(k), float(v)) for k, v in kv(a.pstep).items())
+join = dict((k, int(v)) for k, v in kv(a.join).items())
 
 def ceil(h, si=None):
     if si in dips:
@@ -1003,6 +1005,8 @@ for si, step in enumerate(steps):
     os.makedirs(d, exist_ok=True)
     for k in range(a.per_step):
         for h in hosts:
+            if si < join.get(h, 0):
+                continue
             path = os.path.join(d, h + ".csv")
             new = not os.path.exists(path)
             with open(path, "a", newline="") as fh:
@@ -1039,6 +1043,16 @@ rampgen() { "$PY" "$TEST_TMPDIR/rampgen.py" "$@"; }
 setup_ramp() {
     setup_run
     write_rampgen
+    write_flat
+}
+
+# The same three racks with two uplinks each: 20 Gb/s out of a rack is
+# 195312.5 cross-rack requests/s, above the NICs' 156250, so the NICs are
+# every flow's limit and every flow's fair share is one figure, 156250.
+# rampgen gives every peer one ceiling, which only a floor like this one
+# can carry: on floor.dc the cross-rack flows stop at 97656.25.
+write_flat() {
+    sed 's/uplinks=1/uplinks=2/' "$TEST_TMPDIR/floor.dc" > "$TEST_TMPDIR/flat.dc"
 }
 
 # One fit as `name=value ...` from the --json model, for a case to assert on.
@@ -1072,26 +1086,34 @@ t_the_three_shapes_of_a_ramp_fit_one_model() {
     # Back to back (mx reload), with gaps between runs, one directory per
     # step, and hosts restarting seconds apart: one fabric, one model.
     # And each step's first interval -- the agents starting, here at a
-    # fifth of the rate -- is not part of it.
+    # fifth of the rate -- is not part of it.  A reload that restarts the
+    # fleet in waves, 30 s from the first host to the last, is still one
+    # change per step, not a step of its own between each -- and so is a
+    # staggered ramp one host joined a step late, which has to be cut by
+    # time because that host changed one time fewer.
     setup_ramp
     rampgen back
     rampgen gaps --gap 600
     rampgen dirs --dirs
     rampgen stag --stagger 2
     rampgen warm --warmup 0.2
+    rampgen slow --stagger 6 --per-step 8
+    rampgen late --stagger 2 --join c2=1
     want="$(model "$PY" "$RK" floor.dc --ramp back --json)"
     assert_eq "$(model "$PY" "$RK" floor.dc --ramp gaps --json)" "$want"
     assert_eq "$(model "$PY" "$RK" floor.dc --ramp dirs/step0 dirs/step1 \
         dirs/step2 dirs/step3 dirs/step4 --json)" "$want"
     assert_eq "$(model "$PY" "$RK" floor.dc --ramp stag --json)" "$want"
     assert_eq "$(model "$PY" "$RK" floor.dc --ramp warm --json)" "$want"
+    assert_eq "$(model "$PY" "$RK" floor.dc --ramp slow --json)" "$want"
+    assert_eq "$(model "$PY" "$RK" floor.dc --ramp late --json)" "$want"
 }
 
 t_a_host_that_saturates_early_is_named() {
     setup_ramp
     rampgen ramp --ceiling 150000 --steps 40000,80000,120000,160000,max \
         --host a1=60000
-    out="$(findings floor.dc --ramp ramp)"
+    out="$(findings flat.dc --ramp ramp)"
     assert_contains "$out" "a1,1095,HOST_CEILING,CRITICAL"
     assert_contains "$out" "a1 saturates at 60.00 kpps per flow while the rest of r01 reaches 150.00 kpps (40%)"
     # The median host is the fleet's reading, so one slow host does not
@@ -1188,12 +1210,12 @@ t_a_model_that_does_not_fit_its_steps_says_so() {
     assert_contains "$out" "with 2 steps the model is fitted but not checked"
     # Throughput on one curve, one step's p99 three times off it: the
     # model is good for one and not the other, and says which.
-    rampgen p99 --ceiling 150000 --steps 30000,60000,90000,120000,max \
+    rampgen p99 --ceiling 150000 --steps 30000,60000,90000,120000,180000,max \
         --pstep 2=3
-    out="$(findings floor.dc --ramp p99)"
+    out="$(findings flat.dc --ramp p99)"
     assert_contains "$out" "FIT_CHECK,WARN"
     assert_contains "$out" "the model predicts delivered within 0% but not p99"
-    out="$(rk floor.dc --ramp p99 --predict 50000 | tr -s ' \n' '  ')"
+    out="$(rk flat.dc --ramp p99 --predict 50000 | tr -s ' \n' '  ')"
     assert_contains "$out" "the delivered rate passed its check; the p99 did not"
 }
 
@@ -1208,6 +1230,102 @@ f = json.load(open(sys.argv[1]))["model"]["fleet"]
 assert f["r0_us"] == 0.0, f["r0_us"]
 assert abs(f["p99_base_us"] - 0.5) < 1e-9, f["p99_base_us"]
 assert abs(f["knee"] - 5646.69) < 0.01, f["knee"]
+EOF
+    assert_status $? 0
+}
+
+t_a_ceiling_one_step_sets_is_not_validated() {
+    # Paced steps that all kept up, then one unpaced: the ceiling is that
+    # step's reading alone.  Leaving it out leaves no ceiling to predict
+    # it from, so the model is unchecked -- never validated by default --
+    # even when that one reading is twice what the rest would allow.
+    setup_ramp
+    rampgen alone --steps 20000,40000,60000,max --ceiling 70000
+    out="$(model "$PY" "$RK" flat.dc --ramp alone --json)"
+    assert_contains "$out" "ceiling=70000.00"
+    assert_contains "$out" "check=unchecked"
+    out="$(findings flat.dc --ramp alone)"
+    assert_contains "$out" "FIT_CHECK,INFO"
+    assert_contains "$out" "only step max fell short of what it asked, so leaving it out leaves no ceiling to predict it from"
+    out="$(rk flat.dc --ramp alone | tr -s ' \n' '  ')"
+    assert_contains "$out" "first falls short at step max, unpaced"
+    assert_contains "$out" "unchecked: only step max fell short, and the ceiling rests on it alone"
+    rampgen liar --steps 20000,40000,60000,max --ceiling 70000 --dip 3=140000
+    out="$(rk flat.dc --ramp liar --predict 100000 | tr -s ' \n' '  ')"
+    assert_contains "$out" "from a model that has not passed its own check"
+    assert_not_contains "$out" "the delivered rate passed its check"
+    # A second step above the ceiling, and the unpaced one is predicted
+    # from it -- the ceiling checked against itself.
+    rampgen pair --steps 20000,40000,60000,90000,max --ceiling 70000
+    assert_contains "$(model "$PY" "$RK" flat.dc --ramp pair --json)" "check=validated"
+    rampgen pairliar --steps 20000,40000,60000,90000,max --ceiling 70000 \
+        --dip 4=140000
+    assert_contains "$(model "$PY" "$RK" flat.dc --ramp pairliar --json)" "check=failed"
+}
+
+t_a_ramp_checks_the_declaration_like_a_run() {
+    # The checks a single run makes of the layout, --speeds and the
+    # hosts' names, made once for the whole ramp.
+    setup_ramp
+    rampgen ramp
+    printf 'a1 1000\n' > speeds.txt
+    out="$(findings floor.dc --ramp ramp --speeds speeds.txt)"
+    assert_contains "$out" "a1,1095,LINK_SPEED,CRITICAL"
+    assert_contains "$out" "a1 negotiated 1 Gb/s on a link the layout says is 10 Gb/s"
+    assert_contains "$out" "a1,1095,ABOVE_HARDWARE,WARN"
+    assert_eq "$(grep -c LINK_SPEED <<<"$out")" "1"
+    # A ceiling above what the hardware allows is the declaration's
+    # fault, not good news.
+    rampgen above --steps 100000,200000,300000,400000,max --ceiling 320000
+    out="$(findings floor.dc --ramp above)"
+    assert_contains "$out" "ABOVE_HARDWARE,WARN"
+    assert_contains "$out" "carried more than the declared hardware allows -- worst a1 -> b1 at step 400000 pps, 328% of expected (320.00 kpps against 97.66 kpps, limit r01 uplinks out)"
+    assert_not_contains "$out" "nothing wrong"
+    rampgen stray --hosts a1,a2,b1,b2,c1,c2,zz9
+    out="$(findings floor.dc --ramp stray)"
+    assert_contains "$out" "NOT_IN_LAYOUT,WARN"
+    assert_contains "$out" "1 measured host(s) are not in floor.dc, so their traffic is charged to no uplink: zz9"
+    assert_contains "$out" "UNMODELLED,WARN"
+    # A host the others send to, silent for a step.
+    rampgen silent --dirs
+    rm silent/step2/c2.csv
+    out="$(findings flat.dc --ramp silent/step0 silent/step1 silent/step2 \
+        silent/step3 silent/step4)"
+    assert_contains "$out" "NO_REPORT,CRITICAL"
+    assert_contains "$out" "1 host(s) took part in the run and reported nothing: c2"
+}
+
+t_a_ramp_on_two_matrices_is_refused() {
+    # mx gen --peers without --seed draws new pairs every step: the
+    # points are not on one curve.  A host silent in one step is not a
+    # new matrix -- the others still send to it.
+    setup_ramp
+    rampgen mix/a --steps 20000
+    rampgen mix/b --steps 40000 --hosts a1,b1,c1
+    rampgen mix/c --steps 60000,max
+    set +e
+    out="$(rk floor.dc --ramp mix/a mix/b mix/c 2>&1)"; rc=$?
+    set -e
+    assert_status "$rc" 2
+    assert_contains "$out" "the steps send to different peers -- a1 sends to a2 in step a 20000 pps and not in step b 40000 pps"
+    assert_contains "$out" "generate each step with the same --seed"
+    # Every step missing a different host: the hardware is still the
+    # whole matrix's -- every host on flat.dc 5 x 156250 -- taken from all
+    # the steps, not from whichever one looked widest.
+    rampgen held --dirs
+    rm held/step0/a1.csv held/step1/a2.csv held/step2/b1.csv \
+        held/step3/b2.csv held/step4/c1.csv
+    set +e
+    rk flat.dc --ramp held/step0 held/step1 held/step2 held/step3 \
+        held/step4 --json m.json --quiet >/dev/null; rc=$?
+    set -e
+    assert_status "$rc" 0
+    "$PY" - m.json <<'EOF'
+import json, sys
+hosts = json.load(open(sys.argv[1]))["model"]["hosts"]
+got = dict((n, h["hardware_total"]) for n, h in hosts.items())
+assert got == dict((n, 781250.0) for n in ("a1", "a2", "b1", "b2", "c1",
+                                           "c2")), got
 EOF
     assert_status $? 0
 }
@@ -1477,6 +1595,9 @@ run_test "overload collapse"                    t_overload_collapse_and_a_one_st
 run_test "queues that build early"              t_queues_that_build_early_are_named
 run_test "a model that does not fit"            t_a_model_that_does_not_fit_its_steps_says_so
 run_test "a knee when r0 is pinned at zero"     t_a_knee_when_the_fit_pins_r0_at_zero
+run_test "one step's ceiling is not validated"  t_a_ceiling_one_step_sets_is_not_validated
+run_test "a ramp checks its declaration"       t_a_ramp_checks_the_declaration_like_a_run
+run_test "two matrices are not one ramp"       t_a_ramp_on_two_matrices_is_refused
 run_test "a ramp reaches every output"          t_a_ramp_reaches_every_output
 run_test "a ramp needs no layout"               t_a_ramp_needs_no_layout
 run_test "an unfittable ramp is refused"        t_a_ramp_that_cannot_be_fitted_is_refused

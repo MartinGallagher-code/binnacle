@@ -351,12 +351,20 @@ Collect it with **`mx reload`**, not one `mx run` per step: `mx start` wipes
 each host's report and a reload keeps it, so the whole ramp is one history
 whose rate steps up, and `reckon` finds the steps in it — wherever the set of
 targets a host is sending at changes, or the reports go quiet for more than a
-few intervals. Hosts that restart a few seconds apart are one step change,
-not several. Each host's first interval in a step is its agents starting and
-is left out, as are the intervals the change landed in. A ramp kept as **one
-reports directory per step** works too: `--ramp step1/ step2/ step3/`. Every
-step must use one packet size; a ramp varies the rate and nothing else, and
-one that varies more is refused.
+few intervals. Each host's first change is the fleet's first step change,
+its second the second, and so on, so a reload that takes half a minute to
+restart a large fleet in waves is still one change per step, not a step of
+its own in between. Each host's first interval in a step is its agents
+starting and is left out, as are the intervals the change landed in. A ramp
+kept as **one reports directory per step** works too: `--ramp step1/ step2/
+step3/`.
+
+A ramp varies the rate and nothing else, and one that varies more is
+refused: every step must use **one packet size and one matrix** — each host
+sending to the same peers in every step. `mx gen --peers` draws new pairs
+each time it runs unless it is given `--seed`, so generate every step with
+the same seed. A host that is silent for a step is not a new matrix — the
+others still send to it — and is reported as `NO_REPORT`.
 
 ```text
 reckon.py -- ramp of 5 steps, 6 hosts, mx 1434 B requests, 34 B replies
@@ -411,20 +419,32 @@ A model fitted to its own points always fits them, so each step is **left
 out in turn and predicted from the others**. The delivered rate must come
 within 15% and the p99 within 30%, and the two are judged apart: a model
 whose ceiling is right and whose latency curve is not says so, and a
-`--predict` from it gives the rate and flags the p99. With fewer than three
-steps, or no ceiling reached, there is nothing independent to check against,
-and the model is **unchecked** — never "validated" by default. A ceiling
-that only one step reached is said to be one: leave that step out and
-nothing else in the ramp confirms it.
+`--predict` from it gives the rate and flags the p99. The unpaced step is
+left out too: it asked for everything, so the model says it gets the
+ceiling, and that is the one prediction that tests the ceiling itself.
+
+With fewer than three steps, or no ceiling reached, there is nothing
+independent to check against, and the model is **unchecked** — never
+"validated" by default. So is a ceiling that **only one step fell short
+to**, which is what a ramp of paced steps that all kept up, ending in one
+unpaced step, gives: leave that step out and the others have no ceiling to
+predict it from. One more paced step asking for more than the ceiling makes
+a second that falls short, and the ceiling is then checked against it.
 
 ### What it finds
+
+The checks a single run makes of the declaration run once over the whole
+ramp: `LINK_SPEED` (with `--speeds`), `NO_REPORT`, `UNMODELLED`,
+`NOT_IN_LAYOUT`, and `ABOVE_HARDWARE` — a flow in any step that carried more
+than the declared hardware allows, which means a ceiling above the hardware
+is the declaration's fault, not good news. Then:
 
 | Rule | Fires when |
 |---|---|
 | `RAMP_ERRATIC` | a step kept up at a rate above one that fell short, by more than 2 points |
 | `RAMP_CPU` | a ceiling reached with the mx agent at ≥75% of a core, or a core at ≥85% |
 | `COLLAPSE` | a step past the ceiling delivered below `--short` of it |
-| `FIT_CHECK` | a step left out is mispredicted, or there are too few steps to check |
+| `FIT_CHECK` | a step left out is mispredicted, too few steps to check, or one step alone sets the ceiling |
 | `HOST_CEILING` | a host saturates below `--short` of its rack-mates' ceiling |
 | `GROUP_CEILING` | a rack saturates below `--short` of the other racks' |
 | `FLEET_CEILING` | the fleet saturates below `--short` of what the hardware allows |

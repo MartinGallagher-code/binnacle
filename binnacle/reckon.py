@@ -1782,8 +1782,9 @@ def _ramp_segments(rows):
 
     A step ends where the targets change -- a new `mx run` or an `mx
     reload` -- or where the history goes quiet for RAMP_GAP intervals.
-    Hosts restart a few seconds apart, so changes within RAMP_SPAN
-    intervals of each other are one change, and the rows between the first
+    Hosts restart seconds apart, so each host's k-th change is one fleet
+    change -- or, where the hosts did not all change alike, changes within
+    RAMP_SPAN intervals of each other are -- and the rows between the first
     host's and the last host's are left out: some of them were on the old
     rate and some on the new, and they belong to neither step.
     """
@@ -1795,13 +1796,16 @@ def _ramp_segments(rows):
         ts = sorted(set(r["_ts"] for r in rs))
         gaps.extend(b - a for a, b in zip(ts, ts[1:]))
     interval = _median(gaps) or 1.0
-    marks = []
-    for rs in by_host.values():
+    per_host = []
+    for host in sorted(by_host):
         conf = {}
-        for r in rs:
+        for r in by_host[host]:
             if (r.get("dir") == "tx" and r.get("peer") not in (None, "", "*")
                     and _float(r.get("pps")) is not None):
                 conf.setdefault(r["_ts"], set()).add(_target_key(r))
+        if not conf:
+            continue
+        marks = []
         prev = prev_ts = None
         for ts in sorted(conf):
             now = frozenset(conf[ts])
@@ -1809,15 +1813,27 @@ def _ramp_segments(rows):
                                      or ts - prev_ts > RAMP_GAP * interval):
                 marks.append(ts)
             prev, prev_ts = now, ts
-    # Measured from a change's first mark, not its latest: hosts that
-    # restart a few seconds apart, step after step, would otherwise chain
-    # one step's change into the next and leave nothing between them.
+        per_host.append(marks)
+    # Every host changed the same number of times: its k-th change is the
+    # fleet's k-th step, however long the fleet took to get through it.  A
+    # reload restarts the hosts in waves, and on a large fleet the waves
+    # take longer than any fixed window would allow.
     spans = []
-    for m in sorted(marks):
-        if spans and m - spans[-1][0] <= RAMP_SPAN * interval:
-            spans[-1][1] = m
-        else:
-            spans.append([m, m])
+    if per_host and len(set(len(v) for v in per_host)) == 1:
+        spans = [[min(v[k] for v in per_host), max(v[k] for v in per_host)]
+                 for k in range(len(per_host[0]))]
+        if any(a[1] >= b[0] for a, b in zip(spans, spans[1:])):
+            spans = []
+    if not spans:
+        # Otherwise by time, measured from a change's first mark, not its
+        # latest: hosts that restart a few seconds apart, step after step,
+        # would otherwise chain one step's change into the next and leave
+        # nothing between them.
+        for m in sorted(ts for v in per_host for ts in v):
+            if spans and m - spans[-1][0] <= RAMP_SPAN * interval:
+                spans[-1][1] = m
+            else:
+                spans.append([m, m])
     edges = [float("-inf")] + [x for sp in spans for x in sp] + [float("inf")]
     segments = []
     for lo, hi in zip(edges[0::2], edges[1::2]):
@@ -1880,6 +1896,31 @@ def load_ramp(paths, rename):
         die("the steps use different packet sizes (%s): a ramp varies the "
             "rate and nothing else, or its points are not on one curve"
             % ", ".join("%d/%d B" % sh for sh in sorted(shapes)))
+    # The same matrix in every step: a host that sends to other peers from
+    # one step to the next crosses other links, and its points lie on
+    # another curve.  A host missing from a step is not a new matrix.
+    first = {}
+    for s in steps:
+        mine = {}
+        for f in s.run.flows:
+            mine.setdefault(f.src, set()).add(f.dst)
+        for src in sorted(mine):
+            if src not in first:
+                first[src] = (s.label, mine[src])
+                continue
+            then, peers = first[src]
+            if mine[src] != peers:
+                gone = sorted(peers - mine[src])
+                new = sorted(mine[src] - peers)
+                diff = ("%s in step %s and not in step %s"
+                        % (gone[0], then, s.label) if gone else
+                        "%s in step %s and not in step %s"
+                        % (new[0], s.label, then))
+                die("the steps send to different peers -- %s sends to %s: a "
+                    "ramp varies the rate and nothing else, or its points "
+                    "are not on one curve.  `mx gen --peers` draws a new "
+                    "matrix every time it runs unless it is given --seed: "
+                    "generate each step with the same --seed" % (src, diff))
     return steps
 
 
@@ -1959,8 +2000,11 @@ def fit_curve(points, keep_up, bloat):
     below = [p.x for p in kept if p.x < lowest_short]
     fit["sustained"] = max(below) if below else None
     fit["first_short"] = min(asked) if asked else None
+    # The unpaced step falls short by definition -- it asked for
+    # everything -- and is the first to only when no paced step did.
     fit["first_short_step"] = (min((p for p in short if p.x is not None),
-                                   key=lambda p: p.x).step if asked else None)
+                                   key=lambda p: p.x).step if asked else
+                               short[0].step if short else None)
     # Kept up at a rate above one that fell short: the steps are not one
     # fabric at rising load, whatever else they are.
     # Only by more than ERRATIC_MARGIN points: steps either side of the
@@ -2023,37 +2067,57 @@ def predict_at(fit, x, kept_max):
 def leave_one_out(points, keep_up, bloat):
     """Each step predicted by a model fitted to the others.
 
-    Returns (worst delivered error %, worst p99 error %, steps predicted).
+    The unpaced step too: it asked for everything, so the model says it
+    gets the ceiling -- the one prediction that tests the ceiling itself.
+
+    Returns (worst delivered error %, worst p99 error %, steps predicted,
+    steps that fell short and that the others could not predict at all).
     """
-    errs_y, errs_p = [], []
+    keep = keep_up / 100.0
+    errs_y, errs_p, blind = [], [], []
     for i, p in enumerate(points):
-        if p.x is None:
-            continue
         rest = points[:i] + points[i + 1:]
         if len(rest) < 2:
             continue
         f = fit_curve(rest, keep_up, bloat)
         kept_max = max([q.x for q in rest if q.x is not None]
                        or [None]) if not f["reached"] else None
-        y, p99 = predict_at(f, p.x, kept_max)
-        if y is not None and p.y > 0:
+        y, p99 = predict_at(f, float("inf") if p.x is None else p.x,
+                            kept_max)
+        if y is None:
+            if p.x is None or p.y < keep * p.x:
+                blind.append(p.step)
+            continue
+        if p.y > 0:
             errs_y.append(abs(y - p.y) / p.y * 100.0)
         if p99 is not None and p.p99:
             errs_p.append(abs(p99 - p.p99) / p.p99 * 100.0)
     return (max(errs_y) if errs_y else None,
-            max(errs_p) if errs_p else None, len(errs_y))
+            max(errs_p) if errs_p else None, len(errs_y), blind)
 
 
 def _check(fit, points, keep_up, bloat):
     """Delivered and p99 are checked apart: a fabric whose throughput is
     one clean curve and whose tail latency is noise has a model good for
     one and not the other, and says which."""
-    worst_y, worst_p, n = leave_one_out(points, keep_up, bloat)
+    worst_y, worst_p, n, blind = leave_one_out(points, keep_up, bloat)
     fit["loo_delivered_pct"], fit["loo_p99_pct"] = worst_y, worst_p
     fit["loo_steps"] = n
+    fit["loo_unpredicted"] = blind
+    fit["check_why"] = None
     # Without a ceiling the model is "it delivered what it asked", which
     # every kept-up step agrees with by definition: nothing was checked.
-    if not fit["reached"] or len(points) < 3 or n < 2:
+    # And a ceiling only one step fell short to is that step's reading
+    # alone: leave it out and the others have no ceiling to predict it
+    # from, so nothing in the ramp confirms it.
+    if not fit["reached"]:
+        fit["check_why"] = "no ceiling to check"
+    elif len(points) < 3 or n < 2:
+        fit["check_why"] = "too few steps to leave one out"
+    elif blind:
+        fit["check_why"] = ("only step %s fell short, and the ceiling rests "
+                            "on it alone" % blind[0])
+    if fit["check_why"]:
         fit["check_delivered"] = "unchecked"
     elif worst_y is not None and worst_y <= FIT_TOLERANCE:
         fit["check_delivered"] = "validated"
@@ -2085,16 +2149,27 @@ class RampModel(object):
         self.cpu_fleet = False
 
 
-def hardware_ceiling(step, hw, args):
+def hardware_ceiling(steps, hw, args):
     """What the declared hardware allows each host with every flow unpaced:
-    the most the top of a ramp could ever reach."""
+    the most the top of a ramp could ever reach.
+
+    Every step's flows, once each: the steps share one matrix (load_ramp
+    holds them to it), so a host missing from one step is in another.
+    """
     syn = Run("mx", "pps")
-    syn.seen, syn.reported = set(step.run.seen), set(step.run.reported)
-    for f in step.run.flows:
-        g = Flow(f.src, f.dst)
-        g.layer, g.group, g.size, g.rep_size = f.layer, f.group, f.size, f.rep_size
-        syn.flows.append(g)
-    syn.layers = step.run.layers
+    have = set()
+    for step in steps:
+        syn.seen |= step.run.seen
+        syn.reported |= step.run.reported
+        for f in step.run.flows:
+            if (f.src, f.dst, f.layer) in have:
+                continue
+            have.add((f.src, f.dst, f.layer))
+            g = Flow(f.src, f.dst)
+            g.layer, g.group = f.layer, f.group
+            g.size, g.rep_size = f.size, f.rep_size
+            syn.flows.append(g)
+    syn.layers = len(set(f.layer for f in syn.flows if f.layer is not None))
     c = analyse(syn, hw, None, 0, args)
     hosts = dict((n, h.expected) for n, h in c.hosts.items()
                  if h.expected is not None)
@@ -2114,8 +2189,7 @@ def fit_ramp(steps, hw, args):
     for s in steps:
         s.c = analyse(s.run, hw, None, 0, args)
         _ramp_points(s)
-    widest = max(steps, key=lambda s: (len(s.run.flows), s.label))
-    m.hw_host, m.hw_flow, m.hw_limit = hardware_ceiling(widest, hw, args)
+    m.hw_host, m.hw_flow, m.hw_limit = hardware_ceiling(steps, hw, args)
     # The ramp's own timestamp, for --csv: the newest row in any step.
     m.run = max(steps, key=lambda s: s.run.last_ts or 0).run
     fleet_pts = [s.fleet for s in steps if s.fleet is not None]
@@ -3041,6 +3115,52 @@ def _pps(v):
     return fmt_rate(v, "pps")
 
 
+class _Declared(object):
+    """A ramp, as the rules that check a declaration see a run: every host
+    in any step, against the one hardware.  A host silent in one step is
+    taken as silent."""
+
+    def __init__(self, m):
+        self.hw, self.run, self.explained = m.hw, m.run, m.explained
+        self.hosts = {}
+        for s in m.steps:
+            for name, h in s.c.hosts.items():
+                if name not in self.hosts or not h.reported:
+                    self.hosts[name] = h
+
+
+def _declared(fn):
+    """A single run's declaration rule, over the whole ramp: the layout,
+    --speeds and the hosts' names are the same in every step, so a fault in
+    them is one finding, not one per step."""
+    def run(m):
+        return fn(_Declared(m))
+    return run
+
+
+def r_ramp_above(m):
+    over = sorted(((f, s) for s in m.steps for f in s.c.compared
+                   if f.efficiency > ABOVE_TOLERANCE * 100.0),
+                  key=lambda fs: (-fs[0].efficiency, fs[0].src, fs[0].dst,
+                                  fs[1].label))
+    if not over:
+        return [], None
+    f, s = over[0]
+    steps = len(set(st.label for _f, st in over))
+    return [Finding(RULE_BY_ID["ABOVE_HARDWARE"], WARN, f.src,
+                    "%d flow(s) in %d of the %d steps carried more than the "
+                    "declared hardware allows -- worst %s at step %s, %.0f%% "
+                    "of expected (%s against %s, limit %s)"
+                    % (len(over), steps, len(m.steps), _flow_name(f), s.label,
+                       f.efficiency, _pps(f.achieved), _pps(f.expected),
+                       limit_text(f.limit, f.limit_on, s.c)),
+                    "The model of this fabric is wrong, so the ceilings "
+                    "here are graded against hardware that is not what was "
+                    "built.  Check the limit named: a NIC speed set below the "
+                    "real one (--speeds measures it), an uplinks= count short "
+                    "of what is cabled, or hosts placed in the wrong rack.")], None
+
+
 def r_ramp_erratic(m):
     bad = m.fleet["erratic"]
     if not bad:
@@ -3085,6 +3205,18 @@ def r_fit_check(m):
         return None, "no ceiling: a model of delivered = asked has nothing to check"
     if f["check"] == "validated":
         return [], None
+    if f["check"] == "unchecked" and f["loo_unpredicted"]:
+        return [Finding(RULE_BY_ID["FIT_CHECK"], INFO, "*",
+                        "the ceiling is fitted but not checked: only step %s "
+                        "fell short of what it asked, so leaving it out "
+                        "leaves no ceiling to predict it from, and nothing "
+                        "else in the ramp shows the %s per flow it set"
+                        % (f["loo_unpredicted"][0], _pps(f["ceiling"])),
+                        "Add a paced step asking for more than %s per flow, "
+                        "so that a second step falls short and confirms the "
+                        "ceiling.  Until then treat it, and any prediction "
+                        "above the rate the ramp sustained, as one reading."
+                        % _pps(f["ceiling"]))], None
     if f["check"] == "unchecked":
         return [Finding(RULE_BY_ID["FIT_CHECK"], INFO, "*",
                         "with %d steps the model is fitted but not checked: "
@@ -3115,7 +3247,8 @@ def r_fit_check(m):
         fix = ("Put more steps near the ceiling -- between %s and %s per "
                "flow -- so it is pinned by more than one.  Do not trust "
                "predictions from this model until a ramp passes."
-               % (_pps(f["sustained"]), _pps(f["first_short"])))
+               % (_pps(f["sustained"]), _pps(f["first_short"]
+                                             or f["ceiling"] * 1.25)))
     else:
         fix = ("The steps do not lie on one curve: steps too short to "
                "settle (give each several report intervals), a fabric that "
@@ -3303,6 +3436,11 @@ def r_queues_early(m):
 
 
 RAMP_EVALUATORS = [
+    ("LINK_SPEED", _declared(r_link_speed)),
+    ("NO_REPORT", _declared(r_no_report)),
+    ("UNMODELLED", _declared(r_unmodelled)),
+    ("NOT_IN_LAYOUT", _declared(r_not_in_layout)),
+    ("ABOVE_HARDWARE", r_ramp_above),
     ("RAMP_ERRATIC", r_ramp_erratic), ("RAMP_CPU", r_ramp_cpu),
     ("COLLAPSE", r_collapse), ("FIT_CHECK", r_fit_check),
     ("HOST_CEILING", r_host_ceiling),
@@ -4025,12 +4163,12 @@ def _ramp_model_lines(m, args):
             line += "; the hardware allows %s (%.0f%%)" % (
                 _pps(m.hw_flow), f["ceiling"] / m.hw_flow * 100.0)
         out.append("    ceiling    " + _wrap(line, 15))
+        short = (_pps(f["first_short"]) if f["first_short"] is not None
+                 else "step %s, unpaced" % f["first_short_step"])
         out.append("    sustains   " + _wrap(
-            "%s; first falls short at %s" % (_pps(f["sustained"]),
-                                             _pps(f["first_short"]))
+            "%s; first falls short at %s" % (_pps(f["sustained"]), short)
             if f["sustained"] is not None else
-            "falls short from the first step (%s)" % _pps(f["first_short"]),
-            15))
+            "falls short from the first step (%s)" % short, 15))
     else:
         out.append("    ceiling    " + _wrap(
             "not reached: above %s, the most any step asked for"
@@ -4057,6 +4195,8 @@ def _ramp_model_lines(m, args):
         parts.append("p99 within %.0f%%" % f["loo_p99_pct"])
     verdict = ("delivered %s, p99 %s" % (f["check_delivered"], f["check_p99"])
                if f["check_delivered"] != f["check_p99"] else f["check"])
+    if f["check_why"] and f["reached"]:
+        verdict += ": " + f["check_why"]
     out.append("    checked    " + _wrap(
         "each step left out and predicted from the others: %s -- %s"
         % (", ".join(parts) or "nothing could be predicted", verdict), 15))
@@ -4127,7 +4267,8 @@ def _fit_record(f, flows=None):
         "steps", "reached", "ceiling", "ceiling_step", "sustained",
         "first_short", "erratic", "r0", "b", "rms", "curve_points", "knee",
         "check", "check_delivered", "check_p99", "loo_delivered_pct",
-        "loo_p99_pct", "loo_steps", "kept_max", "at_ceiling", "p99_base"))
+        "loo_p99_pct", "loo_steps", "loo_unpredicted", "check_why",
+        "kept_max", "at_ceiling", "p99_base"))
     rec["beyond"] = [{"step": st, "delivered": y} for st, y in f.get("beyond") or []]
     rec["r0_us"], rec["b_us"] = rec.pop("r0"), rec.pop("b")
     rec["p99_base_us"] = rec.pop("p99_base")
