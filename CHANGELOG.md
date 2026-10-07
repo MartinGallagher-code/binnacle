@@ -148,8 +148,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rising rate, collected with `mx reload` so the reports stay one history,
   or one reports directory per step -- says what it does at any rate.
   `reckon` finds the steps in the history (a change in the targets a host
-  sends at, or a gap of more than three intervals; hosts restarting seconds
-  apart are one change, and each host's start-up interval is left out) and
+  sends at, or a gap of more than three intervals; each host's k-th change
+  is the fleet's k-th step, and each host's start-up interval is left out) and
   fits, for every host and for the fleet: **delivered = min(asked,
   ceiling)**, with the ceiling only called one when a step asked for more
   and fell short of `--keep-up` (98%), and **p99 = r0 + b * u / (1 - u)**
@@ -159,8 +159,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   The model is checked rather than believed: **each step is left out and
   predicted from the others**, delivered within 15% and p99 within 30%,
-  judged apart, and a ramp with fewer than three steps or no ceiling is
-  *unchecked*, never validated by default. Nine rules read it, in the same
+  judged apart, and a ramp with fewer than three steps, no ceiling, or a
+  ceiling only one step fell short to is *unchecked*, never validated by
+  default. The single run's declaration checks run over the whole ramp, and
+  nine rules of its own read it, in the same
   cause-first order as a single run: `RAMP_ERRATIC` (a step kept up above
   one that fell short), `RAMP_CPU` (the ceiling is the test host's CPU, on
   mx's own lines), `COLLAPSE` (past the ceiling it delivers less, not the
@@ -498,6 +500,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     passes in all of them.
 
 ### Fixed
+
+- **`reckon --ramp` held its model to less than it said.** Four gaps,
+  each reproduced before it was fixed:
+
+  - *A ceiling one step set was "validated".* The leave-one-out check
+    never left out the unpaced step, so a ramp of paced steps that all
+    kept up, ending in one unpaced step, was validated without its
+    ceiling ever being predicted -- and a `--predict` from it said the
+    delivered rate had passed its check, even when that one step read
+    twice what the rest allowed. Every step is left out now, the unpaced
+    one predicted at the ceiling, and a ceiling only one step fell short
+    to is *unchecked*, with a `FIT_CHECK` note saying which step and what
+    paced step would confirm it.
+  - *The declaration was not checked.* A 1 Gb/s link under `--speeds`, a
+    host the layout does not name, a host silent for a step, and a
+    ceiling at 205% of the declared hardware all passed as "nothing
+    wrong". `LINK_SPEED`, `NO_REPORT`, `UNMODELLED`, `NOT_IN_LAYOUT` and
+    `ABOVE_HARDWARE` now run once over the whole ramp.
+  - *Steps on different matrices were fitted as one curve.* `mx gen
+    --peers` draws new pairs every time unless given `--seed`, and only
+    the packet size was compared. A host that sends to other peers in one
+    step than in another is refused now, naming `--seed`; a host silent
+    for a step is not a new matrix. The hardware the ramp is held to
+    comes from every step's flows rather than from whichever step looked
+    widest.
+  - *A slow reload made phantom steps.* Changes were grouped within a
+    fixed three intervals, so a fleet restarted in waves over 20 s or
+    more became an extra mixed-rate step between each real one, and each
+    extra point gave the leave-one-out check a near-twin. Each host's
+    k-th change is now the fleet's k-th step, whatever the spread; the
+    time window remains only for hosts that did not all change alike.
+
+  Twelve deliberate breakages of the four fixes are each caught by a
+  test, as are the ten of the original fit.
 
 - **`dredge --relay-dir` could delete a directory it did not create.**
   The relay spool is scratch dredge clears before use and removes after,
