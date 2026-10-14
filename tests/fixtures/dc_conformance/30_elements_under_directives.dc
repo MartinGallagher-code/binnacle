@@ -1,0 +1,8 @@
+net data
+  room A
+    rack r
+title T
+  link x a b
+    title U
+  room B
+    rack [1..2]

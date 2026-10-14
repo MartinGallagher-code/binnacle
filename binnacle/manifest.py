@@ -66,6 +66,8 @@ _JS_SPACE = "\t\n\v\f\r    -     　﻿"
 BRACKET_RE = re.compile(r"\[([^\]]*)\]")
 PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::([0-9]+))?\}", re.ASCII)
 SEQ_USE_RE = re.compile(r"\{seq(?::[0-9]+)?\}")
+# Braces still standing after substitution: the viewer's PLACEHOLDER.
+UNRESOLVED_RE = re.compile(r"\{[^{}]*\}")
 INT_RE = re.compile(r"-?[0-9]+\Z")
 RANGE_SPEC_RE = re.compile(r"(%s+?)\.\.(%s+?)(?:x([0-9]+))?\Z" % (_JS_DOT, _JS_DOT))
 BARE_RANGE_RE = re.compile(r"[^%s]+\.\.[^%s]+\Z" % (_JS_SPACE, _JS_SPACE))
@@ -203,12 +205,16 @@ def dc_expand_one(body):
     # A step longer than Python will read as a number is longer than any
     # range: the viewer's parseInt makes it Infinity, and the walk stops
     # after the first value.
-    step = (1 if not raw_step else int(raw_step)
-            if len(raw_step.lstrip("0")) <= 4000 else float("inf"))
+    step = 1 if not raw_step else _js_int(raw_step)
+    if step is None:
+        step = float("inf")
     if step < 1:
         raise ValueError('bad step in range "%s"' % body)
     if INT_RE.match(lo) and INT_RE.match(hi):
-        a, b = int(lo), int(hi)
+        a, b = _js_int(lo), _js_int(hi)
+        if a is None or b is None:
+            raise ValueError('cannot expand range "%s": a number too long'
+                             % body)
         # 01 pads every value to that many digits; the digits are what is
         # padded, so -05..-01 is -05 -04 ..., not five ids counting the
         # wrong way and not -5.
@@ -278,9 +284,29 @@ def subst(text, ctx):
         value = str(ctx[key])
         if not width or not INT_RE.match(value):
             return value
+        size = _js_int(width)
+        if size is None:
+            # Wider than the viewer can pad (it stops with an error there);
+            # the value is kept as it is rather than the whole read failing.
+            return value
         digits = value.replace("-", "", 1)
-        return ("-" if value.startswith("-") else "") + digits.zfill(int(width))
+        return ("-" if value.startswith("-") else "") + digits.zfill(size)
     return PLACEHOLDER_RE.sub(one, text)
+
+
+def _js_int(text):
+    """A whole number as the viewer's parseInt reads it, or None.
+
+    Zeros in front are padding, not size: Python refuses to read a string
+    of more than 4300 digits and counts them, where parseInt does not.
+    None is a number too long for any range, which the viewer cannot walk
+    either.
+    """
+    neg = text.startswith("-")
+    digits = (text[1:] if neg else text).lstrip("0") or "0"
+    if len(digits) > 4000:
+        return None
+    return -int(digits) if neg else int(digits)
 
 
 def tokenize(line):
@@ -537,7 +563,8 @@ def parse_layout(path, warn=None):
         if n == 1:
             root_syn = top[0]
     out = []
-    state = {"blocks": {}, "named": {}, "paths": set(), "warn": warn}
+    state = {"blocks": {}, "named": {}, "paths": set(), "next": {},
+             "warn": warn}
     # One frame per level of nesting: a layout the viewer reads 1000 deep
     # must not end here in a RecursionError.
     limit = sys.getrecursionlimit()
@@ -547,6 +574,15 @@ def parse_layout(path, warn=None):
     finally:
         sys.setrecursionlimit(limit)
     return out
+
+
+def _note_unresolved(text, what, ctx, warn, line):
+    """A placeholder left standing is said, as the viewer says it: a name
+    that would have come out wr01r01u01 does not quietly become {Room}."""
+    if UNRESOLVED_RE.search(text):
+        warn(line, '%s "%s": no such placeholder here -- this line can use %s'
+             % (what, text, " ".join("{%s}" % k
+                                     for k in sorted(ctx, key=_js_units))))
 
 
 def _materialize(syn, parent, out, state):
@@ -564,6 +600,8 @@ def _materialize(syn, parent, out, state):
         base["path"] = parent.path
     kind = syn["kind"]
     spec = subst(syn["spec"], base) if syn["spec"] else None
+    if spec:
+        _note_unresolved(spec, "id", base, warn, syn["line"])
     try:
         ids = (dc_expand(spec) if spec else
                ["%s%d" % (kind, (len(parent.children) if parent is not None
@@ -603,6 +641,8 @@ def _materialize(syn, parent, out, state):
         own = syn["attrs"]
         if dynamic:
             own = dict((k, subst(v, ctx)) for k, v in own.items())
+            for k, v in own.items():
+                _note_unresolved(v, k + "=", ctx, warn, syn["line"])
         # if= decides whether the element is made; it is not one of its
         # attributes, and an element not made gives its {seq} back.
         if "if" in syn["attrs"]:
@@ -614,14 +654,23 @@ def _materialize(syn, parent, out, state):
                 continue
             own = dict(own)
             own.pop("if", None)
-        tags = [subst(t, ctx) for t in syn["tags"]] if tagged else syn["tags"]
+        if tagged:
+            tags = [subst(t, ctx) for t in syn["tags"]]
+            for t in tags:
+                _note_unresolved(t, "tag +", ctx, warn, syn["line"])
+        else:
+            tags = syn["tags"]
         ident = own.get("id") or raw_id
 
         path = "%s/%s" % (parent.path, ident) if parent is not None else ident
         if path in state["paths"]:
-            n = 2
+            # Paths are only ever added, so the first free number never goes
+            # down: start where the last rename of this path stopped, or a
+            # thousand copies of one id take a million probes.
+            n = state["next"].get(path, 2)
             while "%s#%d" % (path, n) in state["paths"]:
                 n += 1
+            state["next"][path] = n + 1
             warn(syn["line"], 'duplicate path "%s" renamed to "%s#%d"'
                  % (path, path, n))
             path = "%s#%d" % (path, n)
@@ -993,12 +1042,14 @@ def ambiguity_notes(steps, quiet):
 # Written here rather than shipped as a data file, because a tool that is
 # routinely scp'd to a bare machine on its own has to carry everything it
 # needs inside the one file.  It is also original rather than copied from
-# the reference implementation's examples: that project ships no licence,
-# and this one is GPL and REUSE-compliant.
+# the reference implementation's examples, so its licence is this file's.
 #
-# Every construct this parser understands appears at least once, and the
-# comments say what each line is doing -- so `manifest --sample > floor.dc`
-# is both a worked example and a file you can edit into your own floor.
+# It uses the constructs a floor is usually written with -- nesting, ranges
+# with padding and steps, name= from placeholders, roles, tags, inherited
+# attributes, net and link -- and the comments say what each line is doing,
+# so `manifest --sample > floor.dc` is both a worked example and a file you
+# can edit into your own floor.  The rest of the grammar is the viewer's
+# README's to teach.
 SAMPLE_LAYOUT = """\
 # A small site, in the .dc format manifest reads.
 #

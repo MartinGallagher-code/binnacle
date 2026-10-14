@@ -179,9 +179,12 @@ It is asked for outright, so `--quiet` does not silence it.
 
 ## Starting from nothing
 
-`--sample` prints a commented layout that uses every construct this tool
-understands, so it is both the fastest way to see the format and a
-reasonable file to edit into your own floor:
+`--sample` prints a commented layout that uses the constructs a floor is
+usually written with — nesting, ranges, padding, `name=` from placeholders,
+roles, tags and inherited attributes — so it is both the fastest way to see
+the format and a reasonable file to edit into your own floor. The rest of
+the grammar (`id=`, `{seq}`, `if=`, widths, comma segments) is in the
+viewer's README:
 
 ```bash
 manifest --sample > floor.dc
@@ -232,15 +235,25 @@ viewer. Every range the viewer writes reads the same here — segments
 
 A line the viewer cannot expand (`rack [A..z]`) is left out with everything
 under it, and said on stderr with its line number — the same thing the
-viewer does with it, rather than a refusal of the whole file.
+viewer does with it, rather than a refusal of the whole file. So is a
+placeholder left standing: kinds are lower case, as the viewer reads them,
+so on a `Rack r01` line `{Rack}` names nothing and `{rack}` is the rack, and
+`name={Rack}{id}` is reported with the placeholders the line could have used
+rather than quietly printing a hostname with braces in it. Placeholder names
+are ASCII letters, digits and `_`, as in JavaScript.
 
 `tests/fixtures/dc_conformance.json` holds the elements the viewer's own
 parser made of each layout beside it, and the suite fails if this reads any
 of them differently; `tests/make_dc_conformance.mjs` regenerates it from a
 viewer checkout. The differences that remain are where the viewer's
-JavaScript cannot be followed: range numbers past 2⁵³ (it rounds them, and
-may stall), NUL bytes in a tag, and letters whose case is new in Unicode 15
-or 16.
+JavaScript cannot be followed: range numbers of 2⁵³ and more (it rounds
+them, and may stall), NUL bytes in a tag, nesting deeper than the viewer's
+own stack, and letters whose case mapping is newer than the running
+Python's Unicode tables. Those tables are Python's
+`unicodedata.unidata_version` — 15.1 on 3.13, 14 on 3.11 and 3.12, 13 on
+3.9 and 3.10, 9 on 3.6 — and the viewer's browser has 16, so on an older
+Python a kind or tag in a script whose case arrived later (Georgian
+Mtavruli, for one, on 3.6) can read differently.
 
 ## What counts as a server
 

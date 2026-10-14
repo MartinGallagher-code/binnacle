@@ -1,0 +1,9 @@
+dc D
+  room [Abc|ſx|ıy|Straße|STRASSE]
+    rack a if={room}=ABC
+    rack b if={room}=s*
+    rack c if={room}=i*
+    rack d if={room}=strasse
+    rack e if={room}=STRA??E
+    rack f if={room}=straße
+    rack g if={room}!=abc

@@ -545,6 +545,8 @@ VERBATIM = [
     ("_glob_match", "manifest.py", "reckon.py"),
     ("_condition_holds", "manifest.py", "reckon.py"),
     ("_next_seq", "manifest.py", "reckon.py"),
+    ("_js_int", "manifest.py", "reckon.py"),
+    ("_note_unresolved", "manifest.py", "reckon.py"),
     ("parse_layout", "manifest.py", "reckon.py"),
     ("_materialize", "manifest.py", "reckon.py"),
 ]

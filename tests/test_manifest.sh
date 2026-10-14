@@ -550,6 +550,35 @@ t_a_classic_mac_layout_is_one_line_as_in_the_viewer() {
     assert_eq "$out" "D"
 }
 
+t_a_placeholder_left_standing_is_said() {
+    # Kinds are lower case, as in the viewer, so {Room} names nothing: the
+    # name keeps its braces, and stderr says which line and what it could
+    # have used -- a changed hostname is never silent.
+    cat > "$TEST_TMPDIR/caps.dc" <<'EOF'
+DC S
+  Room wr01
+    Rack r01
+      node u[01..02] role=server name={Room}{rack}{id}
+EOF
+    set +e
+    out="$(mf "$TEST_TMPDIR/caps.dc" 2>"$TEST_TMPDIR/err")"; rc=$?
+    set -e
+    assert_status "$rc" 0
+    assert_eq "$(echo "$out" | head -1)" "{Room}r01u01"
+    assert_contains "$(cat "$TEST_TMPDIR/err")" 'line 4: name= "{Room}r01u01": no such placeholder here -- this line can use'
+    assert_contains "$(cat "$TEST_TMPDIR/err")" '{room}'
+}
+
+t_many_duplicate_paths_read_in_linear_time() {
+    # Twenty thousand copies of one id: every copy after the first is
+    # renamed #2, #3, ...  Probing from #2 each time took 25 s here.
+    printf 'dc X\n  rack r\n    node u[1..20000] id=x role=server\n' > "$TEST_TMPDIR/dup.dc"
+    start=$SECONDS
+    out="$(mf "$TEST_TMPDIR/dup.dc" --path --quiet 2>/dev/null | tail -1)"
+    assert_eq "$out" "X/r/x#20000"
+    assert_eq "$(( SECONDS - start < 10 ))" "1"
+}
+
 run_test "a container means everything under" t_a_container_selector_means_everything_under_it
 run_test "selectors AND together"             t_selectors_and_together
 run_test "commas in one selector are OR"      t_commas_inside_one_selector_are_or
@@ -594,4 +623,6 @@ run_test "a layout reads as the viewer reads it" t_a_layout_reads_as_the_viewer_
 run_test "a sparse range lists its servers"    t_a_sparse_range_lists_its_servers
 run_test "a line the viewer skips is said"     t_a_line_the_viewer_skips_is_skipped_and_said
 run_test "a bare-CR file is one line"          t_a_classic_mac_layout_is_one_line_as_in_the_viewer
+run_test "a placeholder left standing is said" t_a_placeholder_left_standing_is_said
+run_test "duplicate paths read in linear time" t_many_duplicate_paths_read_in_linear_time
 finish

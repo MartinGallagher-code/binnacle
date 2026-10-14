@@ -504,26 +504,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`manifest` and `reckon` read a `.dc` layout exactly as the viewer
   does.** The parser was a subset of the datacenter viewer's, and the
   viewer's own examples showed it: `three-rows.dc` was refused outright --
-  "cannot expand range '07..21x2,27..41x2'" -- and `dual-plane.dc` and the
-  iperf floor came out with other names. Ported from the viewer's
-  `parse.js` and `expand.js`: comma segments in a range, signed zero
-  padding, both ends of a letter range in one alphabet, `id=`, `{name:W}`
-  widths, `{seq}` with `seq=` counts and scopes, `if=` (with the viewer's
-  own case rules, code unit by code unit), a kind's own placeholder on its
-  own line, `{path}`, default ids counted per parent, `title` and
+  "cannot expand range '1..4,7..10'" -- as was a half-populated rack
+  written `node [07..21x2,27..41x2]`, and `dual-plane.dc` and the iperf
+  floor came out with other names. Ported from the viewer's `parse.js`
+  and `expand.js`: comma segments in a range, signed zero padding, both
+  ends of a letter range in one alphabet, `id=`, `{name:W}` widths,
+  `{seq}` with `seq=` counts and scopes, `if=` (with the viewer's own case
+  rules, code unit by code unit), a kind's own placeholder on its own
+  line, `{path}`, default ids counted per parent, `title` and
   top-level-only directives, one `dc` root around several top-level lines,
   lines ended only by LF or CR LF, and a dropped `__proto__` key. A line
   the viewer cannot expand is left out with its children and reported on
   stderr, as the viewer does, rather than ending the run.
 
-  Held to the viewer by `tests/fixtures/dc_conformance.json`: 32 layouts
-  and the 822 elements the viewer's own parser made of them, regenerated
-  by `tests/make_dc_conformance.mjs`. Beyond those, about 2,000 layouts
-  written to break it -- ranges, placeholders, `{seq}` and `if=`,
-  structure, attributes, and realistic floors -- read the same in both,
-  except where the viewer's JavaScript cannot be followed: numbers past
-  2^53, NUL bytes, and letters whose case is new in Unicode 15/16. Twenty
-  deliberate breakages of the port are each caught by the suite.
+  Three changes a working layout can see. **Kinds are lower case**, as the
+  viewer has always read them: `Rack r01` is a `rack`, the `--csv` kind
+  column says so, and its placeholder is `{rack}` -- `{Rack}` no longer
+  resolves. **Placeholder names are ASCII** letters, digits and `_`, as
+  JavaScript's `\w` is. And **a placeholder left standing is said** on
+  stderr, line and all, with the placeholders that line could have used --
+  as the viewer warns -- so a hostname that kept its braces is never
+  silent. `reckon --group-kind` (and `RECKON_GROUP_KIND`) is read in lower
+  case to match, and a kind the layout has none of is reported rather than
+  quietly modelling no uplinks.
+
+  Held to the viewer by `tests/fixtures/dc_conformance.json`: 36 layouts
+  and the 862 elements the viewer's own parser made of them, regenerated
+  by `tests/make_dc_conformance.mjs`. Beyond those, about 15,000 layouts
+  written to break it -- ranges, placeholders, `{seq}` and `if=`, globs,
+  line endings, JavaScript object names, structure, and realistic floors --
+  read the same in both, except where the viewer's JavaScript cannot be
+  followed: numbers of 2^53 and more, NUL bytes, nesting deeper than the
+  viewer's own stack, and letters whose case mapping is newer than the
+  running Python's Unicode tables (`unicodedata.unidata_version`: 15.1 on
+  3.13, 14 on 3.11 and 3.12, 13 on 3.9 and 3.10, 9 on 3.6; the viewer's
+  browser is on 16). Twenty-five deliberate breakages of the port are each
+  caught by the suite. Renaming a duplicate path to `#2`, `#3`, ... stays
+  linear (twenty thousand copies of one id read in a blink, not 25
+  seconds), and numbers padded with thousands of zeros read as `parseInt`
+  reads them rather than tripping Python's 4,300-digit limit.
 
 - **`reckon --ramp` held its model to less than it said.** Four gaps,
   each reproduced before it was fixed:

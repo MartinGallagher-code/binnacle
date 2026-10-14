@@ -601,6 +601,20 @@ t_group_kind_names_the_shared_container() {
     assert_eq "$LIM" "NIC"
 }
 
+t_group_kind_is_read_as_the_layout_reads_kinds() {
+    # Kinds are lower case, as the viewer reads them: a floor that writes
+    # Rack and a flag that says Rack still find the racks.  A kind the
+    # layout has none of is said, not silently modelled without uplinks.
+    setup_run
+    sed -i 's/rack r0/Rack r0/' floor.dc
+    mxgen reports
+    rk floor.dc --mx reports --group-kind Rack --flows flows.csv --quiet >/dev/null
+    flow flows.csv a1 b1
+    assert_eq "$LIM" "UPLINK"
+    out="$(rk floor.dc --mx reports --group-kind pod)"
+    assert_contains "$out" "no element of kind pod in the layout"
+}
+
 # --- latency -----------------------------------------------------------------
 
 t_queueing_where_there_is_room_is_named() {
@@ -1566,6 +1580,7 @@ run_test "a speeds table names its column"      t_a_speeds_table_must_name_its_s
 run_test "a host missing from the layout"       t_a_host_missing_from_the_layout_is_named
 run_test "--names maps onto the layout"         t_names_maps_the_run_onto_the_layout
 run_test "--group-kind names the container"     t_group_kind_names_the_shared_container
+run_test "--group-kind Rack finds rack"         t_group_kind_is_read_as_the_layout_reads_kinds
 run_test "queueing with room is named"          t_queueing_where_there_is_room_is_named
 run_test "a busy baseline is left out"          t_an_idle_baseline_taken_under_load_is_left_out
 run_test "the wrong report is refused"          t_the_wrong_report_for_the_flag_is_refused
