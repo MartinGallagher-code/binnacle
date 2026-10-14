@@ -1,0 +1,6 @@
+dc D
+	rack r1
+		node n1
+    rack r2
+  room odd
+      rack deep

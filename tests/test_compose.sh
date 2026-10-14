@@ -540,6 +540,8 @@ VERBATIM = [
     ("tokenize", "manifest.py", "reckon.py"),
     ("indent_of", "manifest.py", "reckon.py"),
     ("Element", "manifest.py", "reckon.py"),
+    ("_js_units", "manifest.py", "reckon.py"),
+    ("_js_fold", "manifest.py", "reckon.py"),
     ("_glob_match", "manifest.py", "reckon.py"),
     ("_condition_holds", "manifest.py", "reckon.py"),
     ("_next_seq", "manifest.py", "reckon.py"),

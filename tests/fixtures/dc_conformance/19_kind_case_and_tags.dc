@@ -1,0 +1,3 @@
+DC D +Prod,EDGE
+  Rack R1 +GPU role=Server KEY=v bare
+    NODE n1 +{rack}

@@ -197,9 +197,10 @@ tool agrees with the file.
 ## The layout file
 
 The `.dc` format from the
-[layout_visualizer](https://github.com/MartinGallagher-code/layout_visualizer)
-project, which is the format's reference implementation — see its README for
-the full grammar. Indentation nests,
+[datacenter viewer](https://github.com/MartinGallagher-code/datacenter_visualization),
+which is the format's reference implementation — see its README for the full
+grammar. It is read here exactly as the viewer reads it: the same machines,
+names, paths, tags and attributes from the same file. Indentation nests,
 ranges expand, and one line describes a whole floor:
 
 ```text
@@ -221,8 +222,25 @@ element rather than a class of them: a rack's `u=42` is its own height, not
 every machine's, and the `name=` on the `dc` line is the site's name, not
 forty-eight machines all called Site.
 
-What is understood here is the element half of the format. `net` and `link`
-lines describe cabling, not machines, and are read past.
+What is understood here is the element half of the format. `net`, `link` and
+`title` lines at the top of the file describe cabling and the floor's name,
+not machines, and are read past; several top-level lines share one `dc`
+named after the `title` (`datacenter` when there is none), as they do in the
+viewer. Every range the viewer writes reads the same here — segments
+(`[07..21x2,27..41x2]`), signed padding, letters — and so do `id=`,
+`{seq}` and `seq=`, `if=`, and `{i:3}`-style widths.
+
+A line the viewer cannot expand (`rack [A..z]`) is left out with everything
+under it, and said on stderr with its line number — the same thing the
+viewer does with it, rather than a refusal of the whole file.
+
+`tests/fixtures/dc_conformance.json` holds the elements the viewer's own
+parser made of each layout beside it, and the suite fails if this reads any
+of them differently; `tests/make_dc_conformance.mjs` regenerates it from a
+viewer checkout. The differences that remain are where the viewer's
+JavaScript cannot be followed: range numbers past 2⁵³ (it rounds them, and
+may stall), NUL bytes in a tag, and letters whose case is new in Unicode 15
+or 16.
 
 ## What counts as a server
 

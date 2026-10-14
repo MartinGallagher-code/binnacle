@@ -1,0 +1,3 @@
+dc D
+  room A name="{rak} {} {a-b} {{room}} {room}"
+    rack r1 +{nosuch},{room}

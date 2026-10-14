@@ -1,0 +1,5 @@
+dc D
+  room A
+    link data role=x
+    net mgmt
+    title nope

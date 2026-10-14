@@ -501,6 +501,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`manifest` and `reckon` read a `.dc` layout exactly as the viewer
+  does.** The parser was a subset of the datacenter viewer's, and the
+  viewer's own examples showed it: `three-rows.dc` was refused outright --
+  "cannot expand range '07..21x2,27..41x2'" -- and `dual-plane.dc` and the
+  iperf floor came out with other names. Ported from the viewer's
+  `parse.js` and `expand.js`: comma segments in a range, signed zero
+  padding, both ends of a letter range in one alphabet, `id=`, `{name:W}`
+  widths, `{seq}` with `seq=` counts and scopes, `if=` (with the viewer's
+  own case rules, code unit by code unit), a kind's own placeholder on its
+  own line, `{path}`, default ids counted per parent, `title` and
+  top-level-only directives, one `dc` root around several top-level lines,
+  lines ended only by LF or CR LF, and a dropped `__proto__` key. A line
+  the viewer cannot expand is left out with its children and reported on
+  stderr, as the viewer does, rather than ending the run.
+
+  Held to the viewer by `tests/fixtures/dc_conformance.json`: 32 layouts
+  and the 822 elements the viewer's own parser made of them, regenerated
+  by `tests/make_dc_conformance.mjs`. Beyond those, about 2,000 layouts
+  written to break it -- ranges, placeholders, `{seq}` and `if=`,
+  structure, attributes, and realistic floors -- read the same in both,
+  except where the viewer's JavaScript cannot be followed: numbers past
+  2^53, NUL bytes, and letters whose case is new in Unicode 15/16. Twenty
+  deliberate breakages of the port are each caught by the suite.
+
 - **`reckon --ramp` held its model to less than it said.** Four gaps,
   each reproduced before it was fixed:
 

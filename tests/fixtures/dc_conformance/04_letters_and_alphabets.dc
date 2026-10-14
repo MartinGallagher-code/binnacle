@@ -1,0 +1,8 @@
+dc D
+  rack [A..D]
+  rack [z..w]
+  rack [A..z]
+    node never
+  rack [a..e x2]
+  rack [a..ex2]
+  rack [5..a]

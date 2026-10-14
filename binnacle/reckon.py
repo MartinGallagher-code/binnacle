@@ -306,8 +306,8 @@ def _read_csv(path):
 # ---------------------------------------------------------------------------
 #
 # canonical copy: binnacle/manifest.py -- dc_expand_one, dc_expand, subst,
-# tokenize, indent_of, Element, _glob_match, _condition_holds, _next_seq,
-# parse_layout and _materialize, verbatim.
+# tokenize, indent_of, Element, _js_units, _js_fold, _glob_match,
+# _condition_holds, _next_seq, parse_layout and _materialize, verbatim.
 # tests/test_compose.sh fails if they stop matching.  The layout grammar is
 # the datacenter viewer's; manifest reads it to answer "which machines" and
 # this reads it to answer "what was built".
@@ -365,7 +365,11 @@ def dc_expand_one(body):
     if not m:
         return [body]
     lo, hi, raw_step = m.group(1), m.group(2), m.group(3)
-    step = int(raw_step) if raw_step else 1
+    # A step longer than Python will read as a number is longer than any
+    # range: the viewer's parseInt makes it Infinity, and the walk stops
+    # after the first value.
+    step = (1 if not raw_step else int(raw_step)
+            if len(raw_step.lstrip("0")) <= 4000 else float("inf"))
     if step < 1:
         raise ValueError('bad step in range "%s"' % body)
     if INT_RE.match(lo) and INT_RE.match(hi):
@@ -506,11 +510,49 @@ class Element(object):
         return self.ancestors.get(kind, "")
 
 
+def _js_units(text):
+    """A string as JavaScript holds it: UTF-16 code units, one per char."""
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if code > 0xFFFF:
+            code -= 0x10000
+            out.append(chr(0xD800 + (code >> 10)))
+            out.append(chr(0xDC00 + (code & 0x3FF)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _js_fold(unit):
+    """One code unit as a JavaScript /i regex without the u flag sees it.
+
+    Upper case, unless that is not one code unit or takes a non-ASCII
+    letter to an ASCII one: the long s is not s, the Kelvin sign is not k,
+    and Turkish dotted I is not i -- Python's re.IGNORECASE says otherwise.
+    """
+    up = unit.upper()
+    if len(_js_units(up)) != 1 or (ord(unit) >= 128 and ord(up) < 128):
+        return unit
+    return up
+
+
 def _glob_match(pattern, text):
-    """The viewer's globToRegExp: * and ? only, whole string, any case."""
-    body = "".join(".*" if ch == "*" else "." if ch == "?" else re.escape(ch)
-                   for ch in pattern)
-    return re.match("(?:%s)\\Z" % body, text, re.IGNORECASE) is not None
+    """The viewer's globToRegExp: * and ? only, whole string, any case.
+
+    Matched as JavaScript matches it: on UTF-16 code units, so ? is half an
+    emoji, and neither * nor ? takes a line separator.
+    """
+    body = []
+    for unit in _js_units(pattern):
+        if unit == "*":
+            body.append(_JS_DOT + "*")
+        elif unit == "?":
+            body.append(_JS_DOT)
+        else:
+            body.append(re.escape(_js_fold(unit)))
+    folded = "".join(_js_fold(u) for u in _js_units(text))
+    return re.match("(?:%s)\\Z" % "".join(body), folded) is not None
 
 
 def _condition_holds(raw, ctx, warn, line):
@@ -574,8 +616,12 @@ def parse_layout(path, warn=None):
     written to stderr, once per message.
     """
     try:
-        with io.open(path, encoding="utf-8-sig", errors="replace") as fh:
-            text = fh.read()
+        # Bytes, decoded in one go as the browser decodes them: a stray BOM
+        # byte is U+FFFD, not held back, and no newline is translated --
+        # only CR LF and LF end a line in the viewer, and a lone CR is a
+        # character of the line it is in.
+        with io.open(path, "rb") as fh:
+            text = fh.read().decode("utf-8-sig", "replace")
     except OSError as exc:
         die("cannot read %s: %s" % (path, exc))
     if warn is None:
@@ -589,9 +635,8 @@ def parse_layout(path, warn=None):
 
     root = {"kind": "@root", "indent": -1, "children": [], "up": None}
     stack = [root]
-    for lineno, raw in enumerate(text.split("\n"), 1):
-        if raw.endswith("\r"):
-            raw = raw[:-1]
+    deepest = [1]
+    for lineno, raw in enumerate(re.split("\r?\n", text), 1):
         tokens = tokenize(raw)
         if not tokens:
             continue
@@ -610,7 +655,11 @@ def parse_layout(path, warn=None):
                 continue
             at = tok.find("=")
             if at > 0:
-                attrs[tok[:at].lower()] = tok[at + 1:]
+                # The viewer keeps attributes in a JavaScript object, which
+                # cannot hold the key __proto__: it is dropped there, so
+                # here too.
+                if tok[:at].lower() != "__proto__":
+                    attrs[tok[:at].lower()] = tok[at + 1:]
             else:
                 tags.append(tok)
         node = {"kind": tokens[0].lower(), "spec": spec, "attrs": attrs,
@@ -618,6 +667,7 @@ def parse_layout(path, warn=None):
                 "line": lineno, "up": up}
         up["children"].append(node)
         stack.append(node)
+        deepest[0] = max(deepest[0], len(stack))
 
     # Directives where the viewer finds them; everything else is an element.
     title = ["datacenter"]
@@ -632,7 +682,12 @@ def parse_layout(path, warn=None):
                 top.append(child)
                 continue
             sift(child)
-    sift(root)
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, 2 * deepest[0] + 200))
+    try:
+        sift(root)
+    finally:
+        sys.setrecursionlimit(limit)
     if not top:
         return []
     # One top-level element that is one element is the root; anything else
@@ -648,7 +703,14 @@ def parse_layout(path, warn=None):
             root_syn = top[0]
     out = []
     state = {"blocks": {}, "named": {}, "paths": set(), "warn": warn}
-    _materialize(root_syn, None, out, state)
+    # One frame per level of nesting: a layout the viewer reads 1000 deep
+    # must not end here in a RecursionError.
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, 2 * deepest[0] + 200))
+    try:
+        _materialize(root_syn, None, out, state)
+    finally:
+        sys.setrecursionlimit(limit)
     return out
 
 
@@ -689,7 +751,11 @@ def _materialize(syn, parent, out, state):
         # {rack} on a rack's own line is the rack itself; the built-in
         # names win over a kind that shares one.
         ctx = dict(base)
-        if kind not in CONTEXT_NAMES:
+        # (A kind called __proto__ has no own placeholder in the viewer --
+        # JavaScript will not set that key -- unless an ancestor gave it
+        # one.)
+        if kind not in CONTEXT_NAMES and (kind != "__proto__"
+                                          or "__proto__" in base):
             ctx[kind] = raw_id
         ctx.update({"id": raw_id, "i": i + 1, "i0": i, "n": len(ids),
                     "seq": 0, "kind": kind})

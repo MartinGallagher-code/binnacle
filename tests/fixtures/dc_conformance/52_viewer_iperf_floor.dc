@@ -1,0 +1,93 @@
+# A floor plan to read an iperf_orchestrator run against, and a tour of every
+# feature of the .dc format in one file.
+#
+#   <kind> <id-spec> [key=value ...] [+tag ...]
+#
+# Servers are named the way the orchestrator's server list names them --
+# h1r01u01, "hall 1, rack 01, U 01" -- so `iperf-orchestrator export-overlay`
+# targets them with no mapping step at all. Switches carry no test results,
+# which is itself worth seeing: they stay uncoloured while the servers around
+# them light up.
+
+dc edge1 name="Acme EDGE1" +prod region=us-east tier=3 owner=platform
+
+  # cols=2 lays this room's rows out in two columns instead of one.
+  room h1 name="Hall 1" cols=2 +hall
+
+    # Letter range for rows, zero-padded numeric range for racks. The rack
+    # line expands to three racks, and everything nested under it is created
+    # once per rack -- 3 racks x 9 devices from two lines.
+    row A +compute
+      rack r[01..03] u=42 +standard power=grid-a
+        node tor at=42 role=tor +switch,uplink model=sn3700 name={room}{rack}tor
+        node u[01..08] role=server +x86 model=r7625 cpu=epyc-9654 name={room}{rack}{id}
+
+    # Same shape, a second row, and a different power feed. `power` inherits
+    # down to the nodes; `u`, `at` and `name` are layout-only and do not.
+    row B +compute
+      rack r[04..05] u=42 +standard power=grid-b
+        node tor at=42 role=tor +switch,uplink model=sn3700 name={room}{rack}tor
+        node u[01..08] role=server +x86 model=r7625 cpu=epyc-9654 name={room}{rack}{id}
+
+    # Storage: 4U chassis, so four of them fill the rack differently. The
+    # bare stepped range `[04..10x2]` expands to the U numbers themselves,
+    # `at={id}` pins each chassis to that slot and `id=d{id}` renames it.
+    row C +storage
+      rack r06 u=42 power=grid-b
+        node tor at=42 role=tor +switch,uplink model=sn3700 name={room}{rack}tor
+        node [04..10x2] id=d{id} at={id} u=2 role=server +storage,jbod model=jbod-90 disks=90 name={room}{rack}d{id}
+
+  # A second hall, one row, to give the cross-hall tests somewhere to go.
+  room h2 name="Hall 2" +hall
+    row A +compute
+      rack r[01..02] u=42 +standard power=grid-c
+        node tor at=42 role=tor +switch,uplink model=sn3700 name={room}{rack}tor
+        node u[01..08] role=server +x86 model=r7625 name={room}{rack}{id}
+
+  # Any word is a kind. `pod` and `cage` are not special to the viewer; they
+  # are drawn as generic containers, shaped by cols= and dir=.
+  pod edge name="Edge pods" cols=2 dir=x +edge
+    # Alternatives expand to one cage each; the cartesian range below gives
+    # each cage four nodes (p1-a, p1-b, p2-a, p2-b). {parent} keeps the
+    # names unique across the two cages.
+    cage [core|dmz] name="{id} cage"
+      node p[1..2]-[a|b] role=server +edge model=e5100 name=edge-{parent}-{id}
+
+  room mdf name="Meet-Me Room" +network
+    row s1
+      rack sp[1..2] u=42
+        node spine at=40 u=2 role=spine +switch,core name={rack}spine
+
+# ---- networks -------------------------------------------------------------
+# Logical fabrics. Rules match elements by selector, so no cable is ever
+# enumerated by hand. Toggle them individually in the viewer.
+
+net data    label="Data / east-west"  color=#4fa3ff
+net mgmt    label="Out-of-band mgmt"  color=#8b93a7 style=dashed
+net storage label="Storage fabric"    color=#ff9f43
+net uplink  label="ToR uplinks"       color=#4dd4ac
+net edge    label="Edge ring"         color=#c986ff
+
+# star (the default with two selectors): every server to the switch in its
+# own rack, and every rack switch to every spine.
+link data    role=server role=tor   scope=rack
+link uplink  role=tor    role=spine
+
+# A glob on an attribute, so only the r76xx servers take a management drop.
+link mgmt    model=r76* role=tor     scope=rack
+
+# mesh (the default with one selector): the storage chassis cross-connect
+# inside their row. `+storage,role=server` is an AND of two selectors.
+link storage +storage,role=server scope=row mode=mesh
+
+# ring and chain over the generic containers, and `!` to exclude the dmz
+# cage from the chain.
+link edge    +edge,role=server           scope=pod  mode=ring
+link edge    +edge,role=server,!+dmz     scope=cage mode=chain
+
+# mode=pair lines two lists up one-to-one instead of crossing them, and is
+# demonstrated in examples/mx/floor.dc, where the two halls hold the same
+# eight switches and every one has a partner. It is deliberately NOT used
+# here: there are two spines and eight ToRs, so pairing them would wire two
+# cables and leave six racks with no uplink at all. The viewer says so when
+# a pair rule's two sides are different lengths.

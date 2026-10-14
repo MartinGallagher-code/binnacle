@@ -10,10 +10,10 @@ MF="$BINNACLE_DIR/manifest.py"
 
 mf() { "$PY" "$MF" "$@"; }
 
-# A layout in the documented .dc format, written here rather than copied
-# from the layout_visualizer repository: that repository carries no
-# licence file, and this one is REUSE-compliant, so vendoring one of its
-# examples would put an unlicensed file into a GPL tree.
+# A layout in the documented .dc format, written here for these cases.  (The
+# viewer -- datacenter_visualization, the format's reference -- is
+# GPL-3.0-or-later like this tree, so tests/fixtures/dc_conformance/ copies
+# three of its examples as they stand.)
 #
 # Two rooms x two rows x three racks x (1 switch + 4 servers), with flat
 # hostnames, so 48 servers and 12 switches.  The row goes into the name
@@ -469,6 +469,87 @@ t_explain_names_a_selector_that_matched_nothing() {
 }
 
 echo "manifest"
+# --- reading a layout as the viewer reads it ---------------------------------
+
+t_a_layout_reads_as_the_viewer_reads_it() {
+    # tests/fixtures/dc_conformance.json is what the viewer's own parser
+    # made of each layout beside it (tests/make_dc_conformance.mjs), and
+    # manifest and reckon must make the same elements of every one: the
+    # same paths, kinds, ids, names, tags and attributes.  Three readers of
+    # the format had drifted from the viewer before this existed.
+    "$PY" - "$BINNACLE_DIR" "$BINNACLE_DIR/../tests/fixtures" <<'EOF'
+import importlib.util, json, os, sys
+pkg, fix = sys.argv[1], sys.argv[2]
+doc = json.load(open(os.path.join(fix, "dc_conformance.json"), encoding="utf-8"))
+bad = []
+for tool in ("manifest", "reckon"):
+    spec = importlib.util.spec_from_file_location("t_" + tool, os.path.join(pkg, tool + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for case in doc["cases"]:
+        path = os.path.join(fix, "dc_conformance", case["file"])
+        els = mod.parse_layout(path, warn=lambda line, msg: None)
+        got = [[e.path, e.kind, e.id, e.name, sorted(e.tags),
+                dict(sorted((k, v) for k, v in e.attrs.items() if k != "color"))]
+               for e in els]
+        if got != case["elements"]:
+            first = next((i for i, (a, b) in enumerate(zip(got, case["elements"])) if a != b),
+                         min(len(got), len(case["elements"])))
+            bad.append("%s %s: element %d -- viewer %r, %s %r"
+                       % (tool, case["file"], first,
+                          case["elements"][first] if first < len(case["elements"]) else None,
+                          tool, got[first] if first < len(got) else None))
+if bad:
+    print("\n".join(bad[:10]))
+    sys.exit(1)
+print("%d layouts, %d elements, as %s" % (len(doc["cases"]),
+      sum(len(c["elements"]) for c in doc["cases"]), doc["reference"]))
+EOF
+    assert_status $? 0
+}
+
+t_a_sparse_range_lists_its_servers() {
+    # The layout that would not read: comma segments with steps in one
+    # bracket, the way a half-populated rack is written.
+    cat > "$TEST_TMPDIR/sparse.dc" <<'EOF'
+dc D
+  rack r01
+    node [07..21x2,27..41x2] id=u{id} role=server name={rack}u{id}
+EOF
+    out="$(mf "$TEST_TMPDIR/sparse.dc" --quiet)"
+    assert_status $? 0
+    assert_eq "$(wc -l <<<"$out" | tr -d ' ')" "16"
+    assert_eq "$(head -1 <<<"$out")" "r01u07"
+    assert_eq "$(tail -1 <<<"$out")" "r01u41"
+}
+
+t_a_line_the_viewer_skips_is_skipped_and_said() {
+    # A range the viewer cannot expand takes its line and everything under
+    # it away, and says so -- here too, rather than refusing the file.
+    cat > "$TEST_TMPDIR/skip.dc" <<'EOF'
+dc D
+  rack [A..z]
+    node lost role=server
+  rack ok
+    node kept role=server
+EOF
+    set +e
+    out="$(mf "$TEST_TMPDIR/skip.dc" 2>"$TEST_TMPDIR/err")"; rc=$?
+    set -e
+    assert_status "$rc" 0
+    assert_eq "$out" "kept"
+    assert_contains "$(cat "$TEST_TMPDIR/err")" 'line 2: cannot expand range "A..z": A and z are not both A-Z, both a-z or both digits -- nothing was created for this line or the lines under it'
+}
+
+t_a_classic_mac_layout_is_one_line_as_in_the_viewer() {
+    # Only CR LF and LF end a line in the viewer.  A file of bare CRs is
+    # one line there -- one element, its id "D" and the CRs after it -- and
+    # was a whole floor here.
+    printf 'dc D\r  rack a\r    node n role=server\r' > "$TEST_TMPDIR/mac.dc"
+    out="$(mf "$TEST_TMPDIR/mac.dc" --role any --quiet | tr -d '\r')"
+    assert_eq "$out" "D"
+}
+
 run_test "a container means everything under" t_a_container_selector_means_everything_under_it
 run_test "selectors AND together"             t_selectors_and_together
 run_test "commas in one selector are OR"      t_commas_inside_one_selector_are_or
@@ -509,4 +590,8 @@ run_test "--explain shows what was named"     t_explain_shows_what_each_selector
 run_test "--explain stays on stderr"          t_explain_is_stderr_only
 run_test "--explain names the empty step"     t_explain_names_a_selector_that_matched_nothing
 run_test "--version matches the house format" t_version_matches_the_house_format
+run_test "a layout reads as the viewer reads it" t_a_layout_reads_as_the_viewer_reads_it
+run_test "a sparse range lists its servers"    t_a_sparse_range_lists_its_servers
+run_test "a line the viewer skips is said"     t_a_line_the_viewer_skips_is_skipped_and_said
+run_test "a bare-CR file is one line"          t_a_classic_mac_layout_is_one_line_as_in_the_viewer
 finish

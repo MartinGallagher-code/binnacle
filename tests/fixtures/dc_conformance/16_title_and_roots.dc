@@ -1,0 +1,6 @@
+title "Floor One"
+room A
+  rack r1
+room B
+net data label=x
+link data role=a role=b

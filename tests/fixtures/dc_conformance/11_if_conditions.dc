@@ -1,0 +1,8 @@
+dc D
+  row [1..4]
+    rack [1..2] id=R{seq:2} seq=room
+    rack 12 id=R{seq:2} seq=room if={row}=1
+      node g[1..2]
+    rack 12 id=R{seq:2} seq=room if={row}!=1
+    rack [1..1] id=R{seq:2} seq=room if={row}=2|4,{i}=1
+    rack odd if=nonsense

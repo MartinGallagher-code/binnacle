@@ -1,0 +1,80 @@
+# A dual-homed, two-plane fabric, built up from the servers.
+#
+#   servers   4 racks x 8 servers, each with two NICs, a and b
+#   splices   every 4 consecutive servers share one cable per NIC:
+#             NIC a's harness runs to TOR a, NIC b's to TOR b
+#   TORs      two per rack, a and b, joined to each other
+#   spines    one pair (spine 1, spine 2) for every two racks; each takes
+#             a cable from both TORs of both its racks
+#   planes    two, of six superspines each: both spine 1s run four cables
+#             to every superspine in plane 1, both spine 2s to plane 2
+#
+# The two NICs are two nets, so each server's a and b cables leave from
+# opposite sides of it and never draw on top of each other.
+#
+# Every net says what its cables carry (gbps=): 25G NICs, so each four-way
+# splice is a 100G breakout, and 100G everywhere above. Load
+# examples/dual-plane-flows.tsv with it and tick "load the cables" on its
+# metric to see where that traffic lands.
+
+dc LAB name="Dual-plane fabric" cols=1
+
+  # Above the spines: the two planes of superspines. `plane=` is an ordinary
+  # attribute, inherited by the superspines below, and it is what the link
+  # rules at the bottom select on.
+  room CORE name="Superspine planes" cols=2 +network
+    plane PL1 name="Plane 1" plane=1
+      rack SS1 u=12
+        node ss[1..6] u=2 role=superspine +switch
+    plane PL2 name="Plane 2" plane=2
+      rack SS2 u=12
+        node ss[1..6] u=2 role=superspine +switch
+
+  # Two pods of two racks; each pod has its own spine 1 and spine 2. One
+  # block makes both: {seq} counts on across every copy of a line, so the
+  # rack line numbers R01-R02 in pod 1 and R03-R04 in pod 2, and the spine
+  # racks are SP1 and SP2 -- where {i} would start again in every pod.
+  room DH1 name="Data Hall 1" cols=2
+
+    pod [1..2] id=P{id} name="Pod {id}"
+      row A
+        rack [1..2] id=R{seq:2} u=24
+          node tora at=24 role=tor nic=a +switch
+          node torb at=23 role=tor nic=b +switch
+          node s[1..8] u=2 role=server +x86
+      row S
+        rack S id=SP{seq} u=8
+          node spine1 at=6 u=2 role=spine plane=1 +switch
+          node spine2 at=2 u=2 role=spine plane=2 +switch
+
+# ---- networks -------------------------------------------------------------
+
+net nica    label="NIC a"              color=#4fa3ff  gbps=25
+net nicb    label="NIC b"              color=#ff9f43  gbps=25
+net peer    label="TOR a - TOR b"      color=#f5d442  gbps=100
+net fabric  label="TOR to spine"       color=#4dd4ac  gbps=100
+net plane1  label="Plane 1"            color=#c986ff  gbps=100
+net plane2  label="Plane 2"            color=#ff6b8b  gbps=100
+
+# Servers to their own rack's TORs, four servers spliced into each cable.
+link nica   role=server role=tor,nic=a  scope=rack splice=4
+link nicb   role=server role=tor,nic=b  scope=rack splice=4
+
+# TOR a to TOR b, in every rack.
+link peer   role=tor,nic=a role=tor,nic=b  scope=rack
+
+# Every TOR in a pod to both of that pod's spines.
+link fabric role=tor role=spine  scope=pod
+
+# Spine 1s to every superspine in plane 1, spine 2s to plane 2, four cables
+# each. A rule wires one cable per pair, so four cables is the rule four
+# times; the viewer draws the four as one heavier line, and the inspector
+# counts all of them (a spine 1: plane1 x24).
+link plane1 role=spine,plane=1 role=superspine,plane=1
+link plane1 role=spine,plane=1 role=superspine,plane=1
+link plane1 role=spine,plane=1 role=superspine,plane=1
+link plane1 role=spine,plane=1 role=superspine,plane=1
+link plane2 role=spine,plane=2 role=superspine,plane=2
+link plane2 role=spine,plane=2 role=superspine,plane=2
+link plane2 role=spine,plane=2 role=superspine,plane=2
+link plane2 role=spine,plane=2 role=superspine,plane=2
