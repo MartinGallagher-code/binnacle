@@ -44,16 +44,33 @@ DEFAULT_ROLE = "server"
 
 # Attributes that describe one element and must not cascade to its children.
 # Same set as the reference parser: a rack's `u=42` is its own height, not
-# every machine's.
+# every machine's, and `seq=` and `if=` are about the line that carries them.
 NON_INHERITED = frozenset((
-    "id", "name", "at", "u", "cols", "dir", "gap", "label", "size"))
+    "id", "name", "at", "u", "cols", "dir", "gap", "label", "size", "seq",
+    "align", "if"))
 
-# Lines that are not elements.
-DIRECTIVES = frozenset(("net", "link"))
+# Lines that are not elements, where the viewer reads them as such: at the
+# top of the file, or under another of them.  Anywhere else the viewer
+# makes an element of that kind, and so does this.
+DIRECTIVES = frozenset(("net", "link", "title"))
 
+# The placeholders every line has, which a kind of the same name never hides.
+CONTEXT_NAMES = frozenset(("id", "i", "i0", "n", "seq", "kind", "parent",
+                           "path"))
+
+# The viewer's patterns, character for character: JavaScript's \d and \w
+# are ASCII, its . stops at any line terminator, its $ only at the end, and
+# its \s takes the Unicode spaces a Python \s leaves out.
+_JS_DOT = "[^\n\r  ]"
+_JS_SPACE = "\t\n\v\f\r    -     　﻿"
 BRACKET_RE = re.compile(r"\[([^\]]*)\]")
-PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
-INT_RE = re.compile(r"^-?\d+$")
+PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::([0-9]+))?\}", re.ASCII)
+SEQ_USE_RE = re.compile(r"\{seq(?::[0-9]+)?\}")
+INT_RE = re.compile(r"-?[0-9]+\Z")
+RANGE_SPEC_RE = re.compile(r"(%s+?)\.\.(%s+?)(?:x([0-9]+))?\Z" % (_JS_DOT, _JS_DOT))
+BARE_RANGE_RE = re.compile(r"[^%s]+\.\.[^%s]+\Z" % (_JS_SPACE, _JS_SPACE))
+ALPHABETS = (re.compile(r"[A-Z]\Z"), re.compile(r"[a-z]\Z"),
+             re.compile(r"[0-9]\Z"))
 LEADING_INT_RE = re.compile(r"(\d+)\s*$")
 
 # canonical copy: binnacle/agree.py RANGE_RE.
@@ -164,33 +181,51 @@ def expand_range(spec):
 def dc_expand_one(body):
     """One bracket body, the layout file's own range grammar.
 
-    `01..20`, `1..40x2`, `A..H`, `web|db|cache`, or a literal.  Kept
-    separate from expand_range above: that one is how the rest of this
-    package writes a range on a command line, this one is how the layout
-    file writes it, and they are not the same spelling.
+    `01..20`, `1..40x2`, `A..H`, `web|db|cache`, `1..4,7..10`, or a
+    literal.  The viewer's expandRangeSpec, step for step: a layout it draws
+    is a layout this reads, into the same names.  A body it refuses raises
+    ValueError, with its words, and the line is left out as it leaves it.
     """
+    # Comma segments first, so numbering with holes stays one range:
+    # [1..4,7..10] is racks 1-4 and 7-10; an empty segment is nothing.
+    if "," in body:
+        out = []
+        for part in body.split(","):
+            if part != "":
+                out.extend(dc_expand_one(part))
+        return out
     if "|" in body:
         return body.split("|")
-    m = re.match(r"^(.+?)\.\.(.+?)(?:x(\d+))?$", body)
+    m = RANGE_SPEC_RE.match(body)
     if not m:
         return [body]
     lo, hi, raw_step = m.group(1), m.group(2), m.group(3)
     step = int(raw_step) if raw_step else 1
     if step < 1:
-        die("bad step in range %r" % body)
+        raise ValueError('bad step in range "%s"' % body)
     if INT_RE.match(lo) and INT_RE.match(hi):
         a, b = int(lo), int(hi)
-        # zfill keeps the sign where there is one, which abs() did not:
-        # 05 pads to 05, -5 pads to -05.  Same spelling as expand_range.
-        width = len(lo) if lo.startswith("0") else 0
+        # 01 pads every value to that many digits; the digits are what is
+        # padded, so -05..-01 is -05 -04 ..., not five ids counting the
+        # wrong way and not -5.
+        digits = lo[1:] if lo.startswith("-") else lo
+        width = len(digits) if re.match(r"0[0-9]", digits) else 0
         direction = 1 if b >= a else -1
         out = []
         v = a
         while (v <= b) if direction > 0 else (v >= b):
-            out.append(str(v).zfill(width) if width else str(v))
+            if width:
+                out.append(("-" if v < 0 else "") + str(abs(v)).zfill(width))
+            else:
+                out.append(str(v))
             v += direction * step
         return out
     if len(lo) == 1 and len(hi) == 1:
+        # Both ends in one alphabet: A..z would otherwise walk through the
+        # punctuation between Z and a, and make an element named "]".
+        if not any(r.match(lo) and r.match(hi) for r in ALPHABETS):
+            raise ValueError('cannot expand range "%s": %s and %s are not both '
+                             'A-Z, both a-z or both digits' % (body, lo, hi))
         direction = 1 if ord(hi) >= ord(lo) else -1
         out = []
         c = ord(lo)
@@ -198,7 +233,7 @@ def dc_expand_one(body):
             out.append(chr(c))
             c += direction * step
         return out
-    die("cannot expand range %r" % body)
+    raise ValueError('cannot expand range "%s"' % body)
 
 
 def dc_expand(token):
@@ -206,11 +241,11 @@ def dc_expand(token):
     if not token:
         return [""]
     if not BRACKET_RE.search(token):
-        if re.match(r"^\S+\.\.\S+$", token):
+        if BARE_RANGE_RE.match(token):
             return dc_expand_one(token)
         return [token]
     results = [token]
-    while BRACKET_RE.search(results[0]):
+    while results and BRACKET_RE.search(results[0]):
         nxt = []
         for cur in results:
             m = BRACKET_RE.search(cur)
@@ -226,14 +261,21 @@ def dc_expand(token):
 def subst(text, ctx):
     """{room}, {rack}, {id}, {i} ... resolved from enclosing elements.
 
-    An unknown key is left as it stands, so a literal brace in a label
-    survives.
+    {name:W} pads a whole-number value to W digits, as a range written
+    R[01..20] pads its own.  An unknown key is left as it stands, so a
+    literal brace in a label survives.
     """
     if not isinstance(text, str) or "{" not in text:
         return text
     def one(m):
-        key = m.group(1)
-        return str(ctx[key]) if key in ctx else m.group(0)
+        key, width = m.group(1), m.group(2)
+        if key not in ctx:
+            return m.group(0)
+        value = str(ctx[key])
+        if not width or not INT_RE.match(value):
+            return value
+        digits = value.replace("-", "", 1)
+        return ("-" if value.startswith("-") else "") + digits.zfill(int(width))
     return PLACEHOLDER_RE.sub(one, text)
 
 
@@ -278,7 +320,7 @@ def indent_of(line):
 
 class Element(object):
     __slots__ = ("kind", "id", "name", "path", "tags", "attrs", "parent",
-                 "depth", "ancestors")
+                 "depth", "ancestors", "children")
 
     def __init__(self, kind, ident, name, path, tags, attrs, parent, depth):
         self.kind = kind
@@ -290,6 +332,7 @@ class Element(object):
         self.parent = parent
         self.depth = depth
         self.ancestors = {}
+        self.children = []
 
     def role(self):
         return self.attrs.get("role", "")
@@ -298,33 +341,103 @@ class Element(object):
         return self.ancestors.get(kind, "")
 
 
-def parse_layout(path):
+def _glob_match(pattern, text):
+    """The viewer's globToRegExp: * and ? only, whole string, any case."""
+    body = "".join(".*" if ch == "*" else "." if ch == "?" else re.escape(ch)
+                   for ch in pattern)
+    return re.match("(?:%s)\\Z" % body, text, re.IGNORECASE) is not None
+
+
+def _condition_holds(raw, ctx, warn, line):
+    """Whether a line's if= holds for the element about to be made.
+
+    `{placeholder}=value` or `!=`, joined by commas, all of which must
+    hold; a value may list alternatives with | and use * and ?.  One that
+    cannot be read is reported and ignored, as the viewer ignores it.
+    """
+    for clause in raw.split(","):
+        neq = clause.find("!=")
+        at = neq if neq >= 0 else clause.find("=")
+        if at <= 0:
+            warn(line, "if=%s: each condition is {placeholder}=value or "
+                       "{placeholder}!=value, joined by commas -- ignored"
+                 % raw)
+            return True
+        left = subst(clause[:at], ctx)
+        wanted = [subst(v, ctx)
+                  for v in clause[at + (2 if neq >= 0 else 1):].split("|")]
+        hit = any(_glob_match(v, left) if re.search(r"[*?]", v)
+                  else left.lower() == v.lower() for v in wanted)
+        if hit == (neq >= 0):
+            return False
+    return True
+
+
+def _next_seq(syn, series, parent, state):
+    """The next {seq}: per block and kind, or per seq= name or scope.
+
+    Lines of one kind side by side in one block share a count; seq=room
+    gives one count per enclosing room, kept per kind of what is counted;
+    any other seq= word is a count of that name, wherever it is used.
+    Returns (counts, key, n) so an element not made can give n back.
+    """
+    if series.get("seq"):
+        counts = state["named"]
+        scope = parent
+        while scope is not None and scope.kind != series["seq"]:
+            scope = scope.parent
+        key = (("scope", scope.path, syn["kind"]) if scope is not None
+               else series["seq"])
+    else:
+        block = syn["up"] if syn["up"] is not None else syn
+        counts = state["blocks"].setdefault(id(block), {})
+        key = syn["kind"]
+    n = counts.get(key, 0) + 1
+    counts[key] = n
+    return counts, key, n
+
+
+def parse_layout(path, warn=None):
     """Every element the layout describes, in file order.
 
-    `net` and `link` lines are cabling rules rather than elements and are
-    read past -- this tool answers "which machines", not "which cables".
+    The viewer's parseLayout, as far as which elements exist and what they
+    are called: `net`, `link` and `title` lines at the top of the file are
+    directives, several top-level lines share one `dc` root named after the
+    title (`datacenter` when there is none), and a line the viewer cannot
+    expand is left out with everything under it and reported, not fatal.
+    `warn(line, message)` hears what was left out; by default it is
+    written to stderr, once per message.
     """
     try:
         with io.open(path, encoding="utf-8-sig", errors="replace") as fh:
-            lines = fh.read().splitlines()
+            text = fh.read()
     except OSError as exc:
         die("cannot read %s: %s" % (path, exc))
+    if warn is None:
+        said = set()
 
-    # (indent, kind, id_spec, attrs, tags, children)
-    root = {"indent": -1, "children": []}
+        def warn(line, msg):
+            if (line, msg) not in said:
+                said.add((line, msg))
+                sys.stderr.write("%s: %s, line %d: %s\n"
+                                 % (PROG, path, line, msg))
+
+    root = {"kind": "@root", "indent": -1, "children": [], "up": None}
     stack = [root]
-    for lineno, raw in enumerate(lines, 1):
+    for lineno, raw in enumerate(text.split("\n"), 1):
+        if raw.endswith("\r"):
+            raw = raw[:-1]
         tokens = tokenize(raw)
         if not tokens:
             continue
-        kind = tokens[0]
-        if kind in DIRECTIVES:
-            continue
         indent = indent_of(raw)
+        while len(stack) > 1 and indent <= stack[-1]["indent"]:
+            stack.pop()
+        up = stack[-1]
         rest = tokens[1:]
-        id_spec = None
+        spec = None
         if rest and not rest[0].startswith("+") and "=" not in rest[0]:
-            id_spec = rest.pop(0)
+            spec = rest.pop(0)
         attrs, tags = {}, []
         for tok in rest:
             if tok.startswith("+"):
@@ -335,22 +448,48 @@ def parse_layout(path):
                 attrs[tok[:at].lower()] = tok[at + 1:]
             else:
                 tags.append(tok)
-        node = {"indent": indent, "kind": kind, "spec": id_spec,
-                "attrs": attrs, "tags": tags, "children": [], "line": lineno}
-        while len(stack) > 1 and stack[-1]["indent"] >= indent:
-            stack.pop()
-        stack[-1]["children"].append(node)
+        node = {"kind": tokens[0].lower(), "spec": spec, "attrs": attrs,
+                "tags": tags, "children": [], "indent": indent,
+                "line": lineno, "up": up}
+        up["children"].append(node)
         stack.append(node)
 
+    # Directives where the viewer finds them; everything else is an element.
+    title = ["datacenter"]
+    top = []
+
+    def sift(node):
+        for child in node["children"]:
+            if child["kind"] == "title":
+                title[0] = (child["spec"] or child["attrs"].get("name")
+                            or title[0])
+            elif child["kind"] not in DIRECTIVES:
+                top.append(child)
+                continue
+            sift(child)
+    sift(root)
+    if not top:
+        return []
+    # One top-level element that is one element is the root; anything else
+    # is given one, as the viewer gives it.
+    root_syn = {"kind": "dc", "spec": title[0], "attrs": {}, "tags": [],
+                "children": top, "line": 0, "up": None}
+    if len(top) == 1:
+        try:
+            n = len(dc_expand(top[0]["spec"])) if top[0]["spec"] else 1
+        except ValueError:
+            n = 1
+        if n == 1:
+            root_syn = top[0]
     out = []
-    seen = {}
-    for child in root["children"]:
-        _materialize(child, None, out, seen)
+    state = {"blocks": {}, "named": {}, "paths": set(), "warn": warn}
+    _materialize(root_syn, None, out, state)
     return out
 
 
-def _materialize(node, parent, out, seen):
-    ctx = {}
+def _materialize(syn, parent, out, state):
+    warn = state["warn"]
+    base = {}
     if parent is not None:
         chain = []
         p = parent
@@ -358,47 +497,90 @@ def _materialize(node, parent, out, seen):
             chain.append(p)
             p = p.parent
         for anc in reversed(chain):
-            ctx[anc.kind] = anc.id
-        ctx["parent"] = parent.id
+            base[anc.kind] = anc.id
+        base["parent"] = parent.id
+        base["path"] = parent.path
+    kind = syn["kind"]
+    spec = subst(syn["spec"], base) if syn["spec"] else None
+    try:
+        ids = (dc_expand(spec) if spec else
+               ["%s%d" % (kind, (len(parent.children) if parent is not None
+                                 else 0) + 1)])
+    except ValueError as exc:
+        warn(syn["line"], "%s -- nothing was created for this line or the "
+                          "lines under it" % exc)
+        return
+    if not ids:
+        warn(syn["line"], '%s "%s" expands to no ids -- nothing was created '
+                          "for this line or the lines under it"
+             % (kind, syn["spec"]))
+        return
+    uses_seq = (any(SEQ_USE_RE.search(v) for v in syn["attrs"].values())
+                or any(SEQ_USE_RE.search(t) for t in syn["tags"]))
+    dynamic = any("{" in v for v in syn["attrs"].values())
+    tagged = any("{" in t for t in syn["tags"])
 
-    spec = subst(node["spec"], ctx) if node["spec"] else None
-    ids = dc_expand(spec) if spec else ["%s%d" % (node["kind"], 1)]
+    for i, raw_id in enumerate(ids):
+        # {rack} on a rack's own line is the rack itself; the built-in
+        # names win over a kind that shares one.
+        ctx = dict(base)
+        if kind not in CONTEXT_NAMES:
+            ctx[kind] = raw_id
+        ctx.update({"id": raw_id, "i": i + 1, "i0": i, "n": len(ids),
+                    "seq": 0, "kind": kind})
+        numbered = None
+        if uses_seq:
+            series = ({"seq": subst(syn["attrs"]["seq"], ctx)}
+                      if "seq" in syn["attrs"] else {})
+            numbered = _next_seq(syn, series, parent, state)
+            ctx["seq"] = numbered[2]
+        own = syn["attrs"]
+        if dynamic:
+            own = dict((k, subst(v, ctx)) for k, v in own.items())
+        # if= decides whether the element is made; it is not one of its
+        # attributes, and an element not made gives its {seq} back.
+        if "if" in syn["attrs"]:
+            if not _condition_holds(syn["attrs"]["if"], ctx, warn,
+                                    syn["line"]):
+                if numbered:
+                    counts, key, n = numbered
+                    counts[key] = n - 1
+                continue
+            own = dict(own)
+            own.pop("if", None)
+        tags = [subst(t, ctx) for t in syn["tags"]] if tagged else syn["tags"]
+        ident = own.get("id") or raw_id
 
-    for i, ident in enumerate(ids):
-        local = dict(ctx)
-        local.update({"id": ident, "i": i + 1, "i0": i, "n": len(ids),
-                      "kind": node["kind"]})
+        path = "%s/%s" % (parent.path, ident) if parent is not None else ident
+        if path in state["paths"]:
+            n = 2
+            while "%s#%d" % (path, n) in state["paths"]:
+                n += 1
+            warn(syn["line"], 'duplicate path "%s" renamed to "%s#%d"'
+                 % (path, path, n))
+            path = "%s#%d" % (path, n)
+        state["paths"].add(path)
+
         attrs = {}
         if parent is not None:
             # The child sees the parent's attributes, minus the ones that
-            # describe the parent alone: a rack's u=42 is its own height,
-            # not every machine's.
+            # describe the parent alone.
             attrs.update(parent.attrs)
             for key in NON_INHERITED:
                 attrs.pop(key, None)
-        for key, value in node["attrs"].items():
-            attrs[key] = subst(value, local)
-
-        tags = set(parent.tags) if parent is not None else set()
-        for tag in node["tags"]:
-            tags.add(subst(tag, local).lower())
-
-        path = "%s/%s" % (parent.path, ident) if parent is not None else ident
-        if path in seen:
-            seen[path] += 1
-            path = "%s#%d" % (path, seen[path])
-        else:
-            seen[path] = 1
-
-        name = attrs.get("name") or ident
-        el = Element(node["kind"], ident, name, path, tags, attrs,
-                     parent, 0 if parent is None else parent.depth + 1)
+        attrs.update(own)
+        all_tags = set(parent.tags) if parent is not None else set()
+        for tag in tags:
+            all_tags.add(tag.lower())
+        el = Element(kind, ident, own.get("name") or ident, path, all_tags,
+                     attrs, parent, 0 if parent is None else parent.depth + 1)
         if parent is not None:
             el.ancestors = dict(parent.ancestors)
             el.ancestors[parent.kind] = parent.id
+            parent.children.append(el)
         out.append(el)
-        for child in node["children"]:
-            _materialize(child, el, out, seen)
+        for child in syn["children"]:
+            _materialize(child, el, out, state)
 
 
 # ---------------------------------------------------------------------------
