@@ -1,0 +1,4 @@
+dc D if={id}=D
+  rack a if={id}=b
+    node never
+  rack b if={id}=b*

@@ -1,0 +1,5 @@
+dc D
+  node r[1..2]-[a|b]-[x|y,z]
+  node [web|db,cache]
+  node A..C
+  node 1..3

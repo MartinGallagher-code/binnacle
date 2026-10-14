@@ -1,0 +1,8 @@
+dc D
+  room [Izmir|İstanbul|KK|Straße|🔥]
+    rack a if={room}=i*
+    rack b if={room}=k*
+    rack c if={room}=?
+    rack d if={room}=??
+    rack e if={room}=STRA*E
+    rack f if={room}=*.*

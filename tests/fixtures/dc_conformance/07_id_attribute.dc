@@ -1,0 +1,5 @@
+dc D
+  row [1..2]
+    rack [1..3] id=R{row}{id}
+      node [1..2] id=u{id} name={rack}{id}
+    rack x id=

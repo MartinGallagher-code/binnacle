@@ -59,7 +59,10 @@ Attributes inherit the way every `.dc` attribute does, so `nic_gbps=25` on a
 row is every server in it, and `uplinks=8 uplink_gbps=100` on a row means
 *every rack in this row has eight 100 G uplinks*. A rack's capacity is read
 off the rack itself; `--group-kind pod` reads it off another container kind
-instead, for a layout that groups servers some other way.
+instead, for a layout that groups servers some other way. Kinds are read in
+lower case, as the viewer reads them, so `--group-kind Pod` and a floor that
+writes `Pod` both mean `pod`; a kind the layout has none of is reported, not
+quietly modelled with no uplinks.
 
 **A value that is not a number is reported, never guessed at.** `nic_gbps=25g`,
 `uplinks=eight`, `nic_gbps=nan`, `nic_gbps=0` and `uplinks=2` with no

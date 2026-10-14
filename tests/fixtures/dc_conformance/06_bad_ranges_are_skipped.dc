@@ -1,0 +1,5 @@
+dc D
+  rack [1..4x0]
+    node never
+  rack [aa..bb]
+  rack ok

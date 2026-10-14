@@ -1,0 +1,5 @@
+dc D
+  room A
+    dcm [1,2] name=dcm-{dcm} p={path} q={parent}
+      rack r[1..2] name={room}{dcm}{rack} k={kind} n={n} i0={i0}
+    id x name={id}

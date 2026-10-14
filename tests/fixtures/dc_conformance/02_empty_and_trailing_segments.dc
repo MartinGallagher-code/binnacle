@@ -1,0 +1,6 @@
+dc D
+  rack r[1..2,]
+  rack s[,3,,4..5]
+  rack t[,]
+    node never
+  rack after

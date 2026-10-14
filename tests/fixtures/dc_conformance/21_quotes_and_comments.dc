@@ -1,0 +1,4 @@
+dc "Data Hall" name="A # not a comment" # a comment
+  rack 'r 1' label="x=y" k=a=b
+  rack "" role=empty-spec
+  rack r2 open="unclosed value role=x
