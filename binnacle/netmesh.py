@@ -281,6 +281,11 @@ def pct(part, whole):
     return (part / whole * 100.0) if whole else 0.0
 
 
+def loss_of(sent, got):
+    """Percent of SENT that did not arrive, never below zero."""
+    return max(0.0, pct(sent - got, sent))
+
+
 def _env(name, default=None):
     v = os.environ.get("NETMESH_" + name)
     return v if v not in (None, "") else default
@@ -2066,7 +2071,12 @@ class PairStat(object):
         self.probe = "udp"
         self.sent = 0
         self.recv = 0
-        self.rx_recv = None       # what the far end says it saw
+        # The forward/return split, counted only over the intervals both
+        # ends reported (see _match_stamps): what the far end says it saw,
+        # and what this end sent and got back over those same intervals.
+        self.rx_recv = None
+        self.split_sent = 0
+        self.split_recv = 0
         self.p50 = Agg()
         self.p99 = Agg()
         self.avg = Agg()
@@ -2076,25 +2086,27 @@ class PairStat(object):
         self.mtu_state = ""
         self.notes = set()
 
+    # Clamped at zero, as the legs below are.  A window cut out of a run
+    # can open on a reply to a probe sent just before it, so a lossless
+    # pair can come out one reply ahead -- and loss cannot be negative.
     @property
     def loss_pct(self):
-        return pct(self.sent - self.recv, self.sent) if self.sent else None
+        return loss_of(self.sent, self.recv) if self.sent else None
 
-    # The two ends flush their intervals independently, so a report
-    # collected mid-run can hold one more interval of rx than of tx.  That
-    # skew can make a leg look very slightly negative; loss cannot be
-    # negative, so clamp it rather than print a number that cannot be true.
+    # The two ends write their rows on their own clocks, so the split is
+    # counted over matched intervals only; what is left is a probe or two
+    # of phase either way, and loss cannot be negative.
     @property
     def fwd_loss_pct(self):
-        if self.rx_recv is None or not self.sent:
+        if self.rx_recv is None or not self.split_sent:
             return None
-        return max(0.0, pct(self.sent - self.rx_recv, self.sent))
+        return loss_of(self.split_sent, self.rx_recv)
 
     @property
     def ret_loss_pct(self):
         if self.rx_recv is None or not self.rx_recv:
             return None
-        return max(0.0, pct(self.rx_recv - self.recv, self.rx_recv))
+        return loss_of(self.rx_recv, self.split_recv)
 
     def rank(self):
         """Worst-first ordering: p99 if we have it, else mean, else loss."""
@@ -2121,10 +2133,168 @@ def read_reports(reports_dir):
     return rows
 
 
-def build_pairs(rows):
+# ---------------------------------------------------------------------------
+# The span every agent was running
+# ---------------------------------------------------------------------------
+#
+# `start` and `stop` reach the hosts over ssh, --jobs at a time, and `run
+# --for` agents each stop --duration after their own start -- so a fleet's
+# agents come up and go down seconds apart.  A probe to a peer not yet up,
+# or already gone, is counted sent by its sender and never answered, and
+# the peer, not running, writes no row to say it never arrived: summed
+# over the whole report, those seconds read as forward loss on a network
+# that lost nothing.  A summary is therefore made of the rows written while
+# every agent of the fleet's start and stop was running, read off the
+# reports themselves.
+#
+# Hosts start within seconds of each other.  One further apart than this
+# from the rest is not the fleet starting or stopping -- it came late, or
+# died -- and the loss to it stays in.  15 s is past the 10 s ConnectTimeout
+# a slow ssh may take and still start its agent; three intervals is past
+# the one interval by which the last rows of reports collected mid-run
+# differ, whatever the interval.
+EDGE_GAP_MIN = 15.0
+
+
+def report_interval(rows):
+    """The agents' report interval, read off the reports: the typical step
+    between one host's consecutive row stamps.  The last row an agent
+    writes on its way out, and an interval stretched by a stalled loop,
+    are the outliers a median ignores."""
+    seen = {}
+    for r in rows:
+        t = _int(r.get("ts"))
+        if t and r.get("host"):
+            seen.setdefault(r["host"], set()).add(t)
+    steps = []
+    for times in seen.values():
+        ts = sorted(times)
+        steps.extend(b - a for a, b in zip(ts, ts[1:]))
+    if not steps:
+        return DEFAULT_INTERVAL
+    steps.sort()
+    m = len(steps) // 2
+    return steps[m] if len(steps) % 2 else (steps[m - 1] + steps[m]) / 2.0
+
+
+def host_spans(rows):
+    """host -> (first, last) row stamp, for every host that wrote a row."""
+    spans = {}
+    for r in rows:
+        host, t = r.get("host"), _int(r.get("ts"))
+        if not host or not t:
+            continue
+        lo, hi = spans.get(host, (t, t))
+        spans[host] = (min(lo, t), max(hi, t))
+    return spans
+
+
+def steady_span(rows, interval=None):
+    """(start, end): every row stamped strictly between the two was written
+    while every agent of the fleet's start and stop was running.  None
+    when there is no fleet to wait for.
+
+    A row stamped t covers the interval before t, and an agent's first row
+    is one interval after it started.  `start` is the first row of the
+    last host of the fleet's start: a row stamped later began after that
+    host was up.  `end` is the last row of the first host of the fleet's
+    stop, written as it went down: a row stamped earlier ended before it
+    did.  Strictly, because a stamp is truncated to the second, so a row
+    stamped in the same second as either edge may lie on the wrong side.
+    """
+    spans = host_spans(rows)
+    if len(spans) < 2:
+        return None
+    gap = max(EDGE_GAP_MIN, 3 * (interval or report_interval(rows)))
+
+    def edge(times):
+        # From the fleet's end of the run inwards, as far as the times come
+        # close together: a host further off is not part of the fleet.
+        at = times[0]
+        for t in times[1:]:
+            if abs(t - at) >= gap:
+                break
+            at = t
+        return at
+    start = edge(sorted(lo for lo, _ in spans.values()))
+    end = edge(sorted((hi for _, hi in spans.values()), reverse=True))
+    return (start, end) if start < end else None
+
+
+def window_rows(rows):
+    """The rows a summary is made of, and what was left out.
+
+    Returns (rows, trim).  trim is None when there was nothing to trim or
+    trimming would leave no probe rows -- a run too short to have an
+    interval with every agent up -- and then every row is used, as before.
+    """
+    span = steady_span(rows)
+    if span:
+        lo, hi = span
+        kept = [r for r in rows if lo < _int(r.get("ts")) < hi]
+        if any(r.get("dir") == "tx" for r in kept):
+            stamps = [_int(r.get("ts")) for r in rows if _int(r.get("ts"))]
+            kept_ts = [_int(r.get("ts")) for r in kept]
+            return kept, {
+                "first": min(kept_ts), "last": max(kept_ts),
+                "left_out_start": min(kept_ts) - min(stamps),
+                "left_out_stop": max(stamps) - max(kept_ts),
+            }
+    return rows, None
+
+
+def trim_note(trim):
+    """What window_rows left out, in words, or ''."""
+    if not trim:
+        return ""
+    parts = []
+    if trim["left_out_start"]:
+        parts.append("the first %s, while the agents started"
+                     % fmt_secs(trim["left_out_start"]))
+    if trim["left_out_stop"]:
+        parts.append("the last %s, while they stopped"
+                     % fmt_secs(trim["left_out_stop"]))
+    return ("measured while every agent was running; left out: %s"
+            % " and ".join(parts)) if parts else ""
+
+
+def _match_stamps(sender, receiver, tol):
+    """Pair the sender's row stamps with the receiver's, in order.
+
+    The two agents write on their own clocks, so the receiver's row and
+    the sender's row cover the same length of time shifted by the phase
+    between them.  Matched one for one, a run of rows on each side spans
+    the same number of intervals, and a paced sender sends as many probes
+    in the one as in the other -- so the counts compare.  A row with no
+    partner within `tol` covers seconds the other end did not report.
+    """
+    out = []
+    i = j = 0
+    while i < len(sender) and j < len(receiver):
+        d = receiver[j] - sender[i]
+        if abs(d) <= tol:
+            out.append((sender[i], receiver[j]))
+            i += 1
+            j += 1
+        elif d < 0:
+            j += 1
+        else:
+            i += 1
+    return out
+
+
+def build_pairs(rows, spans=None):
+    """Per-pair stats from report rows.
+
+    `spans` is host_spans() of the whole report, when `rows` is a window
+    cut from it: a host's first row and its last border the time it was
+    not running -- the last may be the short one it wrote on its way out
+    -- so neither enters the forward/return split.
+    """
     pairs = {}
     hosts = set()
     cpu = Agg()
+    tx_at, rx_at = {}, {}
     for r in rows:
         host, peer, d = r.get("host"), r.get("peer"), r.get("dir")
         if not host:
@@ -2146,6 +2316,11 @@ def build_pairs(rows):
             ps.probe = r.get("probe") or ps.probe
             ps.sent += _int(r.get("sent"))
             ps.recv += _int(r.get("recv"))
+            t = _int(r.get("ts"))
+            if t:
+                at = tx_at.setdefault((host, peer), {})
+                s, g = at.get(t, (0, 0))
+                at[t] = (s + _int(r.get("sent")), g + _int(r.get("recv")))
             ps.p50.add(r.get("rtt_p50_us"), keep=True)
             ps.p99.add(r.get("rtt_p99_us"), keep=True)
             ps.avg.add(r.get("rtt_avg_us"), keep=True)
@@ -2160,8 +2335,57 @@ def build_pairs(rows):
         elif d == "rx":
             # The receiver's own count of what arrived, which is what makes
             # the forward/return loss split possible.
-            ps = pairs.setdefault((peer, host), PairStat(peer, host))
-            ps.rx_recv = (ps.rx_recv or 0) + _int(r.get("recv"))
+            pairs.setdefault((peer, host), PairStat(peer, host))
+            t = _int(r.get("ts"))
+            if t:
+                at = rx_at.setdefault((peer, host), {})
+                at[t] = at.get(t, 0) + _int(r.get("recv"))
+
+    # The split, over the intervals both ends reported.  Summing every rx
+    # row against every tx row compared seconds the receiver counted with
+    # seconds the sender did -- a whole interval apart at either end of a
+    # window, which read as loss one way or the other.
+    #
+    # The receiver's intervals are its own row stamps, whatever the row:
+    # an agent writes its host row every interval, and an rx row for a
+    # peer from the first probe that arrives, so an interval with no rx
+    # row for the sender is one in which nothing from it arrived.  A
+    # sender's interval that fell wholly outside the receiver's run
+    # reached nobody, and is forward loss as plainly as anything is.  A
+    # receiver with no report at all is not known to have been down --
+    # its report may simply not have been collected -- so its pairs have
+    # no split, as before.
+    if spans is None:
+        spans = host_spans(rows)
+    stamps = {}
+    for r in rows:
+        t = _int(r.get("ts"))
+        if t and r.get("host"):
+            stamps.setdefault(r["host"], set()).add(t)
+    step = report_interval(rows)
+    tol = step / 2.0 + 1                       # + the second a stamp drops
+    for key, tx in tx_at.items():
+        src, dst = key
+        ps = pairs[key]
+        if ps.probe == "ping" or dst not in spans:
+            continue
+        rx = rx_at.get(key, {})
+        sender = [t for t in sorted(tx) if t not in spans.get(src, ())]
+        receiver = [t for t in sorted(stamps.get(dst, ()))
+                    if t not in spans[dst]]
+        matched = _match_stamps(sender, receiver, tol)
+        for a, b in matched:
+            ps.split_sent += tx[a][0]
+            ps.split_recv += tx[a][1]
+            ps.rx_recv = (ps.rx_recv or 0) + rx.get(b, 0)
+        up_from, up_to = spans[dst]
+        up_from -= step                        # its first row is one in
+        done = set(a for a, _ in matched)
+        for a in sender:
+            if a not in done and (a < up_from or a - step > up_to):
+                ps.split_sent += tx[a][0]
+                ps.split_recv += tx[a][1]
+                ps.rx_recv = ps.rx_recv or 0
     return pairs, sorted(hosts), cpu
 
 
@@ -2172,19 +2396,45 @@ def _int(v):
         return 0
 
 
-def spread_under_load(rows, split_ts, src, dst, factor):
+def split_at_load(rows, split_ts, end_ts=None):
+    """(idle, loaded): the rows either side of the load, and no row that
+    spans an edge of it.
+
+    A row stamped t covers the time since its host's previous row.  Rows
+    stamped before the split are idle.  A host's first row stamped at or
+    after it began before it, so it is counted on neither side; the
+    host's later rows are loaded.  With the load's end, a row is loaded
+    only if it was written before the load ended: the row that spans the
+    end, and every one after it, measured an idle path again.  Counted as
+    loaded, those rows watered the rise down.  All to the second, which
+    is what the stamps carry.
+    """
+    straddle = {}
+    for r in rows:
+        t, host = _int(r.get("ts")), r.get("host")
+        if host and t >= split_ts and t < straddle.get(host, t + 1):
+            straddle[host] = t
+    idle, load = [], []
+    for r in rows:
+        t = _int(r.get("ts"))
+        if not t:
+            continue
+        if t < split_ts:
+            idle.append(r)
+        elif t > straddle.get(r.get("host"), t) and \
+                (end_ts is None or t < end_ts):
+            load.append(r)
+    return idle, load
+
+
+def spread_under_load(rows, split_ts, src, dst, factor, end_ts=None):
     """Is that member always sick, or only sick when the link is busy?
 
     The two are different faults with different fixes, and the rows to
     tell them apart are already on disk: the same split `--baseline`
     takes, applied to the flow rows instead of the pair rows.
     """
-    idle, load = [], []
-    for r in rows:
-        ts = _int(r.get("ts"))
-        if not ts:
-            continue
-        (idle if ts < split_ts else load).append(r)
+    idle, load = split_at_load(rows, split_ts, end_ts)
     if not idle or not load:
         return None
 
@@ -2381,7 +2631,7 @@ def _pair_p99(ps):
     return ps.p99.mean if ps.p99.n else None
 
 
-def under_load(rows, split_ts):
+def under_load(rows, split_ts, end_ts=None):
     """The same pairs, before and after the load started.
 
     Nothing extra is measured and nothing is measured twice: the agents
@@ -2393,12 +2643,7 @@ def under_load(rows, split_ts):
     Returns None when either window is empty, because a comparison with
     one side missing is not a quiet zero -- it is not a comparison.
     """
-    idle_rows, load_rows = [], []
-    for r in rows:
-        ts = _int(r.get("ts"))
-        if not ts:
-            continue
-        (idle_rows if ts < split_ts else load_rows).append(r)
+    idle_rows, load_rows = split_at_load(rows, split_ts, end_ts)
     if not idle_rows or not load_rows:
         return None
 
@@ -2446,7 +2691,7 @@ def build_hops(rows):
     return hops
 
 
-def locate_queue(rows, split_ts, factor=2.0):
+def locate_queue(rows, split_ts, factor=2.0, end_ts=None):
     """Which hop the latency appeared at, idle window against loaded.
 
     `under_load` says a pair got slower; this says *where*.  A queue fills
@@ -2460,12 +2705,7 @@ def locate_queue(rows, split_ts, factor=2.0):
     and those are different findings.  Returns [] rather than a guess when
     a path could not be timed at all.
     """
-    idle_rows, load_rows = [], []
-    for r in rows:
-        ts = _int(r.get("ts"))
-        if not ts:
-            continue
-        (idle_rows if ts < split_ts else load_rows).append(r)
+    idle_rows, load_rows = split_at_load(rows, split_ts, end_ts)
     if not idle_rows or not load_rows:
         return []
     idle, load = build_hops(idle_rows), build_hops(load_rows)
@@ -2664,7 +2904,7 @@ def _ratio(idle, loaded):
     return loaded / idle
 
 
-def render_under_load(recs, factor, split_ts):
+def render_under_load(recs, factor, split_ts, end_ts=None):
     """The idle-versus-loaded section, and the finding it carries.
 
     This is the measurement the rest of the toolchain does not have.
@@ -2673,8 +2913,17 @@ def render_under_load(recs, factor, split_ts):
     and that is the number everything else sharing the path actually
     experiences.
     """
-    lines = ["", "  UNDER LOAD   idle -> loaded, split at %s"
-             % time.strftime("%H:%M:%S", time.localtime(split_ts)), ""]
+    def clock(t):
+        return time.strftime("%H:%M:%S", time.localtime(t))
+    head = "  UNDER LOAD   idle -> loaded, split at %s" % clock(split_ts)
+    # Say what was done to the data: the rows that span an edge of the
+    # load are on neither side, so a reader can find where they went.
+    note = "(the interval spanning the split is on neither side)"
+    if end_ts is not None:
+        head += ", load ended %s" % clock(end_ts)
+        note = ("(intervals spanning either edge, and any after the end, "
+                "are on neither side)")
+    lines = ["", head, "               " + note, ""]
     worst = None
     for r in sorted(recs, key=lambda x: -(_ratio(x["idle_p99"],
                                                  x["load_p99"]) or 0)):
@@ -2855,7 +3104,14 @@ def cmd_summarize(args, mesh=None, fleet=None):
     rows = read_reports(args.reports)
     if not rows:
         die("no rows in %s -- did the agents run?" % args.reports, 1)
-    pairs, hosts, cpu = build_pairs(rows)
+    # Only the span every agent was running: the seconds while the fleet
+    # came up and went down are not the network.  `ts` below still spans
+    # every row, so the header says how long the reports run, and the
+    # note under it says what was left out.
+    spans = host_spans(rows)
+    ts = [_int(r.get("ts")) for r in rows if r.get("ts")]
+    rows, trim = window_rows(rows)
+    pairs, hosts, cpu = build_pairs(rows, spans)
     if not pairs:
         die("reports contain no probe rows", 1)
 
@@ -2875,18 +3131,20 @@ def cmd_summarize(args, mesh=None, fleet=None):
     sent = sum(p.sent for p in measured)
     recv = sum(p.recv for p in measured)
     fwd_known = [p for p in udp if p.fwd_loss_pct is not None]
-    fwd_sent = sum(p.sent for p in fwd_known)
+    fwd_sent = sum(p.split_sent for p in fwd_known)
     fwd_seen = sum(p.rx_recv for p in fwd_known)
+    fwd_back = sum(p.split_recv for p in fwd_known)
 
     worst = sorted(measured, key=lambda p: -p.rank())
     dur = ""
-    ts = [_int(r.get("ts")) for r in rows if r.get("ts")]
     if ts:
         dur = fmt_secs(max(max(ts) - min(ts), 1))
 
     log("")
     log("%s summarize -- %d hosts, %d measured pairs, reports span %s"
         % (PROG, len(hosts), len(measured), dur or "one interval"))
+    if trim:
+        log("(%s)" % trim_note(trim))
     log("")
     hi = max((_pair_p50(p) or 0) for p in measured) if measured else 0
     log("  BASELINE   p50 %s across all pairs   worst pair p50 %s"
@@ -2895,10 +3153,10 @@ def cmd_summarize(args, mesh=None, fleet=None):
         % (fmt_us(jit.median()), fmt_us(jit.max)))
     if fwd_known:
         log("  LOSS       %.2f%% overall  (%.2f%% forward, %.2f%% on the way back)"
-            % (pct(sent - recv, sent), pct(fwd_sent - fwd_seen, fwd_sent),
-               pct(fwd_seen - sum(p.recv for p in fwd_known), fwd_seen)))
+            % (loss_of(sent, recv), loss_of(fwd_sent, fwd_seen),
+               loss_of(fwd_seen, fwd_back)))
     else:
-        log("  LOSS       %.2f%% overall" % pct(sent - recv, sent))
+        log("  LOSS       %.2f%% overall" % loss_of(sent, recv))
     mtus = [p for p in udp if p.path_mtu]
     if mtus:
         black = [p for p in udp if p.mtu_state == "blackhole"]
@@ -3011,15 +3269,17 @@ def cmd_summarize(args, mesh=None, fleet=None):
         log("")
 
     split = getattr(args, "load_split", None)
+    load_end = getattr(args, "load_end", None)
     if split:
-        recs = under_load(rows, int(split))
+        recs = under_load(rows, int(split), load_end)
         if recs is None:
             log("  UNDER LOAD   nothing to compare: the split at %s leaves "
                 "one side of it empty" % int(split))
             log("")
         else:
             lines, findings = render_under_load(
-                recs, getattr(args, "bloat_factor", 4.0), int(split))
+                recs, getattr(args, "bloat_factor", 4.0), int(split),
+                load_end)
             for line in lines:
                 log(line)
             log("")
@@ -3030,7 +3290,8 @@ def cmd_summarize(args, mesh=None, fleet=None):
     # After under_load, which says a pair got slower: this says where.
     if split:
         placed = locate_queue(rows, int(split),
-                              getattr(args, "bloat_factor", 4.0) / 2.0)
+                              getattr(args, "bloat_factor", 4.0) / 2.0,
+                              load_end)
         if placed:
             for line in render_queue_at_hop(placed, args.top):
                 log(line)
@@ -3056,7 +3317,7 @@ def cmd_summarize(args, mesh=None, fleet=None):
         worst = spread[0]
         if split and worst["buckets"] and (worst["ratio"] or 0) >= factor:
             extra = spread_under_load(rows, int(split), worst["src"],
-                                      worst["dst"], factor)
+                                      worst["dst"], factor, load_end)
             if extra:
                 log("    %s" % _wrap_text(extra, 4))
         log("")
@@ -3065,7 +3326,7 @@ def cmd_summarize(args, mesh=None, fleet=None):
         _write_grids(args.grid, pairs, hosts)
         log("[%s] grids written to %s/" % (PROG, args.grid))
     if args.json:
-        _emit_json(measured, med, jit, sent, recv, black)
+        _emit_json(measured, med, jit, sent, recv, black, trim)
     return 1 if uncollected else 0
 
 
@@ -3107,14 +3368,22 @@ def _write_grids(outdir, pairs, hosts):
     grid("asym_grid.csv", asym)
 
 
-def _emit_json(measured, med, jit, sent, recv, black):
+def _emit_json(measured, med, jit, sent, recv, black, trim=None):
     import json
     out = {
         "pairs": len(measured),
         "p50_median_us": med.median(),
         "p50_worst_us": med.max,
         "jitter_median_us": jit.median(),
-        "loss_pct": pct(sent - recv, sent),
+        "loss_pct": loss_of(sent, recv),
+        # What the numbers are of: the stamps of the first and last rows
+        # counted, and the seconds left out either side while the fleet
+        # started and stopped.  null when every row was counted.
+        "window": None if not trim else {
+            "first_row_ts": trim["first"], "last_row_ts": trim["last"],
+            "left_out_start_s": trim["left_out_start"],
+            "left_out_stop_s": trim["left_out_stop"],
+        },
         "blackhole_pairs": [[p.src, p.dst] for p in black],
         "detail": [
             {"src": p.src, "dst": p.dst, "probe": p.probe,
@@ -3157,8 +3426,9 @@ def cmd_run(args, mesh=None, fleet=None):
         if baseline:
             log("[%s] idle baseline for %s" % (PROG, fmt_secs(baseline)))
             time.sleep(baseline)
-            # Taken after the idle window and before the load, so every
-            # interval either side of it belongs to exactly one of them.
+            # Taken after the idle window and before the load.  The
+            # interval each agent is in at this moment spans both, so
+            # split_at_load counts it on neither side.
             split = int(time.time())
         if load_cmd:
             log("[%s] probing while: %s" % (PROG, " ".join(load_cmd)))
@@ -3168,11 +3438,17 @@ def cmd_run(args, mesh=None, fleet=None):
                 cmd_stop(args, mesh, fleet)
                 die("cannot run %s: %s" % (load_cmd[0], exc))
             child.wait()
+            # The agents keep probing until the reports are collected, and
+            # what they measure after this is an idle path again: the
+            # loaded window ends here, not at collection.
+            args.load_end = int(time.time())
         else:
             log("[%s] probing for %s" % (PROG, fmt_secs(args.for_secs)))
             time.sleep(args.for_secs + 1.0)
     except KeyboardInterrupt:
         log("[%s] interrupted -- summarizing what we have" % PROG)
+        if load_cmd and split is not None:
+            args.load_end = int(time.time())
 
     if split is not None:
         args.load_split = split
@@ -3625,6 +3901,9 @@ def _add_summary_flags(p):
     p.add_argument("--load-split", type=float, default=None, metavar="TS",
                    help="epoch second the load began: report latency "
                         "before it against latency after")
+    p.add_argument("--load-end", type=float, default=None, metavar="TS",
+                   help="epoch second the load ended: rows after it are "
+                        "not counted as loaded (run sets both)")
     p.add_argument("--bloat-factor", type=float, default=4.0, metavar="F",
                    help="p99 this many times its idle value under load "
                         "is the finding")

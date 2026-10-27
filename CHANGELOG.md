@@ -501,6 +501,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`netmesh` read agents starting and stopping apart as loss.** `start`
+  and `stop` reach the hosts over ssh, `--jobs` at a time, and `run --for`
+  agents each stop `--for` seconds after their own start, so a fleet comes
+  up and goes down over seconds. A probe to a peer not yet up, or already
+  gone, was counted sent and never answered, and the peer -- not running
+  -- wrote no row to say it never arrived: one agent of three starting one
+  report interval late and stopping one early read as 5.88% loss over a
+  clean minute, 16.67% on each pair into it, and the diagnosis sent you to
+  its NIC; two real agents on loopback started 3 s apart read 23.86%.
+  `summarize` (and so `check` and `run`) now counts only the rows written
+  while every agent of the fleet's start and stop was running, read off the
+  reports, and says what it left out under its header and in `--json`'s
+  new `window`. A host 15 s or more (three report intervals, if longer)
+  apart from the rest came late or died, and the loss to it stays in.
+  Three things rode on the same edges:
+
+  - *The forward/return split compared different seconds.* Each agent
+    writes on its own clock, so the receiver's rows and the sender's are
+    up to an interval apart; summed across a window they read as loss one
+    way or the other. Rows are now matched one for one, and only matched
+    intervals -- and those in which the receiver was not running at all --
+    enter the split.
+  - *Start-up loss counted as idle loss.* With `--baseline` the fleet
+    starts inside the idle window, so a 2% loss that only appeared under
+    load sat under 16.67% of start-up "idle loss" and was never reported.
+  - *The loaded window was not only the load.* The interval spanning the
+    split began idle, and the agents go on probing after the load command
+    exits until the reports are collected; both were counted as loaded and
+    watered a 20x rise in p99 down to 7x. Each agent's interval spanning
+    the split is now counted on neither side, and `run` records when the
+    load ended -- the new `summarize --load-end TS` -- so rows from then
+    on are not loaded either.
+
 - **`reckon --ramp` held its model to less than it said.** Four gaps,
   each reproduced before it was fixed:
 

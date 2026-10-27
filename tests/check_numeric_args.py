@@ -75,6 +75,7 @@ ZERO_IS_MEANINGFUL = {
     ("netmesh", "--duration"): "0 means derive it from --for",
     ("netmesh", "--baseline"): "0 means no idle baseline",
     ("netmesh", "--load-split"): "an epoch stamp, not a setting",
+    ("netmesh", "--load-end"): "an epoch stamp, not a setting",
     ("netmesh", "--lines"): "0 asks for no log lines",
     ("netmesh", "--top"): "0 shows no rows",
     ("netmesh", "--worst"): "0 shows no rows",

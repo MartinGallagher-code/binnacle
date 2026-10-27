@@ -22,6 +22,7 @@ have to see them.
 
 ```text
 netmesh summarize -- 5 hosts, 20 measured pairs, reports span 30s
+(measured while every agent was running; left out: the first 5s, while the agents started and the last 5s, while they stopped)
 
   BASELINE   p50 214us across all pairs   worst pair p50 1.9ms
   JITTER     median 11us                  worst pair 640us
@@ -195,6 +196,30 @@ that host's outbound path being slower than its inbound.
 
 ## What summarize computes
 
+- **Only the span every agent was running.** `start` and `stop` reach the
+  hosts over ssh, `--jobs` at a time, and `run --for` agents each stop
+  `--for` seconds after their own start, so a fleet comes up and goes
+  down over seconds. A probe to a peer not yet up, or already gone, is
+  sent and never answered, and the peer — not running — writes no row to
+  say it never arrived: counted, those seconds read as forward loss on a
+  network that lost nothing. One agent of three starting one interval
+  late and stopping one early read as 5.88% loss over a clean minute, and
+  the diagnosis blamed its NIC. The summary is made of the rows stamped
+  after the last agent of the fleet's start wrote its first row and
+  before the first agent of its stop wrote its last — a row covers the
+  interval before its stamp, and an agent's first row is one interval
+  after it started — and says what it left out under the header. A host
+  15 s or more (three report intervals, if longer) apart from the rest
+  is not the fleet starting or stopping: it came late, or died, and the
+  loss to it stays in. If no row falls inside, every row is used.
+- **The forward/return split compares the same seconds.** Each agent
+  writes on its own clock, so the receiver's rows and the sender's are up
+  to an interval apart; summed across a window they compared different
+  seconds. Rows are matched one for one, nearest stamp first, and only
+  matched intervals enter the split — plus any interval in which the
+  receiver was not running at all, which is forward loss as plainly as
+  anything is. A host's first and last rows border the time it was not
+  running, and stay out of the split.
 - **`QUEUE AT HOP`** — with `--hops`, the first hop whose own delay rose
   under load: the buffer that filled, rather than the pair that felt it.
 - **`PATH CHANGED`** — replies for a pair came back over more than one hop
@@ -432,7 +457,8 @@ Probe idle for twenty seconds, note the split, then keep probing while the
 load runs. The report gains a section comparing the two windows:
 
 ```text
-  UNDER LOAD   idle -> loaded, split at 14:22:31
+  UNDER LOAD   idle -> loaded, split at 14:22:31, load ended 14:23:40
+               (intervals spanning either edge, and any after the end, are on neither side)
 
     web03 -> db01     p50    139us -> 8.4ms    (60x)   p99    210us -> 42.1ms  (200x)
 
@@ -457,6 +483,23 @@ netmesh summarize --reports ./reports --load-split 1786741765
 ```
 
 which is the same replay property `--from-facts` gives the diagnostic tools.
+
+### The edges of the load
+
+A row covers the interval before its stamp, so each agent's first row
+stamped at or after the split began idle: it is counted on neither side.
+And the agents go on probing after the load command exits, until the
+reports are collected, so `run` also notes when the load ended
+(`--load-end`): the row spanning the end, and every row after it, measured
+an idle path again and are not counted as loaded. Counted, they watered a
+20x rise in p99 down to 7x in the test that reproduces it. The idle side is
+also only the span every agent was running, so the seconds the fleet took
+to start do not read as idle loss and hide loss that appears under load.
+To re-split a run by hand, pass both:
+
+```bash
+netmesh summarize --reports ./reports --load-split 1786741765 --load-end 1786741825
+```
 
 ### Loss that only appears under load
 

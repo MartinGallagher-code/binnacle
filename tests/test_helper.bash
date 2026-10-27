@@ -707,6 +707,128 @@ with io.open(os.path.join(d, "web03.csv"), "w", newline="",
 EOF
 }
 
+# netmesh_fleet_reports DIR HOST:START:STOP... [loss=SRC>DST:FROM:TO:PCT]...
+#                                              [p99=SRC>DST:FROM:TO:US]...
+#
+# A full mesh of agents that each ran from START to STOP (seconds after
+# 1700000000), written the way real agents write it: a row every 5 s from
+# each agent's own start, each covering the 5 s before its stamp, at
+# 10 probes per second per pair.  Probes are modelled one by one, so a
+# probe sent to a peer that was not yet up, or already gone, is counted
+# sent by its sender and never arrives -- and the peer, not running,
+# writes no row about it.  That is the whole point: a clean network on
+# which the agents merely started and stopped apart.
+#
+# loss= drops PCT% of SRC's probes to DST sent between FROM and TO, on
+# the way out.  p99= gives SRC -> DST rows stamped after FROM and up to
+# TO that p99 (default 400 us).  One file per host, as `collect` leaves
+# them.
+netmesh_fleet_reports() {
+    "$PY" - "$@" <<'EOF'
+import csv, io, os, sys
+BASE, STEP, PPS = 1700000000, 5, 10          # STEP in s; probes every 1/PPS
+d = sys.argv[1]
+up, loss, p99 = {}, [], []
+for arg in sys.argv[2:]:
+    kind, _, spec = arg.partition("=")
+    if spec:
+        pair, frm, to, val = spec.split(":")
+        src, dst = pair.split(">")
+        (loss if kind == "loss" else p99).append(
+            (src, dst, float(frm), float(to), float(val)))
+    else:
+        h, s, e = arg.split(":")
+        up[h] = (int(s) * PPS, int(e) * PPS)   # in probe ticks
+hosts = sorted(up)
+
+def stamps(h):
+    s, e = up[h]
+    out, t = [], s + STEP * PPS
+    while t <= e:
+        out.append(t)
+        t += STEP * PPS
+    if not out or out[-1] < e:
+        out.append(e)                          # the row written on the way out
+    return out
+
+def row_of(h, tick):
+    """The stamp of h's row covering tick, or None if h was not running."""
+    s, e = up[h]
+    if not s <= tick < e:
+        return None
+    for t in stamps(h):
+        if tick < t:
+            return t
+    return None
+
+# Count every probe into its sender's tx row and its receiver's rx row.
+tx, rx = {}, {}
+for a in hosts:
+    for b in hosts:
+        if a == b:
+            continue
+        dropped = 0.0
+        for tick in range(*up[a]):
+            ta = row_of(a, tick)
+            sent = tx.setdefault((a, b, ta), [0, 0])
+            sent[0] += 1
+            tb = row_of(b, tick)
+            if tb is None:
+                continue                       # b is not running: nothing lands
+            pct = sum(v for s, dd, f, t, v in loss
+                      if (s, dd) == (a, b) and f * PPS <= tick < t * PPS)
+            dropped += pct / 100.0
+            if dropped >= 1.0:
+                dropped -= 1.0
+                continue
+            sent[1] += 1
+            rx[(b, a, tb)] = rx.get((b, a, tb), 0) + 1
+
+FIELDS = ["ts", "host", "dir", "peer", "probe", "size", "target_pps",
+          "sent", "recv", "loss_pct", "rtt_min_us", "rtt_avg_us",
+          "rtt_p50_us", "rtt_p99_us", "rtt_max_us", "jitter_us",
+          "path_mtu", "mtu_state", "agent_cpu_pct", "note", "rx_usecs"]
+os.makedirs(d, exist_ok=True)
+for h in hosts:
+    with io.open(os.path.join(d, "%s.csv" % h), "w", newline="",
+                 encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=FIELDS, restval="",
+                           lineterminator="\n")
+        w.writeheader()
+        seen = set()
+        for t in stamps(h):
+            ts = BASE + t // PPS
+            for b in hosts:
+                if b == h:
+                    continue
+                sent, got = tx.get((h, b, t), [0, 0])
+                hi = [v for s, dd, f, to, v in p99
+                      if (s, dd) == (h, b) and f < t / PPS <= to]
+                q99 = hi[-1] if hi else 400
+                rtt = got > 0
+                w.writerow({"ts": ts, "host": h, "dir": "tx", "peer": b,
+                            "probe": "udp", "size": 64, "target_pps": PPS,
+                            "sent": sent, "recv": got,
+                            "loss_pct": "%.3f" % (100.0 * (sent - got) / sent)
+                            if sent else "",
+                            "rtt_min_us": 150 if rtt else "",
+                            "rtt_avg_us": 200 if rtt else "",
+                            "rtt_p50_us": 200 if rtt else "",
+                            "rtt_p99_us": "%g" % q99 if rtt else "",
+                            "rtt_max_us": "%g" % q99 if rtt else "",
+                            "jitter_us": 10 if rtt else ""})
+            for a in hosts:
+                n = rx.get((h, a, t), 0)
+                if n:
+                    seen.add(a)
+                if a in seen:                  # as the agent: once heard from
+                    w.writerow({"ts": ts, "host": h, "dir": "rx", "peer": a,
+                                "probe": "udp", "sent": n, "recv": n})
+            w.writerow({"ts": ts, "host": h, "dir": "host", "peer": "*",
+                        "probe": "udp", "agent_cpu_pct": "1.0"})
+EOF
+}
+
 # free_port -- a UDP port nothing is listening on, for the responder.
 free_port() {
     "$PY" - <<'EOF'
