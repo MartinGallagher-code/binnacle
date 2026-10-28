@@ -260,6 +260,27 @@ The genuinely useful hop analysis is **divergence**: when `a→b` is sick and
 `a→c` is healthy, print the two hop lists side by side and mark the first
 hop where they differ. That hop is where to look.
 
+### Which NIC: --bind
+
+`start`, `run` and `agent` take `--bind` as `mx` and `iperf-orchestrator`
+do: an interface name (`data`, `eth1`) or part of an address (`10.20.`),
+matched against each host's own `ip -o -4 addr show`, or a whole IPv4
+address taken as it is. For a fleet reached over a management NIC whose
+probes should ride another:
+
+```bash
+netmesh run --mesh mesh.csv --for 60 --bind data
+```
+
+`start` looks the pattern up on every host before anything starts, and
+stops naming any host where it matches nothing. Each host then gets a mesh
+that names its peers by their matching addresses: binding a socket picks
+the address probes leave from, not the route to a peer's management
+address, so the peers' addresses have to change too. The mesh on disk
+keeps the addresses ssh reaches the hosts at. An agent started by hand
+whose `--bind` is not the address its mesh gives peers for it is refused,
+since every probe would arrive where nothing is listening.
+
 ## The mesh file
 
 Same grammar as `mx`'s `matrix.csv`, so anyone who knows one knows the

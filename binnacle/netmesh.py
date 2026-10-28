@@ -879,6 +879,65 @@ def resolve_addr(addr):
         return None, getattr(exc, "strerror", None) or str(exc)
 
 
+def _is_ipv4(text):
+    parts = text.split(".")
+    return len(parts) == 4 and all(p.isdigit() and int(p) <= 255 for p in parts)
+
+
+# The one line every host runs to answer "which of my addresses does SPEC
+# name?" -- the same substring match against `ip -o -4 addr show` that
+# mx and iperf-orchestrator use, so one --bind means one NIC to all three.
+BIND_SCRIPT = ("ip -o -4 addr show 2>/dev/null | grep -F -m1 -- %s | "
+               "awk '{print $4}' | cut -d/ -f1")
+
+
+def resolve_bind(spec):
+    """--bind SPEC as an address to bind to: a whole IPv4 address as it
+    is, anything else -- an interface name (eth1, data) or part of an
+    address (10.20.) -- matched against this host's `ip -o -4 addr show`,
+    as mx and iperf-orchestrator read their --bind.  Returns (ip, iface);
+    iface is '' for an address given whole."""
+    if not spec or _is_ipv4(spec):
+        return spec, ""
+    try:
+        out = subprocess.check_output(["ip", "-o", "-4", "addr", "show"],
+                                      stderr=subprocess.DEVNULL,
+                                      universal_newlines=True)
+    except (OSError, subprocess.CalledProcessError):
+        die("--bind %r: `ip -o -4 addr show` failed, so it cannot be "
+            "matched to an interface -- is iproute2 installed? A whole "
+            "IPv4 address is taken as it is." % spec)
+    for line in out.splitlines():
+        if spec in line:
+            parts = line.split()
+            if len(parts) >= 4:
+                return parts[3].split("/")[0], parts[1]
+    die("--bind %r matches no interface here (it is matched against "
+        "`ip -o -4 addr show`)" % spec)
+
+
+def check_bind_matches_mesh(mesh, me, bind_ip, spec):
+    """--bind pins this agent's sockets to one address; the mesh says
+    where its peers will send.  If those disagree, every probe arrives at
+    an address nobody is listening on and the run reports 100% loss that
+    has nothing to do with the network -- so refuse to start.
+
+    `netmesh start --bind` avoids this by resolving the pattern on every
+    host and deploying a mesh retargeted at those addresses; this is the
+    safety net for an agent run by hand.
+    """
+    ip, _ = resolve_addr(mesh.addrs[me])
+    if ip is None or ip == bind_ip:
+        return
+    die("--bind %s is %s here, but the mesh tells peers to reach %s at %s: "
+        "every probe would arrive at an address this agent is not "
+        "listening on, 100%% loss before the network is involved. Start "
+        "through `netmesh start --bind %s` (or run), which gives every host "
+        "a mesh of its peers' %s addresses, list those addresses in the "
+        "mesh, or drop --bind."
+        % (spec, bind_ip, me, ip, spec, spec))
+
+
 def _set_df(sock):
     """Ask the kernel for don't-fragment + path-MTU discovery.
 
@@ -1873,11 +1932,68 @@ def _agent_flags(args, mesh):
     return flags
 
 
+def _probe_bind_ips(fleet, spec):
+    """Resolve --bind SPEC on every agent host, against that host's own
+    `ip -o -4 addr show`.  Returns name -> IPv4.  Dies naming every host
+    with no match, before a mesh of agents that cannot hear each other is
+    started."""
+    hosts = fleet.agent_hosts()
+    with ThreadPoolExecutor(max_workers=fleet.jobs) as pool:
+        results = list(pool.map(
+            lambda h: fleet.sh(h, BIND_SCRIPT % shlex.quote(spec), timeout=30),
+            hosts))
+    ips, missing = {}, []
+    for host, (rc, out) in zip(hosts, results):
+        ip = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        if rc != 0 or not _is_ipv4(ip):
+            missing.append(host)
+        else:
+            ips[host] = ip
+    if missing:
+        die("--bind %r matches no interface on %d host(s): %s -- it is "
+            "matched against `ip -o -4 addr show` on each host"
+            % (spec, len(missing), " ".join(missing[:10])))
+    return ips
+
+
+def _stage_mesh(fleet, args, mesh):
+    """The mesh as it lands on the hosts.  With --bind naming an
+    interface or part of an address, every agent host's address in it is
+    replaced by the one --bind finds on that host, so each agent probes its
+    peers on the network it is bound to -- binding alone picks a source
+    address, not the route to a peer's other address.  The mesh on disk
+    keeps the addresses ssh reaches the hosts at; ping-only endpoints run
+    no agent, so they keep theirs.  Returns (path, tmpdir)."""
+    spec = getattr(args, "bind", "")
+    if not spec or _is_ipv4(spec) or fleet.dry_run:
+        return args.mesh, None
+    ips = _probe_bind_ips(fleet, spec)
+    addrs = dict(mesh.addrs)
+    addrs.update(ips)
+    tmpdir = tempfile.mkdtemp(prefix="netmesh-")
+    path = os.path.join(tmpdir, MESH_NAME)
+    write_mesh(path, mesh.hosts, addrs, mesh.ports, mesh.pingonly,
+               mesh.rate, mesh.cfg)
+    changed = sum(1 for h in ips if mesh.addrs[h] != ips[h])
+    log("[%s] --bind %r: each host's mesh names its peers' matching "
+        "addresses (%d of %d changed)" % (PROG, spec, changed, len(ips)))
+    return path, tmpdir
+
+
 def cmd_start(args, mesh=None, fleet=None):
     mesh = mesh or load_mesh(args.mesh)
     fleet = fleet or Fleet(mesh, args)
     src = _agent_source()
     flags = " ".join(shlex.quote(f) for f in _agent_flags(args, mesh))
+    staged, tmpdir = _stage_mesh(fleet, args, mesh)
+    try:
+        return _start(args, fleet, src, flags, staged)
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _start(args, fleet, src, flags, staged):
 
     def deploy(host):
         rc, out = fleet.sh(host, "mkdir -p %s" % shlex.quote(fleet.dir_for(host)))
@@ -1886,7 +2002,7 @@ def cmd_start(args, mesh=None, fleet=None):
         rc, out = fleet.push(host, [src], os.path.basename(src))
         if rc != 0:
             return rc, "copy agent failed: %s" % out
-        rc, out = fleet.push(host, [args.mesh], MESH_NAME)
+        rc, out = fleet.push(host, [staged], MESH_NAME)
         if rc != 0:
             return rc, "copy mesh failed: %s" % out
         return 0, "deployed"
@@ -3833,8 +3949,13 @@ def cmd_agent(args):
     if args.host in mesh.pingonly:
         die("host %r is marked ping-only, so it must not run an agent"
             % args.host)
+    bind_ip, iface = resolve_bind(args.bind)
+    if bind_ip:
+        if iface:
+            log("[%s] --bind %s -> %s (%s)" % (PROG, args.bind, bind_ip, iface))
+        check_bind_matches_mesh(mesh, args.host, bind_ip, args.bind)
     agent = Agent(mesh, args.host, args.dir, args.interval, args.duration,
-                  args.bind)
+                  bind_ip)
     return agent.run()
 
 

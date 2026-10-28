@@ -285,6 +285,86 @@ t_fleet_lifecycle_through_fake_ssh() {
     assert_no_file "$FAKE_ROOT/h1/nmdir"
 }
 
+# --bind as mx and iperf-orchestrator read it: an interface name or part of
+# an address, matched against each host's own `ip -o -4 addr show`. A fake
+# `ip` answers per host from that host's sandbox, with loopback addresses
+# real enough for two agents to probe each other on.
+fake_ip() {
+    cat > "$FAKE_BIN/ip" <<'SHIM'
+#!/bin/bash
+d="$PWD"
+while [ "$(dirname "$d")" != "$FAKE_ROOT" ] && [ "$d" != / ]; do d="$(dirname "$d")"; done
+cat "$d/ip-addrs" 2>/dev/null
+SHIM
+    chmod +x "$FAKE_BIN/ip"
+    export PATH="$FAKE_BIN:$PATH"
+}
+
+t_bind_names_a_nic_on_every_host() {
+    install_fake_ssh
+    fake_ip
+    for h in h1 h2; do fake_host "$h"; done
+    printf '1: lo    inet 127.0.0.1/8 scope host lo\n2: data    inet 127.0.0.41/24 scope global data\n' > "$FAKE_ROOT/h1/ip-addrs"
+    printf '1: lo    inet 127.0.0.1/8 scope host lo\n2: data    inet 127.0.0.42/24 scope global data\n' > "$FAKE_ROOT/h2/ip-addrs"
+    cd "$TEST_TMPDIR"
+    nm gen h1=h1 h2=h2 --mesh m.csv --pps 20 --no-pmtu --port 5466 >/dev/null
+
+    out="$(nm start --mesh m.csv --ssh "$FAKE_BIN/ssh" --scp "$FAKE_BIN/scp" \
+             --remote-dir nmdir --interval 2 --duration 4 --python "$PY" \
+             --bind data 2>&1)"
+    assert_contains "$out" "--bind 'data': each host's mesh names its peers' matching addresses (2 of 2 changed)"
+    # Each host gets a mesh of its peers' data addresses; the one on disk
+    # keeps the names ssh reaches them by.
+    deployed="$(cat "$FAKE_ROOT/h1/nmdir/mesh.csv")"
+    assert_contains "$deployed" "h1=127.0.0.41"
+    assert_contains "$deployed" "h2=127.0.0.42"
+    assert_contains "$(cat m.csv)" "h1=h1"
+    sleep 6
+    # And the agents, bound to those addresses, heard each other.
+    recv="$("$PY" - "$FAKE_ROOT/h1/nmdir/report.csv" <<'PYEOF'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+print(sum(int(r.get("recv") or 0) for r in rows if r.get("peer") == "h2"))
+PYEOF
+)"
+    [ "$recv" -gt 0 ] || fail "h1 heard nothing from h2 over the bound addresses (recv=$recv)"
+    nm clean --mesh m.csv --ssh "$FAKE_BIN/ssh" --scp "$FAKE_BIN/scp" \
+        --remote-dir nmdir --quiet >/dev/null 2>&1
+}
+
+t_bind_that_matches_nothing_starts_nothing() {
+    install_fake_ssh
+    fake_ip
+    for h in h1 h2; do fake_host "$h"; done
+    printf '2: data    inet 127.0.0.41/24 scope global data\n' > "$FAKE_ROOT/h1/ip-addrs"
+    printf '2: mgmt    inet 127.0.0.52/24 scope global mgmt\n' > "$FAKE_ROOT/h2/ip-addrs"
+    cd "$TEST_TMPDIR"
+    nm gen h1=h1 h2=h2 --mesh m.csv --pps 20 --no-pmtu >/dev/null
+    set +e
+    out="$(nm start --mesh m.csv --ssh "$FAKE_BIN/ssh" --scp "$FAKE_BIN/scp" \
+             --remote-dir nmdir --python "$PY" --bind data 2>&1)"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "start went ahead with a host --bind matches nothing on"
+    assert_contains "$out" "--bind 'data' matches no interface on 1 host(s): h2"
+    assert_no_file "$FAKE_ROOT/h1/nmdir/agent.pid"
+}
+
+t_hand_run_agent_bound_where_peers_do_not_send_is_refused() {
+    fake_ip
+    mkdir -p "$FAKE_ROOT/solo"
+    printf '2: data    inet 127.0.0.43/24 scope global data\n' > "$FAKE_ROOT/solo/ip-addrs"
+    cd "$FAKE_ROOT/solo"
+    nm gen a=127.0.0.1:5467 b=127.0.0.1:5468 --mesh m.csv --pps 20 --no-pmtu >/dev/null
+    set +e
+    out="$(nm agent --mesh m.csv --host a --dir . --duration 1 --bind data 2>&1)"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "an agent listening where no peer sends was started"
+    assert_contains "$out" "--bind data is 127.0.0.43 here, but the mesh tells peers to reach a at 127.0.0.1"
+    # A whole address is taken as it is, as ever.
+    nm agent --mesh m.csv --host a --dir . --interval 1 --duration 1 --bind 127.0.0.1 >/dev/null 2>&1 \
+        || fail "--bind 127.0.0.1 stopped working"
+}
+
 t_summarize_reads_fixtures_without_a_network() {
     # Fixture-driven: this is what catches regressions in the analysis.
     cd "$TEST_TMPDIR"
@@ -1260,6 +1340,9 @@ run_test "hostname mesh measures, not 100% loss" t_hostname_addresses_measure_no
 run_test "unresolvable peer is a note"         t_an_unresolvable_peer_is_a_note_not_silence
 run_test "dead peer leaves rtt blank not 0"    t_loss_columns_go_blank_not_zero_when_peer_dies
 run_test "fleet lifecycle through fake ssh"    t_fleet_lifecycle_through_fake_ssh
+run_test "--bind names a NIC on every host"    t_bind_names_a_nic_on_every_host
+run_test "--bind matching nothing starts nothing" t_bind_that_matches_nothing_starts_nothing
+run_test "a hand-run agent bound wrong is refused" t_hand_run_agent_bound_where_peers_do_not_send_is_refused
 run_test "an unreachable host reaches the rc"  t_a_verb_that_could_not_reach_a_host_says_so_in_its_status
 run_test "a reachable fleet still exits zero"  t_a_verb_that_reached_every_host_still_exits_zero
 run_test "impossible numbers are refused"      t_numbers_that_cannot_mean_anything_are_refused
