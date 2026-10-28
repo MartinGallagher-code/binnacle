@@ -501,6 +501,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`netmesh --bind` takes a NIC, as `mx` and `iperf-orchestrator` do.**
+  It was one local address handed to `bind()` as it was, so `--bind data`
+  -- an interface name, which the other two tools read by matching it
+  against each host's `ip -o -4 addr show` -- died with `cannot bind
+  data:5310 -- [Errno -2] Name or service not known`, and no one address
+  could suit a fleet anyway. Now an interface name or part of an address
+  is matched on each host the same way, and a whole IPv4 address is still
+  taken as it is. `start` (and so `run`) looks the pattern up on every
+  host first, stops before anything starts if a host has no match, and
+  deploys a mesh naming each peer's matching address -- binding alone
+  picks a source address, not the route to a peer's other one -- while
+  the mesh on disk keeps the addresses ssh reaches the hosts at. An agent
+  started by hand whose `--bind` is not the address the mesh gives peers
+  for it is refused: every probe would arrive where nothing listens.
 - **`netmesh` read agents starting and stopping apart as loss.** `start`
   and `stop` reach the hosts over ssh, `--jobs` at a time, and `run --for`
   agents each stop `--for` seconds after their own start, so a fleet comes
