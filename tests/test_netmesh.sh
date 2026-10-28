@@ -608,6 +608,12 @@ t_the_queue_is_placed_at_the_first_hop_that_rose() {
         echo "200,a,hop,b,udp,,,1,1,,160,160,160,,160,,,,,,,,,,1,10.0.0.1"
         echo "200,a,hop,b,udp,,,1,1,,1300,1300,1300,,1300,,,,,,,,,,2,10.0.1.1"
         echo "200,a,hop,b,udp,,,1,1,,4450,4450,4450,,4450,,,,,,,,,,3,10.0.2.1"
+        # The row stamped 200 covers 100..200 and so spans the split at
+        # 150: it is counted on neither side.  This one is all load.
+        echo "300,a,tx,b,udp,64,10,100,100,0.000,900,980,980,2200,4000,80,9000,confirmed,,,,,64,0,,"
+        echo "300,a,hop,b,udp,,,1,1,,160,160,160,,160,,,,,,,,,,1,10.0.0.1"
+        echo "300,a,hop,b,udp,,,1,1,,1300,1300,1300,,1300,,,,,,,,,,2,10.0.1.1"
+        echo "300,a,hop,b,udp,,,1,1,,4450,4450,4450,,4450,,,,,,,,,,3,10.0.2.1"
     } > qr/a.csv
     out="$(nm summarize --no-collect --reports qr --mesh nope.csv --load-split 150)"
     assert_contains "$out" "QUEUE AT HOP"
@@ -633,6 +639,10 @@ t_a_hop_that_went_quiet_is_not_called_slow() {
         echo "200,a,tx,b,udp,64,10,100,100,0.000,900,980,980,2200,4000,80,9000,confirmed,,,,,64,0,,"
         echo "200,a,hop,b,udp,,,1,1,,155,155,155,,155,,,,,,,,,,1,10.0.0.1"
         echo "200,a,hop,b,udp,,,1,0,,,,,,,,,,,,,,,,2,10.0.1.1"
+        # As above: 200 spans the split, so the loaded window is 300.
+        echo "300,a,tx,b,udp,64,10,100,100,0.000,900,980,980,2200,4000,80,9000,confirmed,,,,,64,0,,"
+        echo "300,a,hop,b,udp,,,1,1,,155,155,155,,155,,,,,,,,,,1,10.0.0.1"
+        echo "300,a,hop,b,udp,,,1,0,,,,,,,,,,,,,,,,2,10.0.1.1"
     } > qq/a.csv
     out="$(nm summarize --no-collect --reports qq --mesh nope.csv --load-split 150)"
     assert_not_contains "$out" "QUEUE AT HOP"
@@ -1121,6 +1131,123 @@ t_run_measures_an_existing_mesh_and_stops_the_agents() {
     assert_contains "$out" "stop on 2 hosts"
 }
 
+
+# --- the span every agent was running ---------------------------------------
+#
+# `start` and `stop` reach the hosts over ssh, --jobs at a time, and `run
+# --for` agents each stop --duration after their own start, so a fleet's
+# agents come up and go down seconds apart.  A probe to a peer not yet up,
+# or already gone, is counted sent by its sender and never answered -- and
+# the peer, not running, writes no row to say it never arrived.  Summed
+# over the whole report, those seconds read as forward loss on a network
+# that lost nothing.
+
+loss_line() { printf '%s\n' "$1" | grep '^  LOSS'; }
+
+t_agents_that_start_and_stop_apart_are_not_loss() {
+    # One agent of three starts one 5 s interval late and stops one early,
+    # on a minute that lost nothing.  Counted whole, that read as 5.88%
+    # loss overall and 16.67% on each pair into c -- and blamed c's NIC.
+    netmesh_fleet_reports "$TEST_TMPDIR/r" a:0:60 b:0:60 c:5:55
+    out="$(nm summarize --reports "$TEST_TMPDIR/r" --no-collect \
+             --mesh /nonexistent)"
+    assert_contains "$(loss_line "$out")" "LOSS       0.00% overall"
+    assert_not_contains "$out" "ingress"
+    assert_contains "$out" "the network is not your problem"
+    # Say what was done to the data.
+    assert_contains "$out" "measured while every agent was running"
+    assert_contains "$out" "left out: the first 10s, while the agents started"
+    assert_contains "$out" "the last 10s, while they stopped"
+    json="$(nm summarize --reports "$TEST_TMPDIR/r" --no-collect \
+              --mesh /nonexistent --json 2>/dev/null)"
+    # The JSON follows the human report on stdout.
+    got="$(printf '%s' "$json" | "$PY" -c '
+import json, sys
+text = sys.stdin.read()
+d = json.loads(text[text.index("\n{") + 1:])
+w = d["window"]
+print(d["loss_pct"], w["left_out_start_s"], w["left_out_stop_s"])')"
+    assert_eq "$got" "0.0 10 10"
+}
+
+t_a_host_that_dies_mid_run_still_shows_its_loss() {
+    # c stops 30 s before the rest: that is not the fleet stopping, it is a
+    # host that died, and the loss to it is the finding.  Only the
+    # fleet's own last interval is left out, not c's thirty seconds, and
+    # the 20% stays.
+    netmesh_fleet_reports "$TEST_TMPDIR/r" a:0:60 b:0:60 c:0:30
+    out="$(nm summarize --reports "$TEST_TMPDIR/r" --no-collect \
+             --mesh /nonexistent)"
+    assert_contains "$(loss_line "$out")" "LOSS       20.00% overall"
+    assert_contains "$out" "Every slow pair ends at c"
+    assert_contains "$out" "the last 5s, while they stopped"
+}
+
+t_a_fleet_started_seconds_apart_splits_no_loss_either_way() {
+    # Agents a second or two apart, so every host writes its rows on its
+    # own phase.  The receiver's row and the sender's row then describe
+    # different seconds, and a window cut across both would book a whole
+    # interval of the difference as loss one way or the other.
+    netmesh_fleet_reports "$TEST_TMPDIR/r" a:0:60 b:1:61 c:3:63
+    out="$(nm summarize --reports "$TEST_TMPDIR/r" --no-collect \
+             --mesh /nonexistent)"
+    assert_contains "$(loss_line "$out")" \
+        "0.00% overall  (0.00% forward, 0.00% on the way back)"
+}
+
+t_start_up_loss_is_not_counted_as_idle_loss() {
+    # With --baseline the fleet starts inside the idle window, so the
+    # seconds before c was up read as 16.67% idle loss on a -> c, and the
+    # 2% it really lost under load looked like an improvement.
+    netmesh_fleet_reports "$TEST_TMPDIR/r" a:0:60 b:0:60 c:5:60 \
+        "loss=a>c:35:60:2"
+    out="$(nm summarize --reports "$TEST_TMPDIR/r" --no-collect \
+             --mesh /nonexistent --load-split 1700000032)"
+    assert_contains "$out" "Loss appeared under load on a -> c"
+    assert_contains "$out" "0.00% idle, 2.00%"
+}
+
+t_the_loaded_window_is_only_the_load() {
+    # The row that straddles the split began idle, and the rows written
+    # after the load command ended are idle again; counted as loaded they
+    # watered a 20x rise down to 7x.
+    netmesh_fleet_reports "$TEST_TMPDIR/r" a:0:60 b:0:60 \
+        "p99=a>b:35:45:8000"
+    out="$(nm summarize --reports "$TEST_TMPDIR/r" --no-collect \
+             --mesh /nonexistent --load-split 1700000032 \
+             --load-end 1700000048)"
+    assert_contains "$out" "(20x)"
+    assert_contains "$out" "rose 20x on a -> b"
+    assert_contains "$out" "load ended"
+}
+
+t_real_agents_started_apart_read_no_loss() {
+    # The same, end to end: real agents over loopback, one started two
+    # seconds after the other, so each spends two of its eight seconds
+    # probing a peer that is not there.
+    cd "$TEST_TMPDIR"
+    nm gen a=127.0.0.1:5470 b=127.0.0.1:5471 --mesh m.csv --pps 40 \
+        --no-pmtu >/dev/null
+    mkdir -p da db reports
+    nm agent --mesh m.csv --host a --dir da --interval 1 --duration 8 \
+        --bind 127.0.0.1 &
+    p1=$!
+    sleep 2
+    nm agent --mesh m.csv --host b --dir db --interval 1 --duration 8 \
+        --bind 127.0.0.1 &
+    p2=$!
+    wait $p1 $p2
+    cp da/report.csv reports/a.csv
+    cp db/report.csv reports/b.csv
+    out="$(nm summarize --reports reports --no-collect --mesh /nonexistent)"
+    assert_contains "$out" "measured while every agent was running"
+    got="$(loss_line "$out" | "$PY" -c '
+import re, sys
+m = re.search(r"([\d.]+)% overall", sys.stdin.read())
+print("ok" if m and float(m.group(1)) < 2.0 else "bad: %s" % (m and m.group(1)))')"
+    assert_eq "$got" "ok"
+}
+
 echo "netmesh"
 run_test "cli basics and generated help"       t_cli_basics
 run_test "mesh file round trip"                t_mesh_round_trip
@@ -1178,4 +1305,10 @@ run_test "a point-to-point default counts"     t_a_point_to_point_default_still_
 run_test "zero dest with a mask is not it"     t_a_zero_destination_that_is_not_a_default
 run_test "a bad port is refused"               t_a_port_outside_the_range_is_refused
 run_test "a garbled config line is refused"    t_a_garbled_config_line_is_refused_here
+run_test "agents started apart are not loss"   t_agents_that_start_and_stop_apart_are_not_loss
+run_test "a host that died keeps its loss"     t_a_host_that_dies_mid_run_still_shows_its_loss
+run_test "phase-shifted agents split cleanly"  t_a_fleet_started_seconds_apart_splits_no_loss_either_way
+run_test "start-up loss is not idle loss"      t_start_up_loss_is_not_counted_as_idle_loss
+run_test "the loaded window is only the load"  t_the_loaded_window_is_only_the_load
+run_test "real agents started apart, no loss"  t_real_agents_started_apart_read_no_loss
 finish

@@ -142,7 +142,9 @@ The idle-network baseline that `iperf_orchestrator` (bandwidth under load)
 and `matrix_orchestrator` (pps under load) both need but neither provides.
 UDP echoes between temporary agents, so no root is required and only the
 sender's clock is ever read — RTT is exact with no clock sync. The responder
-counts what arrived, so **loss splits into forward and return legs**.
+counts what arrived, so **loss splits into forward and return legs** --
+counted only while every agent was running, so agents started and stopped
+over ssh seconds apart do not read as loss.
 Unprivileged path-MTU discovery catches the black hole where small packets
 echo and large ones vanish. `--flows N` sweeps the source port so the probes
 take several paths through a LAG or ECMP bundle rather than one, which is
