@@ -1860,22 +1860,42 @@ PKILL = "pkill -%s -f '[n]etmesh[.]py agent'"
 def _kill_block(rdir):
     """Shell that stops the agent and leaves $status set.  Falls through in
     every case -- `clean` appends the removal to it, so it must never exit
-    early."""
+    early.
+
+    The pid file is the handle: this mesh's agent is told to stop, waited
+    for, and only it -- and what it started -- killed if it will not go, so
+    a host running two meshes out of different --remote-dirs keeps the
+    other one probing.  The match on the name, which finds every netmesh
+    agent on the box, is used only when the pid file is lost."""
     return """
 d=%(d)s
 status=not-deployed
 if [ -d "$d" ]; then
     status=not-running
     pid=""
+    how=""
     [ -f "$d/%(pid)s" ] && pid=$(cat "$d/%(pid)s" 2>/dev/null)
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         kill -TERM "$pid" 2>/dev/null
         status=stopped
+        how=pid
     elif %(pgrep)s >/dev/null 2>&1; then
         %(term)s 2>/dev/null
         status=stopped
+        how=any
     fi
-    if [ "$status" = stopped ]; then
+    if [ "$how" = pid ]; then
+        i=0
+        while [ $i -lt 20 ]; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+            i=$((i+1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            pkill -KILL -P "$pid" >/dev/null 2>&1
+            kill -KILL "$pid" >/dev/null 2>&1
+        fi
+    elif [ "$how" = any ]; then
         i=0
         while [ $i -lt 20 ]; do
             %(pgrep)s >/dev/null 2>&1 || break
