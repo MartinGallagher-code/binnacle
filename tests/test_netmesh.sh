@@ -285,6 +285,46 @@ t_fleet_lifecycle_through_fake_ssh() {
     assert_no_file "$FAKE_ROOT/h1/nmdir"
 }
 
+# Whether a process is running: not gone, and not a zombie left for a
+# parent that has not reaped it yet -- kill -0 succeeds on those. Read from
+# /proc, not ps: a slim container has no procps.
+running() {
+    [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status" 2>/dev/null
+}
+
+# Two meshes on the same hosts, out of different --remote-dirs and on
+# different ports: two tests at once. Stopping one stops its own agents by
+# their pid, and leaves the other's probing.
+t_stopping_one_mesh_leaves_another_running() {
+    install_fake_ssh
+    for h in h1 h2; do fake_host "$h"; done
+    cd "$TEST_TMPDIR"
+    local pa pb
+    pa="$(free_port)"; pb="$(free_port)"
+    nm gen h1=h1 h2=h2 --mesh a.csv --pps 20 --no-pmtu --port "$pa" >/dev/null
+    nm gen h1=h1 h2=h2 --mesh b.csv --pps 20 --no-pmtu --port "$pb" >/dev/null
+    local fleet=(--ssh "$FAKE_BIN/ssh" --scp "$FAKE_BIN/scp")
+    set +e
+    nm start --mesh a.csv "${fleet[@]}" --remote-dir nm-a --interval 2 --duration 40 --python "$PY" >/dev/null 2>&1
+    nm start --mesh b.csv "${fleet[@]}" --remote-dir nm-b --interval 2 --duration 40 --python "$PY" >/dev/null 2>&1
+    set -e
+    local pids="" pid h
+    for h in h1 h2; do
+        assert_file_exists "$FAKE_ROOT/$h/nm-b/agent.pid"
+        pids="$pids $(cat "$FAKE_ROOT/$h/nm-b/agent.pid")"
+    done
+    nm stop --mesh a.csv "${fleet[@]}" --remote-dir nm-a >/dev/null 2>&1
+    assert_no_file "$FAKE_ROOT/h1/nm-a/agent.pid"
+    for pid in $pids; do
+        running "$pid" || { nm stop --mesh b.csv "${fleet[@]}" --remote-dir nm-b >/dev/null 2>&1;
+            fail "stopping a.csv killed b.csv's agent ($pid)"; return 1; }
+    done
+    nm stop --mesh b.csv "${fleet[@]}" --remote-dir nm-b >/dev/null 2>&1
+    for pid in $pids; do
+        if running "$pid"; then fail "b.csv's agent ($pid) outlived its own stop"; return 1; fi
+    done
+}
+
 # --bind as mx and iperf-orchestrator read it: an interface name or part of
 # an address, matched against each host's own `ip -o -4 addr show`. A fake
 # `ip` answers per host from that host's sandbox, with loopback addresses
@@ -1340,6 +1380,7 @@ run_test "hostname mesh measures, not 100% loss" t_hostname_addresses_measure_no
 run_test "unresolvable peer is a note"         t_an_unresolvable_peer_is_a_note_not_silence
 run_test "dead peer leaves rtt blank not 0"    t_loss_columns_go_blank_not_zero_when_peer_dies
 run_test "fleet lifecycle through fake ssh"    t_fleet_lifecycle_through_fake_ssh
+run_test "stopping one mesh leaves another"  t_stopping_one_mesh_leaves_another_running
 run_test "--bind names a NIC on every host"    t_bind_names_a_nic_on_every_host
 run_test "--bind matching nothing starts nothing" t_bind_that_matches_nothing_starts_nothing
 run_test "a hand-run agent bound wrong is refused" t_hand_run_agent_bound_where_peers_do_not_send_is_refused

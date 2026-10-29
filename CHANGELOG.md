@@ -501,6 +501,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`netmesh stop` on one mesh killed another mesh's agents on the same
+  host.** Two meshes can run on one host at once, out of different
+  `--remote-dir`s and on different ports -- two tests side by side. Stop
+  sent its TERM by the pid file, then waited on any `netmesh.py agent` on
+  the box for ten seconds and `pkill -KILL`ed every one of them, the other
+  mesh's included. It now waits on its own agent's pid and, if that will
+  not go, kills only it and what it started (`pkill -KILL -P`); the match
+  on the name is left for a lost pid file. `stop`, `clean` and `run` go
+  through it.
+  `tests/test_netmesh.sh` runs two meshes on the same hosts, stops one,
+  and checks the other is still probing.
+
 - **`netmesh --bind` takes a NIC, as `mx` and `iperf-orchestrator` do.**
   It was one local address handed to `bind()` as it was, so `--bind data`
   -- an interface name, which the other two tools read by matching it
