@@ -53,7 +53,7 @@ import sys
 import time
 from collections import namedtuple
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 PROG = os.path.basename(sys.argv[0]) or "why-slow.py"
 
 CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"
