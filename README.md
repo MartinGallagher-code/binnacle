@@ -311,7 +311,7 @@ usage, options and exit status, then a link to that tool's manual.
 ## Tests
 
 ```bash
-bash tests/run_tests.sh          # sixteen suites, 701 checks
+bash tests/run_tests.sh          # seventeen suites, 754 checks
 ```
 
 No network and no second machine: `ssh` and `scp` are replaced by a shim

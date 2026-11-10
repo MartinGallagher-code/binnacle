@@ -239,6 +239,37 @@ agree script why-slow --servers prod.txt --fleet-csv -- --csv --interval 2
 
 This is the reason `agree` exists in the same distribution as the others.
 
+### Where pushed files go, and what is removed
+
+Each run pushes into a directory of its own under `--remote-dir`
+(`/var/tmp/agree` by default): `agree.<run id>`, made fresh for the run
+and holding a `.agree-owned` file with that id from the moment it exists.
+The command finds it as `$AGREE_DIR`, and still runs in the login
+directory, so a relative path among its arguments means what it always
+did:
+
+```bash
+agree -S web01,web02 --push check.sh -- '"$AGREE_DIR"/check.sh --quick'
+agree script check.sh -S web01,web02 -- --quick    # the same, named for you
+```
+
+Afterwards that directory, and nothing else, is removed — after `--pull`,
+which reads from it — and `--remote-dir` too if the run made it and it is
+empty again. The checks run on the host, under the same `sudo` as the
+command: the path must end in this run's own `agree.<run id>`, hold no
+`..`, be a real directory rather than a symlink, and hold `.agree-owned`, a
+plain file, with this run's id. Anything else is refused and reported:
+
+```text
+  NOT CLEANED UP  1 host still holds this run's directory:
+    web02        could not remove /var/tmp/agree/agree.3f9c…: agree: refusing to remove …: its .agree-owned is another run's
+```
+
+and the run exits 3. So `--remote-dir ~/bin`, or any directory already
+holding files, keeps every one of them, and two runs at once on the same
+host never remove each other's files. `--keep-remote` leaves the run's
+directory and says where it is.
+
 `why-slow` there is a **name, not a path**. A bare name — no directory
 part — is looked up among the tools installed alongside `agree` itself,
 hyphen or underscore, `.py` optional, so `why-slow`, `why_slow` and

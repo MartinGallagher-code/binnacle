@@ -4,6 +4,83 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-11-10
+
+Opened as one pull request with 0.9.0 (shared_tools BN-002), which numbered
+the backlog; this section is BN-001's own.
+
+### Changed
+
+- **`agree --push` puts a run's files in a directory of its own, and
+  removes only that.** Each run pushes into `--remote-dir/agree.<run id>`,
+  made fresh (`mkdir`, never `-p`, so nothing already there is written
+  into) and holding `.agree-owned` with the run's id from the moment it
+  exists. The command finds it as `$AGREE_DIR`; `agree script` names its
+  script `"$AGREE_DIR"/name`, which keeps the random id out of the report,
+  so two runs still diff cleanly. The command still runs in the login
+  directory, so a relative path among its arguments (`--from-facts
+  facts.json`) means what it did. `--pull` reads from the run's directory
+  when files were pushed, `--keep-remote` says where the directory is, and
+  `--dry-run` shows the `AGREE_DIR=` assignment. **A command that named a
+  pushed file by its old path, `/var/tmp/agree/x`, must now say
+  `"$AGREE_DIR"/x`.** The directory is 700, or 755 under `--sudo-user`,
+  whose user has to read it.
+
+- **`netmesh start` deploys only into a directory it makes, or one it made
+  before.** A missing `--remote-dir` is made and marked with
+  `.netmesh-owned`, holding the deploy's id; one already there is used only
+  if it holds that mark. Anything else -- `~/bin`, `/var/tmp`, a directory
+  with someone's files in it -- is refused before a file is copied, and with
+  `--keep-going` no agent is started there. Within one run (`check`, `run`),
+  collecting, stopping and cleaning act only on the hosts that run deployed
+  to, so a report left in a refused directory is not summarized as this
+  run's, and `check` stops at once when it deployed nowhere. **A directory
+  left by netmesh 0.9.0 or earlier has no mark** (`run` leaves one on every
+  host), so `start` and `clean` refuse it once; remove it by hand.
+
+### Fixed
+
+- **`agree --push` deleted `--remote-dir` itself afterwards** -- `rm -rf`
+  on `/var/tmp/agree`, or on `~/bin` and everything in it with `--remote-dir
+  ~/bin` -- and two runs at once on one host removed each other's files.
+  Cleanup now removes the run's own directory and nothing else, and checks
+  that on the host, under the same `sudo` as the command: the path ends in
+  this run's `agree.<run id>`, holds no `..`, is a real directory and not a
+  symlink, and holds `.agree-owned`, a plain file, with this run's id.
+  `--remote-dir` goes too only if this run made it and it is empty. A
+  refusal, or a cleanup that failed, used to be thrown away; it is now
+  reported (`NOT CLEANED UP`, with the host's reason) and the run exits 3,
+  without moving the host's answer out of its group. What a failed push
+  left is cleaned up the same way. The pattern, and much of the code, is
+  quarterdeck's `fleet.guarded_rm` (QD-014).
+
+- **`netmesh clean` ran `rm -rf` on `--remote-dir` with no check that
+  netmesh made it.** It now removes the directory only when, on the host,
+  the path is not `/`, `.`, `..` or empty and holds no `..`, it is a real
+  directory and not a symlink, and it holds `.netmesh-owned`, a plain file
+  holding a netmesh deploy id. The agent is stopped either way; a refusal
+  names the host and the reason, and `clean` (and `check`) exit 1. `start`
+  also checks for the mark before it clears a report or starts an agent in
+  the directory.
+
+### Tests
+
+- **`tests/test_cleanup.sh`, the invariant as a suite: 43 cases.** Each
+  makes a directory the real way through the fake ssh, breaks the path or
+  the mark the way a bug could -- empty, `/`, `~`, `.`, `..`, a `..` in the
+  path, `--remote-dir` itself, a symlink, no mark, another run's id, a mark
+  that is a link, a file in place of the directory -- and checks the
+  cleanup refused, said why, and left every canary where it was. Whole runs
+  through the command line: `--remote-dir` holding other files (one named
+  like the pushed file) survives `agree --push`; two `agree` runs at once
+  on one host keep each other's files; a refused cleanup is reported and
+  exits 3; `netmesh` refuses to deploy into, or clean, a directory it did
+  not make. A stand-in `rm` on `PATH` refuses any delete of an existing
+  path outside the case's temp directory, so a broken guard cannot reach
+  the machine running the suite. Three mutation cases -- agree without the
+  id check, agree removing `--remote-dir` as it used to, netmesh without
+  the mark checks -- each make the suite fail.
+
 ## [0.9.0] - 2026-11-10
 
 ### Added
@@ -2481,6 +2558,7 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
+[0.10.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.6.0...v0.8.0
 [0.6.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.5.0...v0.6.0

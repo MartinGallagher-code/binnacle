@@ -32,7 +32,9 @@ Options:
                       brought nothing back from is reported
   --pull-dir DIR      where pulled files land, one subdir per host (results)
   --keep-remote       leave the pushed files behind instead of cleaning up
-  --remote-dir DIR    where pushed files go           (AGREE_REMOTE_DIR)
+  --remote-dir DIR    pushed files go in a directory of the run's own
+                      under DIR, named to the command as $AGREE_DIR
+                                                      (AGREE_REMOTE_DIR)
   --first N           only the first N hosts -- the canary before the fleet
   --limit N           refuse to run wider than N hosts without --yes; both
                       of these want at least 1, because a guard that reads
@@ -78,6 +80,7 @@ import io
 import json
 import os
 import re
+import secrets
 import selectors
 import shlex
 import socket
@@ -86,13 +89,17 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 PROG = os.path.basename(sys.argv[0]) or "agree.py"
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
             "-o", "StrictHostKeyChecking=accept-new"]
 
 DEFAULT_REMOTE_DIR = "/var/tmp/agree"
+
+# The file in every directory agree makes on a host, holding the run's id.
+# Cleanup removes a directory only if it holds this, with this run's id.
+SENTINEL = ".agree-owned"
 
 OK, FAILED, TIMEOUT, UNREACHABLE, PUSH_FAILED = (
     "ok", "failed", "timeout", "unreachable", "push-failed")
@@ -534,7 +541,8 @@ def normalize(text, host, args):
 
 class Result(object):
     __slots__ = ("host", "outcome", "rc", "stdout", "stderr", "duration",
-                 "norm", "digest", "group", "pull_error", "emptied")
+                 "norm", "digest", "group", "pull_error", "emptied",
+                 "cleanup_error")
 
     def __init__(self, host):
         self.host = host
@@ -556,6 +564,10 @@ class Result(object):
         # answer is real, so folding a failed copy into it would move the
         # host into a group it does not belong in.
         self.pull_error = ""
+        # Why this run's directory is still on this host, if it is: the
+        # cleanup was refused (see guarded_rm) or failed.  Kept out of the
+        # outcome for the same reason as pull_error.
+        self.cleanup_error = ""
 
 
 class Runner(object):
@@ -567,6 +579,28 @@ class Runner(object):
         self.timeout = args.timeout
         self.max_output = args.max_output
         self.remote_dir = args.remote_dir
+        # Pushed files go in a directory of this run's own under
+        # --remote-dir, and only that is removed afterwards: never
+        # --remote-dir itself (~/bin, say, and everything in it), nor a
+        # directory another run is working in.  The run id names the
+        # directory and is written into it, in SENTINEL, when it is made;
+        # cleanup removes a directory only if it is still this run's (see
+        # guarded_rm).  quarterdeck's fleet.py does the same (QD-014).
+        self.run_id = secrets.token_hex(6)
+        self.work_dir = "%s/agree.%s" % (self.remote_dir.rstrip("/"),
+                                         self.run_id)
+        # hosts where this run made its directory -> whether it made
+        # --remote-dir too (then that goes again, if it is empty)
+        self._made = {}
+        sudo = getattr(args, "sudo", False)
+        sudo_user = getattr(args, "sudo_user", None)
+        # Under --sudo the command may leave root's files in the run's
+        # directory, so cleanup runs under the same `sudo -n`, or they
+        # would stay.  Under --sudo-user the directory has to be readable
+        # by that user (755), and it cannot write there, so everything in
+        # it is still the ssh user's own and cleanup runs as that user.
+        self.cleanup_sudo = bool(sudo) and not sudo_user
+        self.dir_mode = "755" if sudo and sudo_user else "700"
 
     def target(self, host):
         """ssh takes a bare address, v6 included: `ssh user@2001:db8::1`."""
@@ -653,13 +687,40 @@ class Runner(object):
                              "host killed" % limit)
         return rc, text(p.stdout), text(p.stderr)
 
+    def command_for(self, command, pushed=False):
+        """What runs on a host.  When files were pushed, $AGREE_DIR names
+        this run's directory, so `--push x -- '"$AGREE_DIR"/x'` finds x
+        wherever the run id put it.  The command still runs where it always
+        did, in the login directory, so a relative path in its arguments
+        (`--from-facts facts.json`) means what it meant before."""
+        if pushed:
+            return "AGREE_DIR=%s; export AGREE_DIR; %s" % (
+                shlex.quote(self.work_dir), command)
+        return command
+
     def push_files(self, host, files):
-        d = self.remote_dir
-        rc, _, err = self._exec(
-            self.ssh_argv(host, "mkdir -p %s" % shlex.quote(d)), 60)
+        for f in files:
+            if os.path.basename(f) == SENTINEL:
+                return 1, ("%s: cannot push a file named %s: it is the mark "
+                           "%s leaves in its own directory"
+                           % (PROG, SENTINEL, PROG))
+        d, w = shlex.quote(self.remote_dir), shlex.quote(self.work_dir)
+        s = shlex.quote("%s/%s" % (self.work_dir, SENTINEL))
+        # A plain mkdir -- never -p -- for the run's directory: it refuses
+        # a path that is there already, so nothing someone else put there
+        # (a directory, a link) is written into, and the sentinel goes in
+        # the moment the directory exists.
+        cmd = ("{ [ -d %s ] || echo agree-made-parent; } && mkdir -p %s && "
+               "{ { mkdir -m %s %s && printf '%%s\\n' %s > %s; } || "
+               "{ echo %s >&2; exit 1; }; }") % (
+                   d, d, self.dir_mode, w, shlex.quote(self.run_id), s,
+                   shlex.quote("agree: could not make this run's directory %s"
+                               % self.work_dir))
+        rc, out, err = self._exec(self.ssh_argv(host, cmd), 60)
         if rc != 0:
             return rc, err
-        dest = "%s:%s/" % (self.scp_target(host), d)
+        self._made[host.name] = "agree-made-parent" in out
+        dest = "%s:%s/" % (self.scp_target(host), self.work_dir)
         argv = list(self.scp) + SSH_OPTS
         if host.port:
             argv += ["-P", str(host.port)]
@@ -667,12 +728,36 @@ class Runner(object):
         rc, _, err = self._exec(argv, max(60, self.timeout))
         if rc != 0:
             return rc, err
-        names = " ".join(shlex.quote("%s/%s" % (d, os.path.basename(f)))
+        names = " ".join(shlex.quote("%s/%s" % (self.work_dir,
+                                                os.path.basename(f)))
                          for f in files)
         return self._exec(self.ssh_argv(host, "chmod +x %s" % names), 60)[0:3:2]
 
-    def pull_files(self, host, pattern, outdir):
-        """Copy matching files back.  -> "" or why nothing came back.
+    def cleanup(self, host):
+        """Remove this run's directory from a host, and --remote-dir too if
+        this run made it and it is empty now.  The checks of guarded_rm run
+        on the host, under the same sudo as the delete, so a directory that
+        is not this run's is refused there and reported, not removed.
+        -> why it is still there, or ''."""
+        if host.name not in self._made:
+            return ""
+        cmd = guarded_rm(self.work_dir, self.run_id)
+        if self._made[host.name]:
+            cmd += " && { rmdir %s 2>/dev/null || true; }" % shlex.quote(
+                self.remote_dir)
+        if self.cleanup_sudo:
+            cmd = "sudo -n sh -c %s" % shlex.quote(cmd)
+        rc, _, err = self._exec(self.ssh_argv(host, cmd), 60)
+        if rc == 0:
+            return ""
+        lines = (err or "").strip().splitlines()
+        return "could not remove %s: %s" % (
+            self.work_dir, lines[-1] if lines else "exit %d" % rc)
+
+    def pull_files(self, host, pattern, outdir, pushed=False):
+        """Copy matching files back -- from the run's directory, $AGREE_DIR
+        to the command, when files were pushed, else from --remote-dir.
+        -> "" or why nothing came back.
 
         Making the directory can fail too, and it fails in a worker
         thread: letting that OSError out ends the whole run with a
@@ -684,7 +769,8 @@ class Runner(object):
         except OSError as exc:
             return "cannot make %s: %s" % (hostdir, exc)
         src = "%s:%s/%s" % (self.scp_target(host),
-                             self.remote_dir, pattern)
+                             self.work_dir if pushed else self.remote_dir,
+                             pattern)
         argv = list(self.scp) + SSH_OPTS
         if host.port:
             argv += ["-P", str(host.port)]
@@ -704,15 +790,20 @@ class Runner(object):
                 r.outcome = PUSH_FAILED
                 r.rc = rc
                 r.stderr = err
+                if cleanup:
+                    # what got there before it failed is not left behind
+                    r.cleanup_error = self.cleanup(host)
                 r.duration = time.monotonic() - t0
                 return r
-        rc, out, err = self._exec(self.ssh_argv(host, command), self.timeout)
+        rc, out, err = self._exec(
+            self.ssh_argv(host, self.command_for(command, bool(push))),
+            self.timeout)
         r.rc, r.stdout, r.stderr = rc, out, err
         if pull:
-            r.pull_error = self.pull_files(host, pull, self.args.pull_dir)
+            r.pull_error = self.pull_files(host, pull, self.args.pull_dir,
+                                           bool(push))
         if push and cleanup:
-            self._exec(self.ssh_argv(
-                host, "rm -rf %s" % shlex.quote(self.remote_dir)), 60)
+            r.cleanup_error = self.cleanup(host)
         r.duration = time.monotonic() - t0
 
         if rc == 124:
@@ -728,6 +819,45 @@ class Runner(object):
         elif rc != 0:
             r.outcome = FAILED
         return r
+
+
+def guarded_rm(work_dir, run_id):
+    """The shell that removes a run's directory on a host, and nothing else.
+
+    It deletes only when every check holds, on the host itself: the path's
+    last part is exactly `agree.<run id>` (so never `/`, `~`, an empty path
+    or --remote-dir itself), no part of it is `..`, it is a directory and
+    not a symlink, and it holds SENTINEL, a plain file, with this run's id.
+    A directory that is not there is nothing to remove.  Anything else is
+    refused with an `agree: refusing to remove` line on stderr and exit 3,
+    which cleanup reports.  This is the one `rm -rf` agree sends to a host
+    (quarterdeck's fleet.guarded_rm, which this copies).
+    """
+    w = shlex.quote(work_dir)
+    s = shlex.quote("%s/%s" % (work_dir, SENTINEL))
+    rid = shlex.quote(run_id)
+    name = shlex.quote("agree." + run_id)
+
+    def refuse(why):
+        return "{ echo %s >&2; exit 3; }" % shlex.quote(
+            "agree: refusing to remove %s: %s" % (work_dir, why))
+
+    return (
+        "( w=%s; "
+        "case \"/$w\" in */%s) ;; *) %s ;; esac; "
+        "case \"/$w/\" in */../*) %s ;; esac; "
+        "if [ ! -e \"$w\" ] && [ ! -L \"$w\" ]; then exit 0; fi; "
+        "[ ! -L \"$w\" ] || %s; "
+        "[ -d \"$w\" ] || %s; "
+        "[ -f %s ] && [ ! -L %s ] || %s; "
+        "[ \"$(cat %s)\" = %s ] || %s; "
+        "rm -rf -- \"$w\" )") % (
+            w, name, refuse("not this run's agree.%s directory" % run_id),
+            refuse("the path has a .. in it"),
+            refuse("it is a symlink"),
+            refuse("it is not a directory"),
+            s, s, refuse("it holds no %s" % SENTINEL),
+            s, rid, refuse("its %s is another run's" % SENTINEL))
 
 
 def fan_out(hosts, fn, jobs, quiet=False):
@@ -902,6 +1032,18 @@ def render_groups(groups, args, meta):
             out.append("    ... and %d more" % (len(failed_pulls) - 5))
         out.append("")
 
+    left = [r for g in groups for r in g.results if r.cleanup_error]
+    if left:
+        out.append("  NOT CLEANED UP  %d host%s still hold%s this run's "
+                   "directory:"
+                   % (len(left), "" if len(left) == 1 else "s",
+                      "s" if len(left) == 1 else ""))
+        for r in left[:5]:
+            out.append("    %-12s %s" % (r.host.name, r.cleanup_error[:160]))
+        if len(left) > 5:
+            out.append("    ... and %d more" % (len(left) - 5))
+        out.append("")
+
     out.extend(_hints(groups, args, meta))
     return "\n".join(out)
 
@@ -964,6 +1106,13 @@ def _hints(groups, args, meta):
                    "still ran and its answer above is real; what is missing "
                    "is the files."
                    % " ".join(r.host.name for r in pulls[:4]))
+    left = [r for g in groups for r in g.results if r.cleanup_error]
+    if left:
+        out.append("    * This run's directory is still on %s.  %s removes "
+                   "only a directory it made and marked, so it refused, or "
+                   "could not, there.  Read why above before removing it "
+                   "by hand."
+                   % (" ".join(r.host.name for r in left[:4]), PROG))
     if len(out) == 1:
         out.append("    * Nothing needs attention.")
     out.append("")
@@ -1193,10 +1342,14 @@ def resolve_script(spec):
 
 def cmd_script(args):
     path = resolve_script(args.script_path)
-    remote = "%s/%s" % (args.remote_dir, os.path.basename(path))
+    # The script lands in the run's own directory, which the command finds
+    # as $AGREE_DIR (Runner.command_for).  Naming it through the variable
+    # keeps the random run id out of the report, so two runs still diff
+    # cleanly.  The variable is expanded before any sudo, by the login
+    # shell, so it works under --sudo as well.
+    remote = '"$AGREE_DIR"/%s' % shlex.quote(os.path.basename(path))
     extra = " ".join(shlex.quote(a) for a in args.command_argv)
-    command = "%s %s" % (shlex.quote(remote), extra) if extra else \
-        shlex.quote(remote)
+    command = "%s %s" % (remote, extra) if extra else remote
     args.push = list(args.push or []) + [path]
     return run_fleet(args, command, label="script")
 
@@ -1225,9 +1378,12 @@ def run_fleet(args, command, label=None):
 
     if args.dry_run:
         for h in hosts:
-            print(" ".join(shlex.quote(c)
-                           for c in runner.ssh_argv(h, command)))
+            print(" ".join(shlex.quote(c) for c in runner.ssh_argv(
+                h, runner.command_for(command, bool(args.push)))))
         return 0
+    if args.push and args.keep_remote:
+        sys.stderr.write("[%s] --keep-remote: what is pushed stays in %s on "
+                         "each host\n" % (PROG, runner.work_dir))
 
     t0 = time.monotonic()
     results = fan_out(
@@ -1260,6 +1416,8 @@ def run_fleet(args, command, label=None):
     # A pull that brought nothing back is a failed run of what was asked
     # for, even where every host agreed about the command itself.
     failed = failed or any(r.pull_error for r in results)
+    # So is a run that left its directory behind on a host.
+    failed = failed or any(r.cleanup_error for r in results)
     diverged = len([g for g in groups if g.outcome == OK]) > 1
     # Hosts that agree because their answers were normalized away have not
     # been compared, and "unanimous" is the one thing this must not say

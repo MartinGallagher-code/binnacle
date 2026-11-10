@@ -308,7 +308,24 @@ per-row note (`cannot resolve ...`) with nothing sent, never silence.
 
 No package, no daemon, no dotdir, no sysctl. The agent is the tool's own
 file, copied by scp and run from a working directory that `clean` removes —
-`check` does that automatically. It needs no root, no `CAP_NET_RAW`, no
+`check` does that automatically.
+
+`clean` removes only a directory netmesh made. `start` makes
+`--remote-dir` (`/var/tmp/netmesh` by default) and writes a
+`.netmesh-owned` file into it, holding the deploy's id, the moment it
+exists; a later `start` uses a directory holding that mark again. A
+directory that is already there without it — `~/bin`, `/var/tmp`, anything
+with someone's files in it — is refused before a file is copied, and no
+agent is started there. `clean` checks on the host that the path is not
+`/`, `.` or empty and holds no `..`, that it is a real directory and not a
+symlink, and that it holds the mark, a plain file holding a netmesh id; it
+stops the agent either way, and removes the directory only when every check
+holds. A refusal names the host and the reason, and `clean` exits 1.
+
+A directory left by a netmesh from before these marks (0.9.0 and earlier
+— `run` leaves one on every host) has no mark, so `start` and `clean` both
+refuse it once, with a message saying so. Look in it, and remove it by hand
+if it is netmesh's. It needs no root, no `CAP_NET_RAW`, no
 installed packages, and no inbound port beyond ssh and the agents' own UDP
 port (`--port`, 5310 by default).
 `stop` sends SIGTERM, and the agent flushes its current interval before

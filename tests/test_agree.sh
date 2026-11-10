@@ -243,10 +243,15 @@ t_script_pushes_runs_and_cleans_up() {
     out="$(ag_verb script "$TEST_TMPDIR/s.sh" -S a --quiet --remote-dir agreetmp -- )"
     assert_contains "$out" "hello from script"
     log="$(cat "$FAKE_SSH_LOG")"
-    assert_contains "$log" "scp a agreetmp"
+    assert_contains "$log" "scp a agreetmp/agree."
     assert_contains "$log" "chmod +x"
-    assert_contains "$log" "rm -rf agreetmp"
-    assert_no_file "$FAKE_ROOT/a/agreetmp/s.sh"
+    # the run's own directory goes, through the guard, and --remote-dir,
+    # which this run made, goes with it once it is empty
+    assert_contains "$log" "refusing to remove agreetmp/agree."
+    # shellcheck disable=SC2016  # the guard's own text, unexpanded
+    assert_contains "$log" 'rm -rf -- "$w"'
+    assert_not_contains "$log" "rm -rf agreetmp "
+    assert_no_file "$FAKE_ROOT/a/agreetmp"
 }
 
 t_script_resolves_a_bundled_tool_name() {
@@ -259,9 +264,9 @@ t_script_resolves_a_bundled_tool_name() {
         -- --explain SWAP_THRASH)"
     assert_contains "$out" "SWAP_THRASH"
     log="$(cat "$FAKE_SSH_LOG")"
-    assert_contains "$log" "scp a agreetmp"
+    assert_contains "$log" "scp a agreetmp/agree."
     assert_contains "$log" "why_slow.py"
-    assert_no_file "$FAKE_ROOT/a/agreetmp/why_slow.py"
+    assert_no_file "$FAKE_ROOT/a/agreetmp"
 }
 
 t_script_unknown_name_lists_the_bundled_tools() {

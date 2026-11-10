@@ -18,7 +18,9 @@ Common options (each also has an environment variable):
   --user NAME          ssh user                 (NETMESH_USER, default none)
   --jobs N             hosts contacted at once  (NETMESH_JOBS, default 16)
   --remote-dir DIR     working dir on hosts     (NETMESH_REMOTE_DIR,
-                                                 default /var/tmp/netmesh)
+                                                 default /var/tmp/netmesh);
+                       netmesh deploys only into one it made, and
+                       `clean` removes only that
   --python PATH        remote interpreter       (NETMESH_PYTHON, default python3)
   --ssh CMD/--scp CMD  transports               (NETMESH_SSH, NETMESH_SCP)
   --reports DIR        where reports land       (NETMESH_REPORTS, default reports)
@@ -38,6 +40,7 @@ import errno
 import io
 import os
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -50,7 +53,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 PROG = os.path.basename(sys.argv[0]) or "netmesh.py"
 
 # ---------------------------------------------------------------------------
@@ -129,6 +132,10 @@ REPORT_NAME = "report.csv"
 LOG_NAME = "agent.log"
 PID_NAME = "agent.pid"
 MESH_NAME = "mesh.csv"
+# The file in every directory netmesh makes on a host, holding the id of the
+# deployment that made it.  `start` deploys only into a directory it makes
+# or one that holds this; `clean` removes only a directory that holds it.
+SENTINEL = ".netmesh-owned"
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=10"]
@@ -1731,10 +1738,28 @@ class Fleet(object):
         self.dry_run = getattr(args, "dry_run", False)
         self.include_self = getattr(args, "include_self", False)
         self.local_procs = {}
+        # Written into SENTINEL by the deploy that makes a host's directory.
+        # It names that deployment; `clean`, a later run, cannot know it,
+        # so it asks only that the mark is there and is netmesh's.
+        self.run_id = secrets.token_hex(6)
+        # The hosts a deploy in this same process reached, once it has run
+        # (see ours); None before, and in a verb run on its own.
+        self.deployed = None
 
     def agent_hosts(self):
         """Hosts that actually run an agent -- ping-only endpoints do not."""
         return [h for h in self.mesh.hosts if h not in self.mesh.pingonly]
+
+    def ours(self):
+        """The agent hosts the verbs act on.  After a deploy in this same
+        process -- `check` and `run` -- only those it deployed to: a host it
+        refused, a directory netmesh did not make, holds nothing of this
+        run's to collect, stop or remove, and a report found there is an
+        older run's."""
+        hosts = self.agent_hosts()
+        if self.deployed is None:
+            return hosts
+        return [h for h in hosts if h in self.deployed]
 
     def is_local_host(self, host):
         return self.include_self and is_local(self.mesh.addrs[host])
@@ -1822,7 +1847,7 @@ class Fleet(object):
         Output is printed host-prefixed in mesh order rather than
         completion order, so two runs of the same command diff cleanly.
         """
-        hosts = hosts if hosts is not None else self.agent_hosts()
+        hosts = hosts if hosts is not None else self.ours()
         if not hosts:
             return 0
         if label:
@@ -1855,6 +1880,83 @@ def _agent_source():
 # agent", which the regex "netmesh.py agent" does not match.
 PGREP = "pgrep -f '[n]etmesh[.]py agent'"
 PKILL = "pkill -%s -f '[n]etmesh[.]py agent'"
+
+
+def claim_script(rdir, run_id):
+    """The shell that gives a deploy its directory on a host, or refuses.
+
+    A directory that is not there is made, and SENTINEL is written into it
+    with `run_id` the moment it exists.  One that is there is used again
+    only if it holds SENTINEL -- a real directory, not a symlink, with the
+    mark a plain file: an earlier deploy of netmesh's.  Anything else --
+    ~/bin, /var/tmp, a directory an older netmesh left without a mark -- is
+    refused before a file is copied, because netmesh did not make it, so
+    `clean` could not remove it either."""
+    return """
+d=%(d)s
+s="$d"/%(s)s
+if [ ! -e "$d" ] && [ ! -L "$d" ]; then
+    { mkdir -p -- "$(dirname "$d")" && mkdir -- "$d" &&
+      printf '%%s\\n' %(rid)s > "$s"; } ||
+        { echo %(nomake)s >&2; exit 1; }
+    echo made
+elif [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$s" ] && [ ! -L "$s" ]; then
+    echo reused
+else
+    echo %(refuse)s >&2
+    exit 1
+fi
+""" % {"d": shlex.quote(rdir), "s": shlex.quote(SENTINEL),
+       "rid": shlex.quote(run_id),
+       "nomake": shlex.quote("netmesh: could not make %s" % rdir),
+       "refuse": shlex.quote(
+           "netmesh: refusing to deploy into %s: it is there already and "
+           "holds no %s, so netmesh did not make it (or an older netmesh, "
+           "from before it marked its directories, did: look in it, and "
+           "remove it by hand if so). Pick another --remote-dir, or clear "
+           "that one." % (rdir, SENTINEL))}
+
+
+def guarded_rm(rdir):
+    """The shell that removes a netmesh directory on a host, and nothing else.
+
+    It deletes only when every check holds, on the host itself: the path is
+    not empty, `/`, `.` or `..` and has no `..` in it, it is a directory and
+    not a symlink, and it holds SENTINEL, a plain file, holding a netmesh
+    deployment id -- which only a deploy that made the directory writes.
+    A directory that is not there is nothing to remove.  Anything else is
+    refused with a `netmesh: refusing to remove` line on stderr and exit 3.
+    This is the one `rm -rf` netmesh sends to a host (the pattern of
+    quarterdeck's fleet.guarded_rm, QD-014).  The deploy's id is not
+    matched: `clean` is usually a later run than the one that deployed,
+    and the directory, named by --remote-dir, is the deployment."""
+    d = shlex.quote(rdir)
+    s = shlex.quote("%s/%s" % (rdir, SENTINEL))
+
+    def refuse(why):
+        return "{ echo %s >&2; exit 3; }" % shlex.quote(
+            "netmesh: refusing to remove %s: %s" % (rdir, why))
+
+    return (
+        "( d=%s; "
+        "case \"$d\" in ''|/|.|..|./|../) %s ;; esac; "
+        "case \"/$d/\" in */../*) %s ;; esac; "
+        "if [ ! -e \"$d\" ] && [ ! -L \"$d\" ]; then exit 0; fi; "
+        "[ ! -L \"$d\" ] || %s; "
+        "[ -d \"$d\" ] || %s; "
+        "[ -f %s ] && [ ! -L %s ] || %s; "
+        "id=$(cat %s); "
+        "case \"$id\" in ''|*[!0-9a-f]*) %s ;; esac; "
+        "[ ${#id} -eq 12 ] || %s; "
+        "rm -rf -- \"$d\" )") % (
+            d, refuse("it is not a directory netmesh would make"),
+            refuse("the path has a .. in it"),
+            refuse("it is a symlink"),
+            refuse("it is not a directory"),
+            s, s, refuse("it holds no %s, so netmesh did not make it"
+                         % SENTINEL),
+            s, refuse("its %s is not netmesh's" % SENTINEL),
+            refuse("its %s is not netmesh's" % SENTINEL))
 
 
 def _kill_block(rdir):
@@ -2014,20 +2116,25 @@ def cmd_start(args, mesh=None, fleet=None):
 
 
 def _start(args, fleet, src, flags, staged):
+    deployed = set()
 
     def deploy(host):
-        rc, out = fleet.sh(host, "mkdir -p %s" % shlex.quote(fleet.dir_for(host)))
+        rc, out = fleet.sh(host, claim_script(fleet.dir_for(host),
+                                              fleet.run_id))
         if rc != 0:
-            return rc, "mkdir failed: %s" % out
+            return rc, out or "could not make %s" % fleet.dir_for(host)
         rc, out = fleet.push(host, [src], os.path.basename(src))
         if rc != 0:
             return rc, "copy agent failed: %s" % out
         rc, out = fleet.push(host, [staged], MESH_NAME)
         if rc != 0:
             return rc, "copy mesh failed: %s" % out
+        deployed.add(host)
         return 0, "deployed"
 
-    failed = fleet.each(deploy, label="deploy", quiet=True)
+    failed = fleet.each(deploy, label="deploy", quiet=True,
+                        hosts=fleet.agent_hosts())
+    fleet.deployed = set(deployed)
     if failed and not args.keep_going:
         die("deploy failed on %d hosts; nothing started" % failed, 1)
 
@@ -2040,6 +2147,7 @@ d=%(d)s
 if [ -f "$d/%(pid)s" ] && kill -0 "$(cat "$d/%(pid)s" 2>/dev/null)" 2>/dev/null; then
     echo already-running; exit 3
 fi
+[ -f "$d"/%(mark)s ] || { echo "$d is not a netmesh directory"; exit 1; }
 cd "$d" || exit 1
 rm -f %(rep)s
 nohup %(py)s %(agent)s agent --mesh %(mesh)s --host %(host)s --dir . %(flags)s \
@@ -2049,6 +2157,7 @@ sleep 0.3
 kill -0 "$(cat %(pid)s)" 2>/dev/null || { echo failed-to-start; tail -3 %(logf)s; exit 1; }
 echo started
 """ % {"d": shlex.quote(d), "pid": PID_NAME, "rep": REPORT_NAME,
+            "mark": shlex.quote(SENTINEL),
             "py": shlex.quote(fleet.python),
             # The script has already cd'd into $d, so the agent and the mesh
             # are named relative to it.  Joining $d back on would work for an
@@ -2058,10 +2167,14 @@ echo started
             "logf": LOG_NAME}
         return fleet.sh(host, script)
 
-    failed = fleet.each(start, label="start", quiet=True)
-    running = len(fleet.agent_hosts()) - failed
+    # Only where the deploy worked: with --keep-going a host it refused --
+    # a directory netmesh did not make -- must not have an agent started,
+    # or a report cleared, in that directory all the same.
+    ready = fleet.ours()
+    failed = fleet.each(start, label="start", quiet=True, hosts=ready)
+    running = len(ready) - failed
     log("[%s] %d/%d agents running" % (PROG, running, len(fleet.agent_hosts())))
-    return 1 if failed else 0
+    return 1 if failed or len(ready) < len(fleet.agent_hosts()) else 0
 
 
 def cmd_status(args, mesh=None, fleet=None):
@@ -2108,10 +2221,12 @@ def cmd_clean(args, mesh=None, fleet=None):
     fleet = fleet or Fleet(mesh, args)
 
     def clean(host):
+        # The agent is stopped whatever the directory turns out to be; the
+        # directory goes only if the guard, on the host, finds it netmesh's.
         script = _kill_block(fleet.dir_for(host)) + """
-rm -rf %s
+%s || { echo "$status, not removed"; exit 3; }
 echo "$status cleaned"
-""" % shlex.quote(fleet.dir_for(host))
+""" % guarded_rm(fleet.dir_for(host))
         return fleet.sh(host, script)
 
     # Same for clean: the remote directory is still there.
@@ -3620,6 +3735,11 @@ def cmd_check(args):
     args.keep_going = True
     rc = cmd_start(args, mesh, fleet)
     try:
+        if not fleet.deployed and not fleet.dry_run:
+            # every host refused or failed: nothing is probing, and there
+            # is nothing of this run's to summarize
+            log("[%s] deployed to no host, so nothing to probe" % PROG)
+            return rc or 1
         log("[%s] probing for %s" % (PROG, fmt_secs(args.for_secs)))
         time.sleep(args.for_secs + 1.0)
         rc = cmd_summarize(args, mesh, fleet) or rc
