@@ -182,10 +182,12 @@ Worth reading before touching the suite — each of these cost a red run.
   `docs/tools/binnacle.md` shows a transcript of the index; it listed eight
   instruments at an old version for two releases because nothing checks it.
   Diff it against the real command when the output changes.
-- **The version lives in thirteen places** — `pyproject.toml`,
-  `binnacle/__init__.py`, and each of the ten modules, plus
-  `binnacle/binnacle.py`. The compose suite's `every declared version
-  agrees` case enforces it, and running `binnacle` after a bump is the
+- **The version lives in seventeen places** — `pyproject.toml`,
+  `binnacle/__init__.py`, and each of the fourteen modules, plus
+  `binnacle/binnacle.py` — and every pull request moves all of them
+  (`PUBLISHING.md`). `tests/check_version.sh` lists them and CI's
+  `version` job runs it; the compose suite's `every declared version
+  agrees` case enforces it too, and running `binnacle` after a bump is the
   fastest check, since it exits 1 if one was left behind.
 - **Live-machine assertions need margin, not luck.** `--exit-code opts into
   severity` asked for 5-6 samples and asserted WARN, but `SHORT_RUN` is WARN
@@ -208,6 +210,7 @@ Everything CI runs, in the order worth running locally:
 
 ```bash
 bash tests/run_tests.sh                                  # twelve suites
+bash tests/check_version.sh origin/main                  # the version moved
 shellcheck -e SC1091 tests/*.sh tests/test_helper.bash
 bash tests/check_python_compat.sh
 vermin --eval-annotations --violations --target=3.6- binnacle/*.py

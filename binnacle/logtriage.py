@@ -53,7 +53,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 PROG = os.path.basename(sys.argv[0]) or "logtriage.py"
 
 MAX_BUCKETS = 4096

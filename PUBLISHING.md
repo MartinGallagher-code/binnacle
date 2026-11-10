@@ -29,10 +29,15 @@ with `invalid-publisher`.
 The workflow name and environment must match exactly. A mismatch is the
 usual cause of `invalid-publisher`.
 
-## Cutting a release
+## The version moves in every pull request
 
-1. Update the version in **all seventeen** places — they must agree, and
-   the suite fails if they do not:
+Every change moves the version, however small — code, tests, docs or CI
+(shared_tools BN-002). A pull request into `main` carries its own bump and
+its own section in `CHANGELOG.md`; nothing waits for a release to be
+numbered. The bump is not a release: publishing is the separate step below.
+
+1. Raise the version in **all seventeen** places — they must agree, and
+   `tests/check_version.sh` and the suite fail if they do not:
    - `pyproject.toml` → `version`
    - `binnacle/__init__.py` → `VERSION`
    - each tool's own `VERSION`, in every module
@@ -42,7 +47,7 @@ usual cause of `invalid-publisher`.
    that has never heard of this package, where its own `VERSION` is the
    only version there is — and `agree` groups a fleet by what `--version`
    reports, so a module left behind at the old number reads as version
-   skew across the fleet rather than as a release that was cut carelessly.
+   skew across the fleet rather than as a change that was numbered carelessly.
 
    `binnacle` is the one that reports the other fourteen: it compares
    each instrument's `VERSION` against its own and calls a disagreement
@@ -52,24 +57,40 @@ usual cause of `invalid-publisher`.
    that they all moved, since it exits 1 if they did not.
 
    ```bash
-   sed -i 's/^VERSION = "0\.2\.0"$/VERSION = "0.2.1"/' \
+   sed -i 's/^VERSION = "0\.9\.0"$/VERSION = "0.9.1"/' \
        binnacle/*.py
-   sed -i 's/^version = "0\.2\.0"$/version = "0.2.1"/' pyproject.toml
+   sed -i 's/^version = "0\.9\.0"$/version = "0.9.1"/' pyproject.toml
    ```
-2. Move the `## [Unreleased]` items in `CHANGELOG.md` under a new
-   `## [x.y.z] - YYYY-MM-DD` heading, and update the link definitions at the
-   foot of the file.
-3. Commit, and let CI go green on `main`.
-4. Tag and push:
+2. Open `CHANGELOG.md` with a new `## [x.y.z] - YYYY-MM-DD` section for
+   that version, holding this pull request's entries, and add its link
+   definition at the foot of the file. There is no `## [Unreleased]`
+   heading: `tests/check_version.sh` refuses one.
+3. `bash tests/check_version.sh origin/main` passes when all seventeen
+   agree, the changelog opens with that version, and it is greater than
+   `main`'s. CI's `version` job runs the same check against the base
+   branch, and again on the push to `main`; if `main` moves while the pull
+   request is open, rebase and bump again.
+
+The number follows *Version numbers*, below. A number that
+is never published is fine; a change with no number is not.
+
+## Cutting a release
+
+A release publishes the version `main` already says. It is a person's
+call, and it changes no number.
+
+1. Let CI go green on the `main` commit to be published.
+2. Tag it with the version its `pyproject.toml` says, and push the tag:
 
    ```bash
-   git tag -a v0.1.0 -m "binnacle 0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.9.0 -m "binnacle 0.9.0"
+   git push origin v0.9.0
    ```
 
-5. Publish a GitHub Release for that tag. That triggers `publish.yml`, which
-   builds an sdist and a wheel, checks the metadata with `twine`, installs
-   the wheel and smoke-tests every console script before uploading.
+3. Publish a GitHub Release for that tag. That triggers `publish.yml`, which
+   checks the tag against `pyproject.toml`, builds an sdist and a wheel,
+   checks the metadata with `twine`, installs the wheel and smoke-tests
+   every console script before uploading.
 
 ## Checking before you tag
 
@@ -123,7 +144,8 @@ periodically pruned, so a version published there is not reserved.
 
 [Semantic versioning](https://semver.org). For this project specifically:
 
-- **patch** — a bug fix, or a rule threshold corrected
+- **patch** — a bug fix, a rule threshold corrected, or a change to docs,
+  tests or CI alone
 - **minor** — a new tool, a new flag, a new rule, or a new output column
 - **major** — a changed CSV schema, a removed flag, or a changed exit code
 

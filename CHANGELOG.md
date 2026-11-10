@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-11-10
 
 ### Added
 
@@ -417,6 +417,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its tag and by what it collects.
 
 ### Changed
+
+- **Every change moves the version.** A pull request into `main` now
+  carries its own bump, in all seventeen places the version is written,
+  and its own numbered, dated section here -- never an `[Unreleased]`
+  heading left for a release. `tests/check_version.sh` fails when the
+  seventeen disagree or this file does not open with that version, and
+  CI's new `version` job fails a pull request whose version is not
+  greater than its base branch's. This section numbers the 22 merges
+  since 0.8.0 that had none. Publishing is unchanged and still a
+  person's step (shared_tools BN-002).
+
+- **CI's test matrix runs on `ubuntu-24.04`.** `ubuntu-latest` became
+  26.04 in November 2026, and setup-python has no Python 3.9 for it, so the
+  matrix's 3.9 entry would fail before running a test.
 
 - **`--help` is a reference card, not the manual.** Every tool's help
   had grown into its whole manual -- `dredge --help` was 506 lines. Help now
@@ -2467,7 +2481,7 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
-[Unreleased]: https://github.com/MartinGallagher-code/binnacle/compare/v0.8.0...HEAD
+[0.9.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.6.0...v0.8.0
 [0.6.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.4.0...v0.5.0
