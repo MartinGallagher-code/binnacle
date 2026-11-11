@@ -46,7 +46,7 @@ import sys
 import time
 from datetime import date
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 PROG = os.path.basename(sys.argv[0]) or "reachable.py"
 
 # Lines this tool has commented out carry this marker, so a later run can

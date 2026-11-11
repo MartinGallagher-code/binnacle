@@ -102,7 +102,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 PROG = os.path.basename(sys.argv[0]) or "dredge.py"
 # What this tool is, as opposed to what it was invoked as: the state file
 # is stamped with it, so a copy running under another name still

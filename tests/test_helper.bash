@@ -5,6 +5,8 @@
 #   assert_eq/contains/not_contains/status/file_exists/no_file/between
 #   fail MSG                fail a case with a reason, for what no assert_ covers
 #   install_fake_ssh        an ssh+scp pair that run "remote" commands locally
+#                           (FAKE_SSH_DETACH=1: apart from the client, as
+#                           OpenSSH runs them)
 #   fake_host NAME          create a sandbox root for one fake host
 #   gen_log FILE            a synthetic log with a known planted structure
 #   facts_json FILE k=v...  a why-slow fact file built from defaults
@@ -26,6 +28,8 @@ setup_env() {
     export FAKE_BIN="$TEST_TMPDIR/bin"
     export FAKE_ROOT="$TEST_TMPDIR/hosts"
     export FAKE_SSH_LOG="$TEST_TMPDIR/ssh.log"
+    export FAKE_PY="$PY"
+    unset FAKE_SSH_DETACH
     mkdir -p "$FAKE_BIN" "$FAKE_ROOT"
     : > "$FAKE_SSH_LOG"
     # A stray variable from the caller's shell must never change a result.
@@ -173,6 +177,17 @@ if [ -f "$FAKE_ROOT/$host/.unreachable" ]; then
 fi
 [ -d "$FAKE_ROOT/$host" ] || { echo "ssh: no such host $host" >&2; exit 255; }
 cd "$FAKE_ROOT/$host" || exit 255
+# FAKE_SSH_DETACH=1: as OpenSSH does, the "remote" command runs in a
+# session of its own, apart from this client, so killing the client
+# leaves it running (BN-004).  Otherwise it is this process.
+if [ -n "${FAKE_SSH_DETACH:-}" ]; then
+  exec 3<&0
+  "${FAKE_PY:-python3}" -c 'import os, sys
+os.setsid()
+os.execvp("bash", ["bash", "-c", sys.argv[1]])' "${args[*]}" <&3 3<&- &
+  wait $!
+  exit $?
+fi
 exec bash -c "${args[*]}"
 SHIM
     cat > "$FAKE_BIN/scp" <<'SHIM'

@@ -20,9 +20,10 @@ Options:
                       for stdin                            (AGREE_SERVERS)
   -S, --server a,b,c  servers inline, repeatable
   --jobs N            hosts contacted at once                 (AGREE_JOBS)
-  --timeout S         per-host command timeout, seconds       (AGREE_TIMEOUT)
-  --max-output BYTES  per-host output cap; a host past it is
-                      killed and reported, not grouped      (AGREE_MAX_OUTPUT)
+  --timeout S         per-host command timeout, seconds; a command past
+                      it is stopped on the host too         (AGREE_TIMEOUT)
+  --max-output BYTES  per-host output cap; a command past it is stopped
+                      on the host and reported, not grouped (AGREE_MAX_OUTPUT)
   --user NAME         ssh user                                (AGREE_USER)
   --ssh CMD/--scp CMD transports                     (AGREE_SSH / AGREE_SCP)
   --sudo              prefix the command with `sudo -n`
@@ -89,7 +90,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 PROG = os.path.basename(sys.argv[0]) or "agree.py"
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
@@ -103,6 +104,62 @@ SENTINEL = ".agree-owned"
 
 OK, FAILED, TIMEOUT, UNREACHABLE, PUSH_FAILED = (
     "ok", "failed", "timeout", "unreachable", "push-failed")
+
+# Stopping a command on the host (BN-004, after quarterdeck's QD-026).
+# agree's ssh asks for no terminal, so when agree kills its ssh -- past
+# --timeout or --max-output -- sshd does not hang the command up: it goes
+# on running on the host (reproduced against OpenSSH 9.6 and 10.3; pdsh,
+# pssh and parallel-ssh say the same of theirs).  So every command goes
+# out after one line to stderr, MARK_SH, naming the shell sshd started
+# for it and that shell's process group, and _capture takes the line off
+# again.  sshd starts that shell in a session of its own, so the group
+# holds the command and everything it started; Runner.stop sends it TERM,
+# then KILL, with a second ssh.  The line is written by `sh -c`, so the
+# login shell may be any shell.  Its group is read from /proc with
+# builtins only, where there is one; elsewhere (macOS, the BSDs) `ps`
+# says, and where neither can, the group is 0.  A shell that does not
+# lead its own group (an sshd that does not start a session), or whose
+# group could not be read, is never signalled, since its group may be
+# someone else's.  (quarterdeck's copy assumes, without /proc, that the
+# shell leads one; this does not.)
+MARK_SH = ("p=$PPID; g=0; s=; if { read -r s < /proc/$p/stat; } 2>/dev/null; "
+           "then s=${s##*) }; set -- $s; g=$3; "
+           "else s=$(ps -o pgid= -p $p 2>/dev/null); set -- $s; "
+           "case ${1:-x} in *[!0-9]*) ;; *) g=$1 ;; esac; fi; "
+           "echo %s $p $g >&2")
+
+# Most of a minute: the 8 s to connect, and a few seconds for TERM to
+# work, then KILL.
+STOP_TIMEOUT = 30
+
+# The stop, on the host: TERM to the group, then KILL if any of it is
+# still there 2 s later.  A group that is gone is stopped; one whose
+# members are not this user's to signal (a command under --sudo-user) is
+# still running, and kill says "Operation not permitted" of it, which
+# LC_ALL=C keeps in English.  Exit 0 when nothing of it is left, 4 when
+# some of it is.  Never 0 or 1 as the group: `kill -- -1` is every process.
+STOP_SH = (
+    "LC_ALL=C; export LC_ALL; p=%d; [ \"$p\" -gt 1 ] || exit 3; "
+    "alive() { e=$(kill -s 0 -- -$p 2>&1) && return 0; "
+    "case $e in *ermi*) return 0 ;; esac; return 1; }; "
+    "if sleep 0.1 2>/dev/null; then d=0.1 n=20; else d=1 n=2; fi; "
+    "wait_gone() { i=0; while alive; do [ $i -lt $n ] || return 1; "
+    "sleep $d; i=$((i + 1)); done; }; "
+    "alive || exit 0; "
+    "kill -s TERM -- -$p 2>/dev/null; wait_gone && exit 0; "
+    "kill -s KILL -- -$p 2>/dev/null; wait_gone && exit 0; "
+    "echo 'agree: still running after TERM and KILL' >&2; exit 4")
+
+
+class TimedOut(int):
+    """agree's own timeout, 124 as `timeout` says it, but told apart from a
+    command that exited 124 itself: only agree's own is stopped on the
+    host."""
+
+
+class Flooded(int):
+    """Past --max-output, 125, told apart from a command that exited 125
+    itself, as TimedOut is."""
 
 
 def _stdio_safe():
@@ -542,7 +599,7 @@ def normalize(text, host, args):
 class Result(object):
     __slots__ = ("host", "outcome", "rc", "stdout", "stderr", "duration",
                  "norm", "digest", "group", "pull_error", "emptied",
-                 "cleanup_error")
+                 "cleanup_error", "left_running")
 
     def __init__(self, host):
         self.host = host
@@ -568,6 +625,10 @@ class Result(object):
         # cleanup was refused (see guarded_rm) or failed.  Kept out of the
         # outcome for the same reason as pull_error.
         self.cleanup_error = ""
+        # agree gave up on the command (past --timeout or --max-output)
+        # and could not confirm it stopped on the host: it may still be
+        # running there.  The why is in stderr.
+        self.left_running = False
 
 
 class Runner(object):
@@ -601,6 +662,16 @@ class Runner(object):
         # it is still the ssh user's own and cleanup runs as that user.
         self.cleanup_sudo = bool(sudo) and not sudo_user
         self.dir_mode = "755" if sudo and sudo_user else "700"
+        # The command runs under `sudo -n` (run_fleet), so the stop does
+        # too, or it could not signal what root or --sudo-user started.
+        self.stop_sudo = (("sudo -n -u %s" % shlex.quote(sudo_user))
+                          if sudo and sudo_user else
+                          "sudo -n" if sudo else "")
+        # the line every command sends first (MARK_SH): this run's own, so
+        # nothing a host prints can be taken for it
+        self.mark = "agree.%s.pgid" % self.run_id
+        self._mark_re = re.compile(
+            b"(?m)^" + re.escape(self.mark.encode()) + b" ([0-9]+) ([0-9]+)\n")
 
     def target(self, host):
         """ssh takes a bare address, v6 included: `ssh user@2001:db8::1`."""
@@ -626,56 +697,97 @@ class Runner(object):
         box caught in a log storm -- exactly the kind of box this tool is
         pointed at -- could grow this process by gigabytes, multiplied by
         --jobs.  Output is read incrementally and cut at --max-output;
-        a host that blows the cap is killed and reported as such, because
-        grouping the front half of a flood would be an answer to a
-        question nobody asked.
+        a host that blows the cap is reported as such, because grouping
+        the front half of a flood would be an answer to a question nobody
+        asked.  -> (rc, stdout, stderr)
         """
+        return self._capture(argv, timeout)[:3]
+
+    def _capture(self, argv, timeout, marked=False):
+        """_exec, and for a command sent by command_for (`marked`), the
+        process group the host said it runs in, with that line taken off
+        its stderr: -> (rc, stdout, stderr, group).  The group is None
+        when the line never came, and 0 when the shell does not lead a
+        group of its own.  Past the deadline rc is TimedOut, past
+        --max-output Flooded; either way ssh is killed here, and the
+        command is not: run_one stops that (Runner.stop)."""
         limit = int(self.max_output)
         try:
             p = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.DEVNULL)
         except OSError as exc:
-            return 127, "", str(exc)
+            return 127, "", str(exc), None
         chunks = {p.stdout: [], p.stderr: []}
         sizes = {p.stdout: 0, p.stderr: 0}
         deadline = time.monotonic() + timeout
         flooded = False
+        # stderr is held here, uncounted, until the line naming the group
+        # has come and been taken off (or 64 KiB came first, or it ended):
+        # what is left counts against --max-output exactly as before
+        head = [b""] if marked else None
+        group = [None]
+
+        def take(f, data):
+            room = limit - sizes[f]
+            if room > 0:
+                chunks[f].append(data[:room])
+            sizes[f] += len(data)
+            return sizes[f] > limit
+
+        def take_head(eof):
+            buf = head[0]
+            m = self._mark_re.search(buf)
+            if m:
+                pid, pgid = int(m.group(1)), int(m.group(2))
+                # 0: the line came, but its shell leads no group of its own
+                group[0] = pgid if pid == pgid > 1 else 0
+                buf = buf[:m.start()] + buf[m.end():]
+            elif not eof and len(buf) < 65536:
+                return False
+            head[0] = None
+            return take(p.stderr, buf)
+
         # selectors rather than select(): with --jobs worth of children a
         # descriptor number can pass select()'s 1024 ceiling
         sel = selectors.DefaultSelector()
         sel.register(p.stdout, selectors.EVENT_READ)
         sel.register(p.stderr, selectors.EVENT_READ)
         open_count = 2
+        timed_out = False
         while open_count:
             left = deadline - time.monotonic()
             if left <= 0:
-                sel.close()
-                p.kill()
-                p.wait()
-                return 124, "", "timed out after %ss" % timeout
+                timed_out = True
+                break
             for key, _ in sel.select(left):
                 f = key.fileobj
                 chunk = os.read(f.fileno(), 65536)
                 if not chunk:
                     sel.unregister(f)
                     open_count -= 1
+                    if f is p.stderr and head and head[0] is not None:
+                        flooded = take_head(True) or flooded
                     continue
-                room = limit - sizes[f]
-                if room > 0:
-                    chunks[f].append(chunk[:room])
-                sizes[f] += len(chunk)
-                if sizes[f] > limit:
-                    flooded = True
+                if f is p.stderr and head and head[0] is not None:
+                    head[0] += chunk
+                    flooded = take_head(False) or flooded
+                    continue
+                flooded = take(f, chunk) or flooded
             if flooded:
-                p.kill()
                 break
         sel.close()
-        try:
-            rc = p.wait(timeout=max(1.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
+        rc = None
+        if not timed_out and not flooded:
+            try:
+                rc = p.wait(timeout=max(1.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # both streams ended but ssh did not: the command closed
+                # them and ran on, past the deadline
+                timed_out = True
+        if timed_out or flooded:
             p.kill()
-            rc = p.wait()
+            p.wait()
         for f in (p.stdout, p.stderr):
             f.close()
 
@@ -683,20 +795,59 @@ class Runner(object):
             return b"".join(chunks[f]).decode("utf-8-sig", "replace")
 
         if flooded:
-            return 125, "", ("output exceeded --max-output (%d bytes); "
-                             "host killed" % limit)
-        return rc, text(p.stdout), text(p.stderr)
+            return (Flooded(125), "", "output exceeded --max-output (%d "
+                    "bytes)" % limit, group[0])
+        if timed_out:
+            return (TimedOut(124), "", "timed out after %ss" % timeout,
+                    group[0])
+        return rc, text(p.stdout), text(p.stderr), group[0]
 
-    def command_for(self, command, pushed=False):
+    def stop(self, host, group):
+        """Stop a command agree gave up on, on the host: TERM to its
+        process group, then KILL (STOP_SH), by a second ssh.  Under --sudo
+        the stop runs under the same `sudo -n` as the command; under
+        --sudo-user it then runs once more as the ssh user, whose login
+        shell that user cannot signal.  -> '' when nothing of it is left
+        there, else why agree cannot say so."""
+        if group is None:
+            return ("it never said it had started there, so %s could not "
+                    "stop it if it did" % PROG)
+        if not group:
+            return ("its shell there was not seen to lead a process group "
+                    "of its own, so %s would not signal it" % PROG)
+        script = STOP_SH % group
+        plain = "sh -c %s" % shlex.quote(script)
+        tries = [plain]
+        if self.stop_sudo:
+            tries = ["%s %s" % (self.stop_sudo, plain)]
+            if self.stop_sudo != "sudo -n":
+                tries.append(plain)
+        for cmd in tries:
+            rc, _, err = self._exec(self.ssh_argv(host, cmd), STOP_TIMEOUT)
+            if rc == 0:
+                return ""
+        last = (err or "").strip().splitlines()
+        why = last[-1].strip() if last else "exit %d" % rc
+        if why.startswith("agree: "):
+            why = why[len("agree: "):]
+        if isinstance(rc, TimedOut):
+            why = "the stop itself timed out"
+        return "%s could not stop it (%s)" % (PROG, why)
+
+    def command_for(self, command, pushed=False, marked=True):
         """What runs on a host.  When files were pushed, $AGREE_DIR names
         this run's directory, so `--push x -- '"$AGREE_DIR"/x'` finds x
         wherever the run id put it.  The command still runs where it always
         did, in the login directory, so a relative path in its arguments
-        (`--from-facts facts.json`) means what it meant before."""
+        (`--from-facts facts.json`) means what it meant before.  It goes
+        after the line naming its process group (MARK_SH), which --dry-run
+        leaves out (`marked`) so the command can be read."""
         if pushed:
-            return "AGREE_DIR=%s; export AGREE_DIR; %s" % (
+            command = "AGREE_DIR=%s; export AGREE_DIR; %s" % (
                 shlex.quote(self.work_dir), command)
-        return command
+        if not marked:
+            return command
+        return "sh -c %s; %s" % (shlex.quote(MARK_SH % self.mark), command)
 
     def push_files(self, host, files):
         for f in files:
@@ -795,10 +946,26 @@ class Runner(object):
                     r.cleanup_error = self.cleanup(host)
                 r.duration = time.monotonic() - t0
                 return r
-        rc, out, err = self._exec(
+        rc, out, err, group = self._capture(
             self.ssh_argv(host, self.command_for(command, bool(push))),
-            self.timeout)
+            self.timeout, marked=True)
         r.rc, r.stdout, r.stderr = rc, out, err
+        if isinstance(rc, (TimedOut, Flooded)):
+            # agree has given up on it, and killed its ssh; the command is
+            # stopped on the host too, before its directory goes, or the
+            # host's error says it may not be
+            why = self.stop(host, group)
+            if why:
+                r.left_running = True
+                r.stderr = "%s, and may still be running on the host: %s" % (
+                    err, why)
+                if push and cleanup:
+                    r.cleanup_error = ("left %s there, since the command in "
+                                       "it may still be running"
+                                       % self.work_dir)
+                    cleanup = False
+            else:
+                r.stderr = "%s; %s stopped it on the host" % (err, PROG)
         if pull:
             r.pull_error = self.pull_files(host, pull, self.args.pull_dir,
                                            bool(push))
@@ -1020,6 +1187,21 @@ def render_groups(groups, args, meta):
                    % ", ".join(meta["norms"]))
         out.append("")
 
+    # Grouping shows one sample's error for a whole group, so a host whose
+    # command may still be running would hide behind one that was stopped.
+    running = [r for g in groups for r in g.results if r.left_running]
+    if running:
+        out.append("  NOT STOPPED  the command may still be running on %d "
+                   "host%s, where %s could not stop it:"
+                   % (len(running), "" if len(running) == 1 else "s", PROG))
+        for r in running[:5]:
+            err = (r.stderr or "").strip().splitlines()
+            out.append("    %-12s %s" % (r.host.name,
+                                         (err[0] if err else "")[:160]))
+        if len(running) > 5:
+            out.append("    ... and %d more" % (len(running) - 5))
+        out.append("")
+
     failed_pulls = [r for g in groups for r in g.results if r.pull_error]
     if failed_pulls:
         out.append("  PULL FAILED  %d host%s, so --pull brought nothing back "
@@ -1100,6 +1282,12 @@ def _hints(groups, args, meta):
         out.append("      this run compared was empty strings.  Loosen the "
                    "filter that did it,")
         out.append("      or drop it and read the output first.")
+    running = [r for g in groups for r in g.results if r.left_running]
+    if running:
+        out.append("    * %s gave up on the command on %s and could not "
+                   "confirm it stopped there.  It may still be running: "
+                   "look before running it again."
+                   % (PROG, " ".join(r.host.name for r in running[:4])))
     pulls = [r for g in groups for r in g.results if r.pull_error]
     if pulls:
         out.append("    * --pull brought nothing back from %s.  The command "
@@ -1379,7 +1567,8 @@ def run_fleet(args, command, label=None):
     if args.dry_run:
         for h in hosts:
             print(" ".join(shlex.quote(c) for c in runner.ssh_argv(
-                h, runner.command_for(command, bool(args.push)))))
+                h, runner.command_for(command, bool(args.push),
+                                      marked=False))))
         return 0
     if args.push and args.keep_remote:
         sys.stderr.write("[%s] --keep-remote: what is pushed stays in %s on "

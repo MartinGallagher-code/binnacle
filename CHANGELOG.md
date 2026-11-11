@@ -4,6 +4,49 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-11-11
+
+shared_tools BN-004, after quarterdeck's QD-026.
+
+### Fixed
+
+- **A command `agree` gives up on is stopped on the host, not only its
+  local ssh killed.** Past `--timeout` or `--max-output` agree killed its
+  own ssh and reported the host, and the command ran on there: with no
+  terminal, sshd does not hang it up. Reproduced against OpenSSH 10.3 on
+  macOS before the fix (a command past `--timeout 1` that would write a
+  file two seconds on wrote it after agree had reported the host
+  `timeout`), as QD-026 had against OpenSSH 9.6. Every command now goes
+  out after one line on stderr naming the process group sshd started it
+  in (read from `/proc` where there is one), which agree takes off again
+  and does not count against `--max-output`. When agree gives up, a second
+  ssh sends that group TERM, then KILL, under the same `sudo -n` as the
+  command (and, under `--sudo-user`, once more as the ssh user). The
+  host's error ends `; agree stopped it on the host`, or `, and may still
+  be running on the host: ...` with why; such a host also gets a
+  `NOT STOPPED` section and a hint in the report, and a pushed script's
+  directory is kept, since the command in it may still be running, and
+  reported as not cleaned up. Otherwise the directory is removed only
+  after the stop. A shell that does not lead its own process group is
+  never signalled.
+- agree's own timeout and flood are told apart from a command that itself
+  exits 124 or 125: only agree's own are stopped on the host. The outcome
+  each is grouped under is unchanged.
+- The `--max-output` message no longer says "host killed", which was never
+  true of the host; `--help` and the manual say what agree now does.
+  `--dry-run` leaves the process-group line out, so the command reads as
+  before.
+- A command that finishes in time answers byte for byte as before.
+
+### Added
+
+- `tests/test_stop.sh`: the stop against the fake ssh in a new
+  `FAKE_SSH_DETACH=1` mode, which runs the "remote" command in a session
+  of its own, apart from the client, as OpenSSH does.
+- `tests/check_real_sshd.sh`: the same against a real sshd of its own on
+  127.0.0.1, with throwaway keys. Not run by CI; it skips where there is no
+  sshd.
+
 ## [0.10.0] - 2026-11-10
 
 Opened as one pull request with 0.9.0 (shared_tools BN-002), which numbered
@@ -2558,6 +2601,7 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
+[0.10.1]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.6.0...v0.8.0
