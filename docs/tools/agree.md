@@ -68,6 +68,42 @@ That distinction is also in the exit code: `3` (something failed) outranks
 `1` (divergence), because a host you could not reach is a bigger problem
 than a host that disagreed.
 
+### A command agree gives up on is stopped on the host
+
+Past `--timeout`, or past `--max-output`, agree gives up on a host. Killing
+its own ssh is not enough to stop the command: agree asks for no terminal,
+so sshd does not hang the command up, and it goes on running on the host
+after the report has called it `timeout` (reproduced against OpenSSH 9.6
+and 10.3; pdsh and pssh behave the same way). So every command goes out
+after one line on stderr naming the process group sshd started it in, and
+agree takes that line off again before anything sees or counts it. When
+agree gives up, a second ssh sends that group TERM, then KILL two seconds
+later if any of it is left, under the same `sudo -n` as the command. The
+host's error says which happened:
+
+```text
+  GROUP 2     1 host   timeout
+    hosts: web07
+    timed out after 60.0s; agree stopped it on the host
+```
+
+A host where the stop could not be confirmed (the host stopped answering,
+or something in the group would not die) says so in its error, gets a
+`NOT STOPPED` section of its own in the report, and keeps a pushed
+script's directory, which is otherwise removed only once the command in it
+is stopped:
+
+```text
+  NOT STOPPED  the command may still be running on 1 host, where agree could not stop it:
+    web07        timed out after 60.0s, and may still be running on the host: agree could not stop it (...)
+```
+
+A shell that does not lead a process group of its own is never signalled,
+because that group belongs to something else. A command that finishes in
+time answers byte for byte as it did before.
+`tests/check_real_sshd.sh` checks all of this against a real sshd on the
+machine it runs on.
+
 ## Normalization
 
 Raw outputs almost never match byte for byte. A hostname, a timestamp or a
@@ -203,8 +239,9 @@ before the scary command.
 
 ## Safety
 
-`--dry-run` prints the exact ssh argv per host and contacts nobody. Always
-available.
+`--dry-run` prints the ssh argv per host and contacts nobody. Always
+available. It leaves out the one line agree sends before every command to
+name its process group, so the command can be read.
 
 A **mutation guard** refuses obviously destructive commands — `rm -rf`,
 `mkfs`, `dd of=`, `shutdown`, `systemctl stop`, package removal, recursive
