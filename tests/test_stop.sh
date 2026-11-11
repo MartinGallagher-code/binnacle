@@ -50,7 +50,7 @@ PYEOF
 drive() { "$PY" "$TEST_TMPDIR/drive.py" "$BINNACLE_DIR" "$@"; }
 
 setup_detached() {
-    cd "$TEST_TMPDIR"
+    cd "$TEST_TMPDIR" || return 1
     install_fake_ssh
     fake_host n01
     export FAKE_SSH_DETACH=1
@@ -136,7 +136,7 @@ t_a_command_exiting_124_is_not_stopped() {
 # CRLF, stderr apart, and the line naming the group taken off again and
 # not counted against --max-output
 t_an_answer_in_time_is_unchanged() {
-    cd "$TEST_TMPDIR"
+    cd "$TEST_TMPDIR" || return 1
     for detach in "" 1; do
         install_fake_ssh
         fake_host n01
