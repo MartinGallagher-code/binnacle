@@ -14,7 +14,7 @@ shared_tools BN-004, after quarterdeck's QD-026.
   local ssh killed.** Past `--timeout` or `--max-output` agree killed its
   own ssh and reported the host, and the command ran on there: with no
   terminal, sshd does not hang it up. Reproduced against OpenSSH 10.3 on
-  macOS before the fix (a command past `--timeout 1` that would write a
+  macOS and OpenSSH 10.0 on Debian before the fix (a command past `--timeout 1` that would write a
   file two seconds on wrote it after agree had reported the host
   `timeout`), as QD-026 had against OpenSSH 9.6. Every command now goes
   out after one line on stderr naming the process group sshd started it

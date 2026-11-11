@@ -11,7 +11,8 @@
 # or changed), then checks what the fake ssh in the suites cannot prove:
 # that a command agree gives up on, past --timeout or --max-output, is
 # stopped on the host with its children (BN-004), a pushed script too,
-# and that a command that finishes in time answers exactly as before.
+# under --sudo and --sudo-user too where `sudo -n` works, and that a
+# command that finishes in time answers exactly as before.
 # Each command would leave a mark a few seconds on; a stopped one never
 # does.  Needs sshd and ssh-keygen (openssh-server); skips, exit 0, where
 # there are none.  Not run by CI.  Exit status: 0 when every check passed,
@@ -110,7 +111,7 @@ stopped() {
     done
     case "$out" in
         *"stopped it on the host"*) pass "$name" ;;
-        *) fail "$name: agree did not say it stopped it: $out" ;;
+        *) fail "$name: agree did not say it stopped it:"; printf "%s\n" "$out" | sed "s/^/       /" ;;
     esac
 }
 
@@ -127,6 +128,38 @@ if ls -d "$d"/rd/agree.* > /dev/null 2>&1; then
     fail "script: its directory was left: $(ls "$d/rd")"
 else
     stopped "script, stopped, then its directory removed" "$out" "$d/script"
+fi
+
+# Under --sudo and --sudo-user the stop has to run under the same sudo, or
+# it cannot signal what root or that user started.  Only where `sudo -n`
+# works, and the marks go in a directory every user can write: each case
+# first runs in time and has to leave its mark, or a mark that never came
+# would prove nothing about the stop.
+w=
+sudo_case() {
+    local name=$1 tag=$2
+    shift 2
+    agree run "$@" -- "touch $w/$tag.ctl" > /dev/null
+    if [ ! -e "$w/$tag.ctl" ]; then
+        fail "$name: the control run in time left no mark, so this proves nothing"
+        return
+    fi
+    # one simple command, since --sudo puts `sudo -n` in front of it as given
+    out="$(agree run --timeout 1 "$@" -- "sh -c '(sleep 2; touch $w/$tag.child) & sleep 2; touch $w/$tag'")"
+    stopped "$name" "$out" "$w/$tag" "$w/$tag.child"
+}
+if sudo -n true 2> /dev/null; then
+    w="$(mktemp -d "${TMPDIR:-/tmp}/agree-sudo.XXXXXX")"
+    chmod 1777 "$w"
+    sudo_case "--sudo, past --timeout, stopped as root" root --sudo
+    if id nobody > /dev/null 2>&1; then
+        sudo_case "--sudo-user nobody, past --timeout, stopped" nobody --sudo --sudo-user nobody
+    else
+        echo "  skip --sudo-user: there is no user nobody here"
+    fi
+    sudo -n rm -rf "$w"
+else
+    echo "  skip --sudo and --sudo-user: sudo -n needs a password here"
 fi
 
 # in time: the answer as plain ssh gives it, byte for byte
