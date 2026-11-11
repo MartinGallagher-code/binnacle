@@ -14,11 +14,12 @@ shared_tools BN-004, after quarterdeck's QD-026.
   local ssh killed.** Past `--timeout` or `--max-output` agree killed its
   own ssh and reported the host, and the command ran on there: with no
   terminal, sshd does not hang it up. Reproduced against OpenSSH 10.3 on
-  macOS before the fix (a command past `--timeout 1` that would write a
-  file two seconds on wrote it after agree had reported the host
-  `timeout`), as QD-026 had against OpenSSH 9.6. Every command now goes
-  out after one line on stderr naming the process group sshd started it
-  in (read from `/proc` where there is one), which agree takes off again
+  macOS and OpenSSH 10.0 on Debian before the fix (a command past
+  `--timeout 1` that would write a file two seconds on wrote it after
+  agree had reported the host `timeout`), as QD-026 had against OpenSSH
+  9.6. Every command now goes out after one line on stderr naming the
+  process group sshd started it in (read from `/proc` where there is
+  one), which agree takes off again
   and does not count against `--max-output`. When agree gives up, a second
   ssh sends that group TERM, then KILL, under the same `sudo -n` as the
   command (and, under `--sudo-user`, once more as the ssh user). The

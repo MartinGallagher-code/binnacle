@@ -102,7 +102,15 @@ A shell that does not lead a process group of its own is never signalled,
 because that group belongs to something else. A command that finishes in
 time answers byte for byte as it did before.
 `tests/check_real_sshd.sh` checks all of this against a real sshd on the
-machine it runs on.
+machine it runs on, and `--sudo` and `--sudo-user` too where `sudo -n`
+needs no password.
+
+One case reads as `NOT STOPPED` when the command did stop: a container
+whose first process is a plain shell rather than an init that reaps (run
+without `--init`). A killed command is then left as a zombie nobody
+collects, and a zombie still counts as a member of its group, so agree
+cannot tell it from one still running and says it may be. It never says
+the opposite.
 
 ## Normalization
 
