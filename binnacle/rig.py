@@ -60,7 +60,7 @@ import shutil
 import subprocess
 import sys
 
-VERSION = "0.10.1"
+VERSION = "0.10.2"
 PROG = os.path.basename(sys.argv[0]) or "rig.py"
 
 # What a name may be: the dashes are optional and say how the flag is
