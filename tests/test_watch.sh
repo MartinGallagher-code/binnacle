@@ -364,6 +364,18 @@ t_binnacle_watch_is_agree_watch() {
     assert_contains "$out" "agree watch record"
 }
 
+t_binnacle_watch_survives_an_ascii_stdout() {
+    # Python 3.6 under LANG=C: stdout is ASCII, and binnacle and agree
+    # each made it safe, one wrapper over the other, and the first one's
+    # collection closed the buffer under the second (CI, 0.11.0's PR).
+    # PYTHONCOERCECLOCALE=0 and PYTHONUTF8=0 give a later Python the
+    # same ASCII stdout.
+    out="$(LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 \
+        "$PY" "$BN" watch probes --no-defaults --probe 'a = b' 2>&1)"
+    assert_status $? 0
+    assert_contains "$out" "a = b"
+}
+
 t_watch_is_in_the_help() {
     out="$("$PY" "$AG" help)"
     assert_contains "$out" "agree watch -- a standing check"
@@ -393,5 +405,6 @@ run_test "the default probes run"                t_the_default_probes_run
 run_test "check normalizes and says so"          t_check_normalizes_and_says_so
 run_test "--json has each finding"               t_json_has_each_finding
 run_test "binnacle watch is agree watch"         t_binnacle_watch_is_agree_watch
+run_test "binnacle watch on an ascii stdout"     t_binnacle_watch_survives_an_ascii_stdout
 run_test "watch is in the help"                  t_watch_is_in_the_help
 finish

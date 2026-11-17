@@ -499,10 +499,15 @@ def watch(argv):
 
 
 def main(argv=None):
-    _stdio_safe()
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Before _stdio_safe, not after: agree's main makes stdout safe itself,
+    # and wrapping an ASCII stdout twice leaves the first wrapper to be
+    # collected, which closes the buffer both share ("I/O operation on
+    # closed file" under LANG=C on Python 3.6, where nothing coerces the
+    # locale to UTF-8).
     if argv and argv[0] == "watch":
         return watch(argv[1:])
+    _stdio_safe()
     args = build_parser().parse_args(argv)
 
     if args.verb not in VERBS:
