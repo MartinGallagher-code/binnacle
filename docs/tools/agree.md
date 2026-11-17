@@ -112,6 +112,52 @@ collects, and a zombie still counts as a member of its group, so agree
 cannot tell it from one still running and says it may be. It never says
 the opposite.
 
+### What the login shell prints first is dropped
+
+sshd runs the command through your login shell, and that shell reads its
+startup files -- `~/.bashrc`, `/etc/bash.bashrc`, `~/.zshenv` -- before it
+runs anything. Whatever they print lands in the same stdout and stderr as
+the command's answer: a greeting, a maintenance notice, `bash: warning:
+setlocale: LC_ALL: cannot change locale`. Kept, one chatty host splits the
+fleet into two groups that differ by nothing but the greeting, and the
+report tells you to fix the hosts that were right; a setlocale warning
+becomes a failed host's error.
+
+So the line agree sends before every command goes to stdout as well as
+stderr, and on each stream everything before it is dropped. bash and zsh
+read every startup file before they run the command, so nothing the command
+prints can come before the line. What was dropped is in no group, diff,
+report, CSV, JSON or `watch` baseline, and the host is not flagged: it keeps
+the group and the outcome its command earned. One line on stderr says which
+hosts' shells printed, so the startup file can be quieted, and nothing is
+said when none did:
+
+```text
+[agree] 1 host's login shell printed before the command (web07): dropped from its answer (--keep-preamble keeps it)
+```
+
+The usual fix is to print only in an interactive shell, at the top of
+`~/.bashrc`: `case $- in *i*) ;; *) return ;; esac`. `agree doctor` says the
+same line, so it is the quick way to find such hosts.
+
+- **No line, no cut.** Where the line never comes -- a startup file that
+  exits, or `exec`s something else, so the command never ran -- or more than
+  64 KiB comes first, the stream is kept exactly as it came. The line itself
+  is still taken off when it comes, so it never shows in an answer.
+- The line carries the run's random id, so nothing a host prints can be
+  taken for it, and only what comes before it is looked at: the command's own
+  output is never cut, whatever it prints.
+- agree's own commands on a host (making the run's directory, chmod, the
+  cleanup, the stop) go after the line too, so a failed push's error is the
+  push's, not the greeting.
+- **`--keep-preamble`** (`AGREE_KEEP_PREAMBLE=1`) keeps everything, byte for
+  byte as 0.11.0 did, and sends the command exactly as 0.11.0 sent it.
+
+`tests/check_real_sshd.sh` checks this against a real sshd and a real bash
+reading `~/.bashrc` (one of its own: it sets `HOME` for the sshd it starts).
+Output a startup file prints *after* the command, from an `EXIT` trap, is
+not cut.
+
 ## Normalization
 
 Raw outputs almost never match byte for byte. A hostname, a timestamp or a
@@ -248,8 +294,9 @@ before the scary command.
 ## Safety
 
 `--dry-run` prints the ssh argv per host and contacts nobody. Always
-available. It leaves out the one line agree sends before every command to
-name its process group, so the command can be read.
+available. It leaves out the line agree sends before every command to name
+its process group and mark where the command's own output starts, so the
+command can be read.
 
 A **mutation guard** refuses obviously destructive commands — `rm -rf`,
 `mkfs`, `dd of=`, `shutdown`, `systemctl stop`, package removal, recursive

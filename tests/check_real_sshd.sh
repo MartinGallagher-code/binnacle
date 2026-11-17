@@ -12,11 +12,15 @@
 # that a command agree gives up on, past --timeout or --max-output, is
 # stopped on the host with its children (BN-004), a pushed script too,
 # under --sudo and --sudo-user too where `sudo -n` works, and that a
-# command that finishes in time answers exactly as before.
-# Each command would leave a mark a few seconds on; a stopped one never
-# does.  Needs sshd and ssh-keygen (openssh-server); skips, exit 0, where
-# there are none.  Not run by CI.  Exit status: 0 when every check passed,
-# 1 when one failed.  After quarterdeck's tests/check_real_sshd.sh (QD-026).
+# command that finishes in time answers exactly as before.  Then, with the
+# login shell printing before every command (this sshd sets HOME to the
+# check's own directory, whose .bashrc and .zshenv print), that the greeting
+# and warning are dropped, --keep-preamble keeps them, and the stop still
+# works (BN-011).  Each command would leave a mark a few seconds on; a
+# stopped one never does.  Needs sshd and ssh-keygen (openssh-server);
+# skips, exit 0, where there are none.  Not run by CI.  Exit status: 0
+# when every check passed, 1 when one failed.  After quarterdeck's
+# tests/check_real_sshd.sh (QD-026).
 
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -24,7 +28,7 @@ AGREE="$PWD/binnacle/agree.py"
 PY="${PY:-python3}"
 
 case "${1:-}" in
-    -h|--help) sed -n '5,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '5,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 SSHD="$(command -v sshd || echo /usr/sbin/sshd)"
@@ -69,6 +73,21 @@ Host *
   Port $port
 CONF
 [ "$(id -u)" = 0 ] && mkdir -p /run/sshd
+# The login shell's startup files are this check's own, so they can print
+# before the command without this user's being touched: HOME is $d, whose
+# .bashrc (bash under sshd reads ~/.bashrc) and .zshenv are empty until the
+# BN-011 checks print from them; BASH_ENV for a bash built not to.  SetEnv
+# is OpenSSH 7.8 and later; without it those checks skip.
+login_rc() {
+    printf '%s\n' "$@" > "$d/.bashrc"
+    cp "$d/.bashrc" "$d/.zshenv"
+}
+login_rc ""
+cp "$d/sshd_config" "$d/sshd_config.try"
+printf 'SetEnv HOME=%s BASH_ENV=%s\n' "$d" "$d/.bashrc" >> "$d/sshd_config.try"
+if "$SSHD" -t -f "$d/sshd_config.try" 2> /dev/null; then
+    mv "$d/sshd_config.try" "$d/sshd_config"
+fi
 if ! "$SSHD" -f "$d/sshd_config" -E "$d/sshd.log"; then
     echo "check_real_sshd: sshd would not start:" >&2
     cat "$d/sshd.log" >&2
@@ -162,30 +181,70 @@ else
     echo "  skip --sudo and --sudo-user: sudo -n needs a password here"
 fi
 
-# in time: the answer as plain ssh gives it, byte for byte
-cmd='printf "a\tb\n\nc"; printf "e1\ne2\n" >&2; [ -t 0 ] || [ -t 1 ] && echo tty; exit 3'
-got="$("$PY" - "$PWD/binnacle" "$SSH" "$cmd" <<'PYEOF'
-import json, sys
+# answer FLAGS CMD: what agree's Runner hears from CMD here, as JSON
+answer() {
+    "$PY" - "$PWD/binnacle" "$SSH" "$1" "$2" <<'PYEOF'
+import json, shlex, sys
 sys.path.insert(0, sys.argv[1])
 import agree
-args = agree.build_parser()[0].parse_args(["run", "--ssh", sys.argv[2]])
-x = agree.Runner(args).run_one(agree.Host("h", "127.0.0.1"), sys.argv[3])
+args = agree.build_parser()[0].parse_args(
+    ["run", "--ssh", sys.argv[2]] + shlex.split(sys.argv[3]))
+x = agree.Runner(args).run_one(agree.Host("h", "127.0.0.1"), sys.argv[4])
 print(json.dumps([x.rc, x.stdout, x.stderr]))
 PYEOF
-)"
-want="$("$PY" - "$SSH" "$cmd" <<'PYEOF'
+}
+# plain CMD: what plain ssh hears from it, the same way
+plain() {
+    "$PY" - "$SSH" "$1" <<'PYEOF'
 import json, shlex, subprocess, sys
 p = subprocess.run(shlex.split(sys.argv[1]) + ["127.0.0.1", sys.argv[2]],
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                    stdin=subprocess.DEVNULL)
 print(json.dumps([p.returncode, p.stdout.decode(), p.stderr.decode()]))
 PYEOF
-)"
+}
+
+# in time: the answer as plain ssh gives it, byte for byte
+cmd='printf "a\tb\n\nc"; printf "e1\ne2\n" >&2; [ -t 0 ] || [ -t 1 ] && echo tty; exit 3'
+got="$(answer "" "$cmd")"
+want="$(plain "$cmd")"
 if [ "$got" = "$want" ]; then
     pass "in time, the same answer as plain ssh: $got"
 else
     fail "in time: agree said $got, plain ssh $want"
 fi
+
+# BN-011: a login shell that prints before the command, under a real sshd
+# and a real bash.  agree hears what a quiet one says; --keep-preamble
+# hears what plain ssh does, greeting and all; and the stop still works.
+login_rc "echo 'Welcome -- maintenance Friday'" \
+    "echo 'bash: warning: setlocale: LC_ALL: cannot change locale' >&2"
+raw="$(plain "$cmd")"
+case "$raw" in
+    *Welcome*setlocale*)
+        got="$(answer "" "$cmd")"
+        if [ "$got" = "$want" ]; then
+            pass "a printing login shell: the answer a quiet one gives"
+        else
+            fail "a printing login shell: agree said $got, a quiet shell $want"
+        fi
+        got="$(answer --keep-preamble "$cmd")"
+        if [ "$got" = "$raw" ]; then
+            pass "--keep-preamble: plain ssh's answer, greeting and all"
+        else
+            fail "--keep-preamble: agree said $got, plain ssh $raw"
+        fi
+        out="$(agree run --timeout 1 -- "(sleep 2; touch $d/rc.child) & sleep 2; touch $d/rc")"
+        case "$out" in
+            *Welcome*|*setlocale*) fail "a printing login shell, past --timeout: its greeting was in the report" ;;
+            *) stopped "a printing login shell, past --timeout, stopped" "$out" "$d/rc" "$d/rc.child" ;;
+        esac
+        ;;
+    *)
+        echo "  skip the login-shell checks: this sshd has no SetEnv (OpenSSH before 7.8), or the login shell reads neither ~/.bashrc nor ~/.zshenv"
+        ;;
+esac
+login_rc ""
 
 if [ "$failed" -gt 0 ]; then
     echo "check_real_sshd: $failed check(s) failed"

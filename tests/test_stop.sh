@@ -154,6 +154,22 @@ t_an_answer_in_time_is_unchanged() {
     done
 }
 
+t_a_printing_login_shell_does_not_stop_the_stop() {
+    # BN-011: the line now goes to stdout too, and what the login shell
+    # prints before it is dropped; the stop still finds the command's
+    # group, and its own ssh's greeting is not taken for its error.
+    setup_detached
+    fake_login_rc n01 "echo Welcome; echo 'bash: warning: setlocale' >&2"
+    ag_rc -S n01 --timeout 1 -- \
+        '(sleep 3; touch CHILD) & sleep 3; touch MARK' > out 2>&1
+    assert_status "$AG_RC" 3
+    assert_contains "$(cat out)" "timed out after 1.0s; agree.py stopped it on the host"
+    assert_not_contains "$(cat out)" "setlocale"
+    later
+    assert_no_file "$FAKE_ROOT/n01/MARK"
+    assert_no_file "$FAKE_ROOT/n01/CHILD"
+}
+
 t_dry_run_shows_the_command_without_the_mark() {
     install_fake_ssh
     fake_host n01
@@ -170,5 +186,6 @@ run_test "a script stops before its directory goes"    t_a_script_is_stopped_bef
 run_test "a stop not confirmed is said"                t_a_stop_that_cannot_be_confirmed_is_said
 run_test "a command exiting 124 or 125 is not stopped" t_a_command_exiting_124_is_not_stopped
 run_test "an answer in time is unchanged"              t_an_answer_in_time_is_unchanged
+run_test "a printing login shell still stops"      t_a_printing_login_shell_does_not_stop_the_stop
 run_test "--dry-run leaves the mark out"               t_dry_run_shows_the_command_without_the_mark
 finish

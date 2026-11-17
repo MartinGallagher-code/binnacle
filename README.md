@@ -126,7 +126,10 @@ Runs a command across a fleet and reports the consensus — 47 agree, 3 don't,
 here's the diff — instead of N screens of output. **A failed host is a
 group, not an error**: "3 hosts never answered" is usually the finding. The
 active normalizations are always printed, because "47 agree" means nothing
-if you masked every number to get there.
+if you masked every number to get there. What a host's login shell prints
+before the command -- a greeting from `~/.bashrc`, a setlocale warning -- is
+dropped, so one chatty startup file cannot split the fleet; one line on
+stderr names those hosts, and `--keep-preamble` keeps it all.
 
 `agree watch` makes that a standing check for cron or CI: `watch record`
 saves every host's BIOS, microcode, kernel, NIC driver, firmware and
