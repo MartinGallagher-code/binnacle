@@ -128,6 +128,13 @@ group, not an error**: "3 hosts never answered" is usually the finding. The
 active normalizations are always printed, because "47 agree" means nothing
 if you masked every number to get there.
 
+`agree watch` makes that a standing check for cron or CI: `watch record`
+saves every host's BIOS, microcode, kernel, NIC driver, firmware and
+settings, and `watch check` names the hosts that **changed since then** and
+the hosts that **disagree with their peers**, exiting 1 if there are any
+and listing unreachable hosts on their own. `binnacle watch` is the same
+command.
+
 ### logtriage
 
 Masks the variable parts of each line to find its shape, then ranks by

@@ -9,6 +9,9 @@ Usage: binnacle                    the instruments installed here, and their ver
        binnacle help TOOL          just that one
        binnacle copy TOOL...       put those instruments' files here, to copy on
        binnacle copy --all         all of them
+       binnacle watch record|check -b FILE [OPTIONS]
+                                   a standing check of a fleet's firmware,
+                                   kernel and NIC settings: agree's watch
        binnacle --version          this command's own version
 
 Options:
@@ -34,13 +37,13 @@ import io
 import os
 import sys
 
-VERSION = "0.10.2"
+VERSION = "0.11.0"
 PROG = os.path.basename(sys.argv[0]) or "binnacle.py"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SELF = os.path.basename(os.path.abspath(__file__))
 
-VERBS = ("list", "help", "copy")
+VERBS = ("list", "help", "copy", "watch")
 
 # The rule separating one tool's help from the next, matching what
 # `agree help` and `netmesh help` already print between their verbs.
@@ -464,7 +467,7 @@ def build_parser():
                        "There is no warranty, to the extent permitted by law."
                    ) % (PROG, VERSION))
     p.add_argument("verb", nargs="?", default="list", metavar="VERB",
-                   help="list (the default), help, or copy")
+                   help="list (the default), help, copy, or watch")
     p.add_argument("tool", nargs="*", metavar="TOOL",
                    help="with help, the one instrument to describe; "
                         "with copy, the ones to put here")
@@ -479,8 +482,27 @@ def build_parser():
     return p
 
 
+def watch(argv):
+    """`binnacle watch ...` is `agree watch ...` (shared_tools BN-009).
+
+    The code is agree's, beside its runner and its grouping, since a
+    standalone instrument cannot import another; this verb only hands the
+    arguments over, so there is one watch and not two that drift apart.
+    """
+    path = os.path.join(HERE, "agree.py")
+    try:
+        agree = _load("_binnacle_tool_agree", path)
+    except Exception as exc:
+        die("watch is agree's, and %s could not be loaded: %s: %s"
+            % (path, exc.__class__.__name__, exc), 1)
+    return agree.main(["watch"] + list(argv))
+
+
 def main(argv=None):
     _stdio_safe()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "watch":
+        return watch(argv[1:])
     args = build_parser().parse_args(argv)
 
     if args.verb not in VERBS:

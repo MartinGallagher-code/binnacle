@@ -13,7 +13,11 @@ binnacle                # the instruments installed here, and their versions
 binnacle help           # every instrument's --help, in one page
 binnacle help netmesh   # just that one
 binnacle copy netmesh   # netmesh.py, here, ready to scp somewhere
+binnacle watch check -b fleet.json   # agree's standing drift check
 ```
+
+`binnacle watch` is [`agree watch`](agree.md#watch) under the housing's name:
+the arguments are handed straight to the agree beside it.
 
 ## What you get
 

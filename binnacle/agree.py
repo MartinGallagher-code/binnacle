@@ -7,6 +7,7 @@ Usage: agree.py [run] [OPTIONS] -- COMMAND...
        agree.py script PATH|TOOL [OPTIONS] -- ARGS...  push a script, run it, collect
        agree.py hosts  [OPTIONS]                   expand and print the host list
        agree.py doctor [OPTIONS]                   can this fleet be reached?
+       agree.py watch record|check -b FILE [OPTIONS]  a standing drift check
        agree.py help                               every flag of every verb
 
 Examples:
@@ -70,6 +71,12 @@ Normalization (outputs almost never match byte for byte):
   --head N/--tail N   only the first/last N lines
   --field N           only whitespace-field N of each line
 
+watch (`agree watch` alone prints the whole of it):
+  -b, --baseline FILE where record saves every host's answers, and check
+                      reads them back
+  --probes FILE / --probe NAME=CMD / --skip NAME / --no-defaults
+                      change the probe set (record and probes only)
+
 Full manual: https://binnacle.readthedocs.io/en/latest/tools/agree.html
 """
 
@@ -90,7 +97,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.10.2"
+VERSION = "0.11.0"
 PROG = os.path.basename(sys.argv[0]) or "agree.py"
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
@@ -1619,10 +1626,516 @@ def run_fleet(args, command, label=None):
 
 
 # ---------------------------------------------------------------------------
+# watch: a saved probe set, a saved baseline, and a check against both
+# ---------------------------------------------------------------------------
+#
+# shared_tools BN-009.  `agree run` answers "who disagrees, right now?"
+# once, for one command.  `watch` makes that a standing check: `watch
+# record` runs a set of probes -- BIOS, CPU microcode, kernel, NIC driver
+# and firmware, NIC settings -- across the fleet and saves every host's
+# answers to a file; `watch check` runs the same probes again and reports
+# two things:
+#
+#   changed      a host whose answer differs from its own in the baseline
+#                (the regression watcher: it was A, it is B now)
+#   disagrees    a host whose answer differs from the rest of the fleet's
+#                (the drift checker), by the grouping `agree run` uses:
+#                the largest group is the majority, the rest drifted
+#
+# with an exit status a cron job or a CI step can act on.  It is built on
+# this file's own Runner, fan_out, normalize and group_results rather than
+# copies of them, which is why it is a verb of agree and not a fifteenth
+# file: a standalone tool could not import them (see the foot of this
+# file).  `binnacle watch` hands straight through to it.
+#
+# The baseline is reckon's idea (--baseline): an earlier run's own output,
+# refused if it is anything else, carrying when it was taken so the report
+# can say "since".  What is saved is each host's raw answer, never a
+# normalized one, so a check can be normalized differently from the
+# record without recording again.
+#
+# One ssh per host, not one per probe: every probe runs in one `sh -c`,
+# framed by lines carrying this run's id, which nothing a probe prints
+# can forge, and split apart again here.
+
+WATCH_HELP = """\
+agree watch -- a standing check of what a fleet is running.
+
+Usage: agree watch record --baseline FILE [OPTIONS]  save every host's answers
+       agree watch check  --baseline FILE [OPTIONS]  who changed, who differs
+       agree watch probes [PROBE OPTIONS]            print the probe set
+       (binnacle watch ... is the same command)
+
+`record` runs a set of probes across the fleet -- BIOS, CPU microcode,
+kernel, NIC driver and firmware, NIC settings (ethtool) -- one ssh per host,
+and saves each host's answers in FILE.  `check` runs the probes saved in
+FILE again, on the hosts saved in FILE unless --servers/-S names others,
+and reports:
+
+  CHANGED SINCE THE BASELINE   a host's answer is not what it was
+  DISAGREES WITH ITS PEERS     a host's answer is not the majority's, by
+                               the grouping `agree run` uses
+  UNREACHABLE                  no answers at all: not compared, and never
+                               counted as drift
+
+Examples:
+  agree watch record -b fleet.json --servers prod.txt
+  agree watch check  -b fleet.json                  # from cron or CI
+  agree watch record -b fleet.json --servers prod.txt --skip nic-settings \\
+        --probe 'bmc = ipmitool mc info | grep -i firmware' --sudo
+  agree watch probes > probes.txt; agree watch record --no-defaults \\
+        --probes probes.txt -b fleet.json --servers prod.txt
+
+Options (and every host and transport option of `agree run`):
+  -b, --baseline FILE   the baseline to write (record) or read (check)
+  --probes FILE         probes from FILE, one NAME = COMMAND per line, run
+                        by sh, '#' comments; repeatable
+  --probe NAME=COMMAND  one more probe; repeatable.  A probe of a name
+                        already there replaces it
+  --no-defaults         only the probes given, not the built-in set
+  --skip NAME           leave a probe out; repeatable
+  --json PATH           (check) the findings as JSON as well
+  --max-diff-lines N    truncate a long changed answer            (40)
+  Normalization: as for `agree run` -- --loose, --strict, --sort-lines,
+  --mask-numbers, --scrub RE ... -- applied to every probe's answer.
+  --grep, --head, --field and the other slices are run's only.
+
+`record` and `probes` take the probe flags; check refuses them, since it runs
+exactly what was recorded -- record again to change the set.  The
+baseline holds every answer raw, so a check may normalize differently.
+
+Exit status
+  0   record: every host answered.  check: no host changed, none differs
+  1   check: a host changed since the baseline or differs from its peers
+  2   usage error, or a FILE that is not a baseline
+  3   record: some hosts could not be recorded (none at all: FILE is left
+      as it was).  check: no drift, but some hosts could not be checked
+
+Full manual: https://binnacle.readthedocs.io/en/latest/tools/agree.html#watch
+"""
+
+WATCH_FORMAT = "agree-watch-baseline/1"
+
+# Every interface with a device behind it (no lo, no bridges, no veths),
+# one block each, headed by its name.
+_NIC_LOOP = ('for d in /sys/class/net/*/device; do [ -e "$d" ] || continue; '
+             'i=${d%%/device}; i=${i##*/}; echo "$i:"; %s; done')
+
+DEFAULT_PROBES = [
+    ("bios", "cat /sys/class/dmi/id/bios_vendor /sys/class/dmi/id/bios_version"
+             " /sys/class/dmi/id/bios_date"),
+    ("microcode", "grep -m1 '^microcode' /proc/cpuinfo"),
+    ("kernel", "uname -r"),
+    ("nic-driver", _NIC_LOOP % (
+        'if command -v ethtool >/dev/null 2>&1; then '
+        'ethtool -i "$i" 2>&1 | grep -E "^(driver|version|firmware-version):"'
+        ' | sed "s/^/  /"; else '
+        'echo "  driver: $(basename "$(readlink "$d/driver")")"; fi')),
+    ("nic-settings", _NIC_LOOP % (
+        'echo "  mtu: $(cat /sys/class/net/$i/mtu)"; '
+        'command -v ethtool >/dev/null 2>&1 || continue; '
+        '{ ethtool "$i" | grep -E "Speed:|Duplex:|Auto-negotiation:"; '
+        'ethtool -g "$i"; ethtool -l "$i"; ethtool -k "$i"; } 2>&1 '
+        '| sed "s/^[[:space:]]*/  /"')),
+]
+
+PROBE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def parse_probe(text, where):
+    """'NAME = COMMAND' -> (name, command), or a refusal naming WHERE."""
+    name, sep, command = text.partition("=")
+    name, command = name.strip(), command.strip()
+    if not sep or not command:
+        die("%s: want NAME = COMMAND, got %r" % (where, text))
+    if not PROBE_NAME_RE.match(name):
+        die("%s: bad probe name %r (letters, digits and . _ -, starting "
+            "with a letter or digit)" % (where, name))
+    return name, command
+
+
+def read_probe_file(path):
+    try:
+        with io.open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        die("cannot read probe file %s: %s" % (path, exc))
+    probes = []
+    for n, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        probes.append(parse_probe(line, "%s:%d" % (path, n)))
+    return probes
+
+
+def probe_set(args):
+    """The probes to run, in order: the defaults (unless --no-defaults),
+    then --probes files, then --probe flags.  A later probe of the same
+    name replaces the earlier one in its place; --skip drops a name."""
+    probes = [] if args.no_defaults else list(DEFAULT_PROBES)
+    for path in (args.probe_files or []):
+        probes.extend(read_probe_file(path))
+    for spec in (args.probe or []):
+        probes.append(parse_probe(spec, "--probe"))
+    merged, order = {}, []
+    for name, command in probes:
+        if name not in merged:
+            order.append(name)
+        merged[name] = command
+    for name in (args.skip or []):
+        if name not in merged:
+            die("--skip %s: no such probe (have: %s)"
+                % (name, ", ".join(order) or "none"))
+        order.remove(name)
+        del merged[name]
+    if not order:
+        die("no probes left to run")
+    return [(n, merged[n]) for n in order]
+
+
+def watch_script(probes, mark):
+    """One shell for every probe, each one's output framed and its exit
+    status kept.  A probe's stdin is /dev/null and its stderr is part of
+    its answer: `ethtool: no such device` is what that host says."""
+    parts = []
+    for i, (_name, command) in enumerate(probes):
+        parts.append("echo %s.begin.%d; ( %s\n) </dev/null 2>&1; r=$?; "
+                     "printf '\\n%s.end.%d %%d\\n' \"$r\""
+                     % (mark, i, command, mark, i))
+    return "sh -c %s" % shlex.quote("\n".join(parts))
+
+
+def split_answers(stdout, probes, mark):
+    """{probe name: {"rc": N, "out": text}} for each probe that finished."""
+    answers = {}
+    for i, (name, _command) in enumerate(probes):
+        begin = "%s.begin.%d\n" % (mark, i)
+        end = re.compile(r"\n%s\.end\.%d (\d+)\n" % (re.escape(mark), i))
+        start = stdout.find(begin)
+        if start < 0:
+            continue
+        start += len(begin)
+        m = end.search(stdout, start)
+        if not m:
+            continue
+        answers[name] = {"rc": int(m.group(1)), "out": stdout[start:m.start()]}
+    return answers
+
+
+def probe_fleet(args, hosts, probes):
+    """Every probe on every host: [(host, Result, answers)] in host order,
+    or None after --dry-run.  A host that gave no answers at all (ssh
+    failed, sudo refused, the run timed out) has answers {}, and its
+    Result says why."""
+    for _name, command in probes:
+        check_danger(command, args)
+    runner = Runner(args)
+    mark = "agree.%s.probe" % runner.run_id
+    script = watch_script(probes, mark)
+    if args.sudo:
+        script = ("sudo -n -u %s " % shlex.quote(args.sudo_user)
+                  if args.sudo_user else "sudo -n ") + script
+    if args.dry_run:
+        for h in hosts:
+            print(" ".join(shlex.quote(c) for c in runner.ssh_argv(
+                h, runner.command_for(script, marked=False))))
+        return None
+    results = fan_out(hosts, lambda h: runner.run_one(h, script),
+                      args.jobs, quiet=args.quiet)
+    return [(h, r, split_answers(r.stdout, probes, mark)
+             if r.outcome in (OK, FAILED) else {})
+            for h, r in zip(hosts, results)]
+
+
+def _why_not(r):
+    err = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
+    why = err[-1] if err else ("exit %d" % r.rc if r.rc else "no answers")
+    return "%s: %s" % (r.outcome, why.strip()[:160])
+
+
+def _probe_result(host, answer):
+    """An answer as one of agree's Results, so group_results judges it
+    exactly as it judges `agree run`: by exit status, and by normalized
+    output where the probe succeeded."""
+    r = Result(host)
+    r.rc = answer["rc"]
+    r.stdout = answer["out"]
+    r.outcome = OK if answer["rc"] == 0 else FAILED
+    return r
+
+
+def _same(host, then, now, args):
+    """Is NOW the answer THEN was, by agree's own grouping?"""
+    return len(group_results([_probe_result(host, then),
+                              _probe_result(host, now)], args)) == 1
+
+
+def _show(answer, args, host):
+    """One line for an answer: its first normalized line, and how many
+    more there are."""
+    lines = normalize(answer["out"], host, args).splitlines()
+    shown = '"%s"' % lines[0][:100] if lines else "(nothing)"
+    if len(lines) > 1:
+        shown += " (+%d more lines)" % (len(lines) - 1)
+    if answer["rc"]:
+        return "exit %d, %s" % (answer["rc"], shown)
+    return shown
+
+
+def _compare(a, a_host, b, b_host, args, indent):
+    """B beside A: `was "x", now "y"` for one-line answers, and a diff of
+    the lines that differ (- A, + B) for longer ones."""
+    la = normalize(a["out"], a_host, args).splitlines()
+    lb = normalize(b["out"], b_host, args).splitlines()
+    if a["rc"] != b["rc"] or max(len(la), len(lb)) <= 1:
+        return None
+    out = [l for l in difflib.unified_diff(la, lb, n=0, lineterm="")
+           if not l.startswith(("---", "+++", "@@"))]
+    if len(out) > args.max_diff_lines:
+        out = out[:args.max_diff_lines] + [
+            "... %d more lines" % (len(out) - args.max_diff_lines)]
+    return [indent + l for l in out]
+
+
+def _write_json(path, doc):
+    """Written beside the target and renamed over it, so a baseline is
+    never half there: a check reading one mid-record sees the old one."""
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with _WriteGuard(tmp):
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(doc, indent=1, sort_keys=True,
+                               ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+
+
+def load_baseline(path):
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as exc:
+        die("cannot read baseline %s: %s" % (path, exc))
+    if not isinstance(doc, dict) or doc.get("format") != WATCH_FORMAT:
+        die("%s is not a baseline that `watch record` wrote" % path)
+    try:
+        probes = [(p["name"], p["command"]) for p in doc["probes"]]
+        hosts = [(Host(e["name"], e["addr"], e.get("port")),
+                  e.get("answers") or {}) for e in doc["hosts"]]
+    except (KeyError, TypeError) as exc:
+        die("baseline %s is damaged: %s" % (path, exc))
+    return doc, probes, hosts
+
+
+def drift_of(probed, probes, args):
+    """[(probe, majority Group, [Results off it])] for each probe the hosts
+    that answered do not agree on, by agree's grouping."""
+    found = []
+    for name, _command in probes:
+        results = [_probe_result(h, a[name]) for h, _r, a in probed
+                   if name in a]
+        groups = group_results(results, args)
+        if len(groups) < 2:
+            continue
+        major = next((g for g in groups if g.baseline), groups[0])
+        others = [r for g in groups if g is not major for r in g.results]
+        found.append((name, major, others))
+    return found
+
+
+def _n(count, word):
+    return "%d %s%s" % (count, word, "" if count == 1 else "s")
+
+
+def _guard_width(args, hosts):
+    if args.limit is not None and len(hosts) > args.limit and not args.yes:
+        die("refusing to run across %d hosts (--limit %d); pass --yes to "
+            "proceed" % (len(hosts), args.limit))
+
+
+def cmd_watch_record(args):
+    probes = probe_set(args)
+    hosts = collect_hosts(args)
+    _guard_width(args, hosts)
+    probed = probe_fleet(args, hosts, probes)
+    if probed is None:
+        return 0
+    down = [(h, r) for h, r, a in probed if not a]
+    if len(down) == len(probed):
+        die("no host answered, so there is nothing to record; %s is left "
+            "as it was" % args.baseline, 3)
+    _write_json(args.baseline, {
+        "format": WATCH_FORMAT,
+        "version": VERSION,
+        "recorded": time.strftime("%Y-%m-%d %H:%M:%S %z"),
+        "probes": [{"name": n, "command": c} for n, c in probes],
+        # A host that did not answer is kept, with no answers, so a check
+        # still goes to it; it is new to the baseline when it first does.
+        "hosts": [{"name": h.name, "addr": h.addr, "port": h.port,
+                   "answers": a} for h, _r, a in probed],
+    })
+
+    out = ["%s watch -- recorded %d of %s, %s, in %s      [normalized: %s]"
+           % (PROG, len(hosts) - len(down), _n(len(hosts), "host"),
+              _n(len(probes), "probe"), args.baseline,
+              ", ".join(active_normalizations(args))), ""]
+    drift = drift_of(probed, probes, args)
+    for name, major, others in drift:
+        out.append("  %-14s %d agree; %d differ%s: %s"
+                   % (name, major.size, len(others),
+                      "s" if len(others) == 1 else "",
+                      ", ".join(r.host.name for r in others[:8])
+                      + (" ..." if len(others) > 8 else "")))
+    if drift:
+        out += ["", "  Recorded as they are: `watch check` names these as "
+                    "disagreeing with their peers until they agree.", ""]
+    if down:
+        out.append("UNREACHABLE  %s, not recorded:" % _n(len(down), "host"))
+        for h, r in down:
+            out.append("  %-14s %s" % (h.name, _why_not(r)))
+        out.append("")
+    sys.stdout.write("\n".join(out).rstrip("\n") + "\n")
+    return 3 if down else 0
+
+
+def cmd_watch_check(args):
+    if args.no_defaults or args.probe_files or args.probe or args.skip:
+        die("check runs the probes saved in the baseline; to change them, "
+            "record again")
+    doc, probes, base = load_baseline(args.baseline)
+    then_of = dict((h.name, a) for h, a in base)
+    if args.servers or args.server:
+        hosts = collect_hosts(args)
+    else:
+        # The baseline's own fleet, in its order, addresses and all.
+        hosts = [h for h, _a in base]
+        if args.first is not None:
+            hosts = hosts[:args.first]
+    _guard_width(args, hosts)
+    probed = probe_fleet(args, hosts, probes)
+    if probed is None:
+        return 0
+
+    changed, new, down = [], [], []
+    for h, r, answers in probed:
+        if not answers:
+            down.append((h, r))
+            continue
+        then = then_of.get(h.name)
+        if not then:
+            new.append(h)
+            continue
+        diffs = [(name, then[name], answers[name]) for name, _c in probes
+                 if name in then and name in answers
+                 and not _same(h, then[name], answers[name], args)]
+        if diffs:
+            changed.append((h, diffs))
+    drift = drift_of(probed, probes, args)
+    drifted = sorted(set(r.host.name for _p, _m, rs in drift for r in rs))
+    asked = set(h.name for h in hosts)
+    absent = [h.name for h, _a in base if h.name not in asked]
+
+    out = ["%s watch -- %s, %s, against %s of %s      [normalized: %s]"
+           % (PROG, _n(len(hosts), "host"), _n(len(probes), "probe"),
+              args.baseline, doc.get("recorded", "?"),
+              ", ".join(active_normalizations(args))), ""]
+    if changed:
+        out.append("CHANGED SINCE THE BASELINE  %s" % _n(len(changed), "host"))
+        for h, diffs in changed:
+            out.append("  %s" % h.name)
+            for name, then, now in diffs:
+                lines = _compare(then, h, now, h, args, "      ")
+                if lines:
+                    out.append("    %s:  (- baseline, + now)" % name)
+                    out.extend(lines)
+                else:
+                    out.append("    %s: was %s, now %s"
+                               % (name, _show(then, args, h),
+                                  _show(now, args, h)))
+        out.append("")
+    if drift:
+        out.append("DISAGREES WITH ITS PEERS  %s" % _n(len(drifted), "host"))
+        for name, major, others in drift:
+            s = major.sample
+            most = {"rc": s.rc, "out": s.stdout}
+            out.append("  %s: %d agree on %s" % (name, major.size,
+                                                 _show(most, args, s.host)))
+            for r in others:
+                mine = {"rc": r.rc, "out": r.stdout}
+                lines = _compare(most, s.host, mine, r.host, args, "      ")
+                if lines:
+                    out.append("    %s:  (- the %d, + this host)"
+                               % (r.host.name, major.size))
+                    out.extend(lines)
+                else:
+                    out.append("    %-14s %s" % (r.host.name,
+                                                 _show(mine, args, r.host)))
+        out.append("")
+    if down:
+        out.append("UNREACHABLE  %s, not compared:" % _n(len(down), "host"))
+        for h, r in down:
+            out.append("  %-14s %s" % (h.name, _why_not(r)))
+        out.append("")
+    if new:
+        out.append("NOT IN THE BASELINE  %s, compared with peers only: %s"
+                   % (_n(len(new), "host"), ", ".join(h.name for h in new)))
+        out.append("")
+    if absent:
+        out.append("IN THE BASELINE, NOT CHECKED  %s: %s"
+                   % (_n(len(absent), "host"), ", ".join(absent)))
+        out.append("")
+
+    if changed or drift:
+        said = []
+        if changed:
+            said.append("%s changed since the baseline"
+                        % _n(len(changed), "host"))
+        if drift:
+            said.append("%s disagree%s with %s peers"
+                        % (_n(len(drifted), "host"),
+                           "s" if len(drifted) == 1 else "",
+                           "its" if len(drifted) == 1 else "their"))
+        if down:
+            said.append("%s not checked" % _n(len(down), "host"))
+        out.append("DRIFT: " + "; ".join(said))
+    elif down:
+        out.append("no drift among the hosts that answered; %s could not be "
+                   "checked" % _n(len(down), "host"))
+    else:
+        out.append("no drift: every host matches its baseline and its peers")
+
+    if args.json:
+        _write_json(args.json, {
+            "baseline": args.baseline, "recorded": doc.get("recorded"),
+            "changed": [{"host": h.name, "probe": name, "was": t, "now": w}
+                        for h, diffs in changed for name, t, w in diffs],
+            "disagrees": [{"probe": name, "host": r.host.name,
+                           "answer": {"rc": r.rc, "out": r.stdout},
+                           "majority": major.hosts}
+                          for name, major, others in drift for r in others],
+            "unreachable": [{"host": h.name, "why": _why_not(r)}
+                            for h, r in down],
+            "not_in_baseline": [h.name for h in new],
+            "not_checked": absent,
+        })
+    sys.stdout.write("\n".join(out) + "\n")
+    if changed or drift:
+        return 1
+    return 3 if down else 0
+
+
+def cmd_watch_probes(args):
+    """The probe set, as a file --probes reads: a starting point to edit."""
+    print("# %s watch probes: NAME = COMMAND, one per line, run by sh" % PROG)
+    for name, command in probe_set(args):
+        print("%s = %s" % (name, command))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def _add_common(p):
+def _add_reach(p):
+    """Which hosts, and how to reach them: every verb that runs anything."""
     listed = _env("SERVERS")
     p.add_argument("--servers", "-f", dest="servers",
                    action="append",
@@ -1640,12 +2153,6 @@ def _add_common(p):
     p.add_argument("--scp", default=_env("SCP", "scp"))
     p.add_argument("--sudo", action="store_true")
     p.add_argument("--sudo-user")
-    p.add_argument("--push", action="append", metavar="FILE")
-    p.add_argument("--pull", metavar="GLOB")
-    p.add_argument("--pull-dir", default="results")
-    p.add_argument("--remote-dir",
-                   default=_env("REMOTE_DIR", DEFAULT_REMOTE_DIR))
-    p.add_argument("--keep-remote", action="store_true")
     p.add_argument("--first", type=int)
     p.add_argument("--limit", type=int,
                    default=int(_env("LIMIT", 0)) or None)
@@ -1653,15 +2160,11 @@ def _add_common(p):
     p.add_argument("--yes", action="store_true")
     p.add_argument("--quiet", action="store_true")
 
-    p.add_argument("--full", action="store_true")
-    p.add_argument("--show-hosts", action="store_true")
-    p.add_argument("--max-diff-lines", type=int, default=40)
-    p.add_argument("--stderr", dest="stderr_mode", default="separate",
-                   choices=["separate", "merge", "ignore"])
-    p.add_argument("--csv", metavar="PATH")
-    p.add_argument("--json", metavar="PATH")
-    p.add_argument("--merge-csv", metavar="PATH")
 
+def _add_norm(p, slices=True):
+    """How answers are normalized before they are compared.  The slices
+    (--grep, --head, --field ...) pick lines out of one command's output;
+    watch runs several, so it has the rest and not those."""
     p.add_argument("--loose", action="store_true")
     p.add_argument("--fleet-csv", action="store_true")
     p.add_argument("--strict", action="store_true")
@@ -1676,11 +2179,55 @@ def _add_common(p):
     p.add_argument("--mask-times", action="store_true")
     p.add_argument("--mask-numbers", action="store_true")
     p.add_argument("--scrub", action="append", metavar="RE")
+    if not slices:
+        p.set_defaults(grep=None, vgrep=None, head=None, tail=None,
+                       field=None)
+        return
     p.add_argument("--grep", metavar="RE")
     p.add_argument("--vgrep", metavar="RE")
     p.add_argument("--head", type=int)
     p.add_argument("--tail", type=int)
     p.add_argument("--field", type=int)
+
+
+def _add_common(p):
+    _add_reach(p)
+    p.add_argument("--push", action="append", metavar="FILE")
+    p.add_argument("--pull", metavar="GLOB")
+    p.add_argument("--pull-dir", default="results")
+    p.add_argument("--remote-dir",
+                   default=_env("REMOTE_DIR", DEFAULT_REMOTE_DIR))
+    p.add_argument("--keep-remote", action="store_true")
+
+    p.add_argument("--full", action="store_true")
+    p.add_argument("--show-hosts", action="store_true")
+    p.add_argument("--max-diff-lines", type=int, default=40)
+    p.add_argument("--stderr", dest="stderr_mode", default="separate",
+                   choices=["separate", "merge", "ignore"])
+    p.add_argument("--csv", metavar="PATH")
+    p.add_argument("--json", metavar="PATH")
+    p.add_argument("--merge-csv", metavar="PATH")
+    _add_norm(p)
+
+
+def _add_watch(p, verb):
+    _add_reach(p)
+    p.add_argument("--baseline", "-b", required=verb != "probes",
+                   default=None, metavar="FILE")
+    p.add_argument("--probes", dest="probe_files", action="append",
+                   metavar="FILE")
+    p.add_argument("--probe", action="append", metavar="NAME=COMMAND")
+    p.add_argument("--no-defaults", action="store_true")
+    p.add_argument("--skip", action="append", metavar="NAME")
+    p.add_argument("--max-diff-lines", type=int, default=40)
+    if verb == "check":
+        p.add_argument("--json", metavar="PATH")
+    _add_norm(p, slices=False)
+    # What the Runner and the grouping read that watch has no flag for:
+    # it pushes nothing, and a probe's stderr is folded into its answer.
+    p.set_defaults(remote_dir=_env("REMOTE_DIR", DEFAULT_REMOTE_DIR),
+                   push=None, pull=None, keep_remote=False, json=None,
+                   stderr_mode="separate", show_hosts=False)
 
 
 def build_parser():
@@ -1715,6 +2262,24 @@ def build_parser():
     d = sub.add_parser("doctor", help="can each host be reached and used?")
     _add_common(d)
     d.set_defaults(func=cmd_doctor)
+
+    w = sub.add_parser("watch", help="record a fleet's firmware, kernel "
+                       "and NIC answers, then check them for drift",
+                       description=WATCH_HELP,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    wsub = w.add_subparsers(dest="watch_verb", metavar="record|check|probes")
+    for verb, func, text in (
+            ("record", cmd_watch_record,
+             "run the probes and save every host's answers as the baseline"),
+            ("check", cmd_watch_check,
+             "run them again: who changed, who disagrees with their peers"),
+            ("probes", cmd_watch_probes,
+             "print the probe set, as a file --probes reads")):
+        wp = wsub.add_parser(verb, help=text, description=WATCH_HELP,
+                             formatter_class=argparse.RawDescriptionHelpFormatter)
+        _add_watch(wp, verb)
+        wp.set_defaults(func=func)
+    w.set_defaults(func=None)
 
     hp = sub.add_parser("help", help="every flag of every verb")
     hp.set_defaults(func=None)
@@ -1796,6 +2361,9 @@ def cmd_full_help(parser, sub):
             continue
         print("")
         print("=" * 72)
+        if name == "watch":
+            sys.stdout.write(WATCH_HELP)
+            continue
         p.print_help()
     return 0
 
@@ -1828,10 +2396,13 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     args.command_argv = command_argv
-    apply_presets(args)
     if getattr(args, "func", None) is None:
-        parser.print_help()
+        if args.cmd == "watch":
+            sys.stderr.write(WATCH_HELP)
+        else:
+            parser.print_help()
         return 2
+    apply_presets(args)
     return args.func(args)
 
 
