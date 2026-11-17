@@ -342,6 +342,24 @@ t_rewriting_keeps_the_file_it_was_given() {
     assert_contains "$(cat "$TEST_TMPDIR/shared/hosts.txt")" "#[unreachable]"
 }
 
+t_a_dash_is_stdout_not_a_file() {
+    # `resolve --json -` once wrote a file called `-` in the current
+    # directory, and one was committed to the repository by accident
+    # (BN-012).  `-` is stdout, as it is in reckon, and prints what the
+    # bare flag prints.
+    install_fake_probes
+    printf 'web01\nweb02\n' > "$TEST_TMPDIR/h.txt"
+    printf 'web01\nweb02\n' > "$TEST_TMPDIR/ssh_ok"
+    cd "$TEST_TMPDIR"
+    # duration_s is the clock, so only the columns before it are compared.
+    a="$(re h.txt --quiet --csv - | cut -d, -f1-7)"
+    assert_contains "$a" "web02,web02,"
+    assert_eq "$a" "$(re h.txt --quiet --csv | cut -d, -f1-7)"
+    a="$(re h.txt --quiet --json -)"
+    assert_contains "$a" '"summary"'
+    assert_no_file "$TEST_TMPDIR/-"
+}
+
 run_test "ipv6 entries are probed"             t_ipv6_entries_are_probed_not_mangled
 run_test "comments out only the failures"      t_comments_out_only_the_failures
 run_test "all reachable: exit 0, no change"    t_all_reachable_exits_zero_and_changes_nothing
@@ -363,4 +381,5 @@ run_test "--recheck-only is narrow"            t_recheck_only_touches_commented_
 run_test "rewriting keeps the file given"     t_rewriting_keeps_the_file_it_was_given
 run_test "inline comment survives a split" t_an_inline_comment_survives_a_split_range
 run_test "a port outside the range is refused" t_a_port_outside_the_range_is_refused
+run_test "a dash is stdout, not a file" t_a_dash_is_stdout_not_a_file
 finish

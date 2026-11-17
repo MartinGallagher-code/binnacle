@@ -363,6 +363,22 @@ t_a_direction_is_never_said_twice() {
 }
 
 echo "skew"
+t_a_dash_is_stdout_not_a_file() {
+    # `resolve --json -` once wrote a file called `-` in the current
+    # directory, and one was committed to the repository by accident
+    # (BN-012).  `-` is stdout, as it is in reckon, and prints what the
+    # bare flag prints.
+    skew_facts_json "$TEST_TMPDIR/f.json"
+    cd "$TEST_TMPDIR"
+    a="$(sk --from-facts f.json --csv - | cut -d, -f1,3-)"
+    assert_contains "$a" "host,rule_id,severity"
+    assert_eq "$a" "$(sk --from-facts f.json --csv | cut -d, -f1,3-)"
+    a="$(sk --from-facts f.json --json - | grep -v '"ts":')"
+    assert_contains "$a" '"findings"'
+    assert_eq "$a" "$(sk --from-facts f.json --json | grep -v '"ts":')"
+    assert_no_file "$TEST_TMPDIR/-"
+}
+
 run_test "a correct clock says so"              t_a_correct_clock_says_so
 run_test "no source outranks the drift"         t_no_source_outranks_the_drift_it_causes
 run_test "unreadable config is not no sources"  t_an_unreadable_config_is_not_a_box_without_sources
@@ -396,4 +412,5 @@ run_test "sources read from whichever config"   t_sources_are_read_from_whicheve
 run_test "timesyncd keeps sources elsewhere"    t_timesyncd_keeps_its_sources_somewhere_else_entirely
 run_test "the daemon is found by reading"       t_the_daemon_is_found_by_reading_not_by_exec
 run_test "the hardware clock is read"           t_the_hardware_clock_is_read_from_where_it_lives
+run_test "a dash is stdout, not a file"           t_a_dash_is_stdout_not_a_file
 finish

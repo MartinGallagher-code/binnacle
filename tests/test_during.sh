@@ -448,6 +448,27 @@ t_a_foreign_csv_is_not_a_quiet_healthy_run() {
     assert_not_contains "$out" "not the bottleneck"
 }
 
+t_a_dash_is_stdout_not_a_file() {
+    # `resolve --json -` once wrote a file called `-` in the current
+    # directory, and one was committed to the repository by accident
+    # (BN-012).  `-` is stdout, as it is in reckon, and prints what the
+    # bare flag prints.
+    # during has three such flags: --samples is the third.
+    during_samples "$TEST_TMPDIR/s.csv" 30
+    cd "$TEST_TMPDIR"
+    a="$(du_ --from-samples s.csv --samples -)"
+    assert_contains "$a" "ts,"
+    assert_not_contains "$a" "VERDICT"
+    assert_eq "$a" "$(du_ --from-samples s.csv --samples)"
+    a="$(du_ --from-samples s.csv --csv - | cut -d, -f1,3-)"
+    assert_contains "$a" "host,rule_id,severity"
+    assert_eq "$a" "$(du_ --from-samples s.csv --csv | cut -d, -f1,3-)"
+    a="$(du_ --from-samples s.csv --json - | grep -v '"ts":')"
+    assert_contains "$a" '"findings"'
+    assert_eq "$a" "$(du_ --from-samples s.csv --json | grep -v '"ts":')"
+    assert_no_file "$TEST_TMPDIR/-"
+}
+
 run_test "no ceiling means not the bottleneck" t_a_run_at_no_ceiling_says_the_box_was_not_the_bottleneck
 run_test "a pinned core is not an idle box"    t_a_pinned_core_is_not_an_idle_box
 run_test "a saturated box is cpu bound"        t_a_saturated_box_is_cpu_bound_not_serialised
@@ -717,4 +738,5 @@ run_test "intruder severity scales"            t_the_intruder_severity_scales_wi
 run_test "no expectation says why it skipped"  t_without_an_expectation_the_link_check_says_why_it_skipped
 run_test "a reset device leaves it blank"     t_a_device_whose_counters_reset_leaves_the_row_blank
 run_test "a quiet sample is not a shift"      t_going_quiet_for_a_moment_is_not_the_limit_moving
+run_test "a dash is stdout, not a file"      t_a_dash_is_stdout_not_a_file
 finish

@@ -14,7 +14,8 @@ Options:
   --seconds S        how long to watch when not wrapping a command
   --interval S       seconds between samples        (default 1.0)
   --settle S         ignore the first S seconds outright (default 0)
-  --samples [PATH]   the raw time series as tidy CSV (stdout if no path)
+  --samples [PATH]   the raw time series as tidy CSV (stdout if PATH is -
+                     or left out)
   --from-samples F   analyse a saved series, measuring nothing -- this is
                      how the analysis is tested
   --baseline FILE    compare against a previous run's samples
@@ -23,8 +24,9 @@ Options:
   --all              also list the rules that were skipped, and why
   --quiet            the verdict and the findings, nothing else
   --no-timeline      omit the per-sample timeline block
-  --csv [PATH]       findings as CSV, same shape as why-slow's
-  --json [PATH]      meta + summary + findings + skipped
+  --csv [PATH]       findings as CSV, same shape as why-slow's (stdout
+                     likewise)
+  --json [PATH]      meta + summary + findings + skipped (stdout likewise)
   --peer-samples F   the other end's series, so which machine was the
                      limit becomes a finding rather than something you
                      read off two reports side by side
@@ -57,7 +59,7 @@ import sys
 import time
 from collections import namedtuple
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 PROG = os.path.basename(sys.argv[0]) or "during.py"
 
 CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"
@@ -2368,6 +2370,12 @@ def main(argv=None):
     _stdio_safe()
     global PROC, SYS
     args = build_parser().parse_args(argv)
+    # `-` is stdout, as it is in reckon.  Taken literally it is a file
+    # called `-` in the current directory: `resolve --json -` wrote one,
+    # and it was committed to this repository by accident (BN-012).
+    for key in ("samples", "csv", "json"):
+        if getattr(args, key) == "-":
+            setattr(args, key, "")
 
     if args.rules:
         return cmd_rules()

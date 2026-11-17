@@ -421,6 +421,33 @@ print('%s %s' % (f.get('res.ndots'), f.get('search.wasted')))" "$TEST_TMPDIR/o1.
 }
 
 echo "resolve"
+t_a_dash_is_stdout_not_a_file() {
+    # `resolve --json -` once wrote a file called `-` in the current
+    # directory, and one was committed to the repository by accident
+    # (BN-012).  `-` is stdout, as it is in reckon, and prints what the
+    # bare flag prints.
+    resolve_facts_json "$TEST_TMPDIR/f.json"
+    cd "$TEST_TMPDIR"
+    # The CSV's ts column and the JSON's meta.ts are the clock, so they
+    # are left out of the comparison.
+    a="$(rs --from-facts f.json --csv - | cut -d, -f1,3-)"
+    assert_contains "$a" "host,rule_id,severity"
+    assert_eq "$a" "$(rs --from-facts f.json --csv | cut -d, -f1,3-)"
+    a="$(rs --from-facts f.json --json - | grep -v '"ts":')"
+    assert_contains "$a" '"findings"'
+    assert_eq "$a" "$(rs --from-facts f.json --json | grep -v '"ts":')"
+    assert_no_file "$TEST_TMPDIR/-"
+    # After a name, `-` is still stdout: the check that refuses a value
+    # reading as a hostname must not take it for one.
+    port="$(free_port)"
+    start_fake_dns "$port" \
+        '{"records": {"db01.example.com": {"A": ["10.0.0.7"]}}}'
+    out="$(rs db01.example.com --server "127.0.0.1:$port" --no-stub \
+             --type A --timeout 2 --json -)"
+    assert_contains "$out" "10.0.0.7"
+    assert_no_file "$TEST_TMPDIR/-"
+}
+
 run_test "healthy dns says so"                 t_healthy_dns_says_so
 run_test "dead resolver outranks its slowness" t_dead_first_resolver_outranks_the_slowness_it_causes
 run_test "first dead server is worse"          t_a_dead_first_server_is_worse_than_a_dead_second
@@ -450,4 +477,5 @@ run_test "a server by name is refused"         t_a_server_by_name_is_refused_wit
 run_test "the budget arithmetic adds up"      t_the_budget_arithmetic_adds_up
 run_test "a zero query budget is refused"     t_a_query_budget_of_zero_is_refused_not_answered
 run_test "ndots:0 is a setting, not absent"   t_ndots_zero_is_a_setting_not_an_absent_one
+run_test "a dash is stdout, not a file"      t_a_dash_is_stdout_not_a_file
 finish

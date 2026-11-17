@@ -37,7 +37,7 @@ import os
 import re
 import sys
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 PROG = os.path.basename(sys.argv[0]) or "manifest.py"
 
 DEFAULT_ROLE = "server"

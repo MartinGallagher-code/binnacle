@@ -311,6 +311,33 @@ t_a_facts_file_that_is_not_a_dictionary_is_refused() {
 }
 
 echo "why-slow"
+t_a_dash_is_stdout_not_a_file() {
+    # `resolve --json -` once wrote a file called `-` in the current
+    # directory, and one was committed to the repository by accident
+    # (BN-012).  `-` is stdout, as it is in reckon, and prints what the
+    # bare flag prints.
+    facts_json "$TEST_TMPDIR/f.json"
+    cd "$TEST_TMPDIR"
+    a="$(ws --from-facts f.json --csv - | cut -d, -f1,3-)"
+    assert_contains "$a" "host,rule_id,severity"
+    assert_eq "$a" "$(ws --from-facts f.json --csv | cut -d, -f1,3-)"
+    a="$(ws --from-facts f.json --json - | grep -v '"ts":')"
+    assert_contains "$a" '"findings"'
+    assert_eq "$a" "$(ws --from-facts f.json --json | grep -v '"ts":')"
+    assert_no_file "$TEST_TMPDIR/-"
+    # With --ssh a PATH is refused, because the file would land on the
+    # far box.  `-` is not a path: the report comes back on stdout, as the
+    # bare flag's does, and nothing is written on either side.
+    install_fake_ssh
+    fake_host node01
+    facts_json "$FAKE_ROOT/node01/facts.json"
+    out="$(ws --ssh node01 --ssh-cmd "$FAKE_BIN/ssh" \
+        --from-facts facts.json --csv -)"
+    assert_contains "$out" "host,ts,rule_id"
+    assert_no_file "$FAKE_ROOT/node01/-"
+    assert_no_file "$TEST_TMPDIR/-"
+}
+
 run_test "healthy box says so"                t_healthy_box_says_so
 run_test "swap outranks cpu in the verdict"   t_swap_outranks_cpu_in_verdict
 run_test "oom kill is critical"               t_oom_is_critical
@@ -437,4 +464,5 @@ t_a_disk_whose_counters_reset_is_not_the_busiest() {
 
 run_test "a reset disk is not the busiest"    t_a_disk_whose_counters_reset_is_not_the_busiest
 run_test "a counter reset is unknown"          t_a_counter_reset_is_unknown_not_negative
+run_test "a dash is stdout, not a file"      t_a_dash_is_stdout_not_a_file
 finish

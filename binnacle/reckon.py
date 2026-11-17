@@ -51,7 +51,7 @@ Judgement:
       --keep-up PCT      a ramp step keeps up when it delivers this much of
                          what it asked                (RECKON_KEEP_UP, 98)
 
-Output:
+Output (each [PATH] is stdout when it is - or left out):
       --top N            worst hosts and flows to list     (RECKON_TOP, 10)
       --overlay [PATH]   results for the datacenter viewer
       --prefix P         overlay test-name prefix  (RECKON_PREFIX, reckon_)
@@ -87,7 +87,7 @@ import sys
 import time
 from collections import namedtuple
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 PROG = os.path.basename(sys.argv[0]) or "reckon.py"
 
 CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"

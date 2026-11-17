@@ -151,6 +151,9 @@ That groups hosts by **what they think a name means** — which is how a
 single resolver with a stale zone, or one rack pointed at the wrong server,
 shows up as its own group instead of as intermittent application errors.
 
+`--csv` and `--json` each write to stdout when the path is left out or
+is `-`, and to the file named otherwise.
+
 ## Exit codes
 
 `0` always, unless the tool itself failed (`2` = usage). Severity is opt-in

@@ -730,6 +730,22 @@ t_json_carries_the_judgements() {
 }
 
 echo "plumb"
+t_a_dash_is_stdout_not_a_file() {
+    # `resolve --json -` once wrote a file called `-` in the current
+    # directory, and one was committed to the repository by accident
+    # (BN-012).  `-` is stdout, as it is in reckon, and prints what the
+    # bare flag prints.
+    plumb_facts_json "$TEST_TMPDIR/f.json"
+    cd "$TEST_TMPDIR"
+    a="$("$PY" "$PL" --from-facts f.json --csv - | cut -d, -f1,3-)"
+    assert_contains "$a" "host,rule_id,severity"
+    assert_eq "$a" "$("$PY" "$PL" --from-facts f.json --csv | cut -d, -f1,3-)"
+    a="$("$PY" "$PL" --from-facts f.json --json - | grep -v '"ts":')"
+    assert_contains "$a" '"findings"'
+    assert_eq "$a" "$("$PY" "$PL" --from-facts f.json --json | grep -v '"ts":')"
+    assert_no_file "$TEST_TMPDIR/-"
+}
+
 run_test "agreement says so plainly"            t_agreement_says_so_plainly
 run_test "privileged + altered is tampering"    t_a_privileged_file_altered_in_memory_is_tampering
 run_test "older than boot blames the cache"     t_a_file_not_written_since_boot_puts_the_blame_on_the_cache
@@ -775,4 +791,5 @@ run_test "links are one file, dirs walked"      t_links_are_one_file_and_directo
 run_test "unreadable is a reason, not a crash"  t_what_cannot_be_read_is_a_reason_not_a_crash
 run_test "the default set covers the targets"   t_the_default_set_covers_what_an_attack_would_aim_at
 run_test "json carries the judgements"          t_json_carries_the_judgements
+run_test "a dash is stdout, not a file"           t_a_dash_is_stdout_not_a_file
 finish

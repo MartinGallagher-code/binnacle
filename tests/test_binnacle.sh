@@ -386,6 +386,21 @@ t_copy_flags_belong_to_copy() {
 }
 
 echo "binnacle"
+t_no_file_named_dash_is_tracked() {
+    # `resolve --json -` once wrote its report to a file called `-`, and
+    # `git add -A` committed it to the root of this repository, where it
+    # sat for a release (BN-012).  Every tool now reads `-` as stdout; this
+    # catches the next one that does not.  Only a checkout of this
+    # repository can say: an installed copy, or a box with no git, passes.
+    command -v git >/dev/null 2>&1 || return 0
+    top="$(git -C "$BINNACLE_DIR" rev-parse --show-toplevel 2>/dev/null)" \
+        || return 0
+    [ "$(cd "$top/binnacle" 2>/dev/null && pwd -P)" \
+        = "$(cd "$BINNACLE_DIR" && pwd -P)" ] || return 0
+    dashes="$(git -C "$top" ls-files | grep -x -e '-' -e '.*/-' || true)"
+    assert_eq "$dashes" ""
+}
+
 run_test "lists every installed tool"         t_lists_every_installed_tool
 run_test "names a version for each tool"      t_names_a_version_for_each_tool
 run_test "says when they all agree"           t_says_when_they_all_agree
@@ -423,4 +438,5 @@ run_test "copy needs something to copy"       t_copy_needs_something_to_copy
 run_test "copy refuses names and --all"       t_copy_refuses_names_and_all_together
 run_test "copy refuses a missing dir"         t_copy_refuses_a_directory_that_is_not_one
 run_test "copy's flags belong to copy"        t_copy_flags_belong_to_copy
+run_test "no file named - is tracked"        t_no_file_named_dash_is_tracked
 finish

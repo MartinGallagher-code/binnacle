@@ -526,6 +526,9 @@ one file.
   host's and flow's figure then and the change since, and a `baseline`
   block with who fell, who rose, and what could not be compared.
 
+Each of these, and `--overlay`, writes to stdout when its path is left out
+or is `-`, and to the file named otherwise.
+
 Blank means not measured in all of them. A flow with no expectation has an
 empty `expected`, not a zero, and its limit says `UNMODELLED`.
 

@@ -223,6 +223,9 @@ Before rebooting a fleet into a kernel that has just been installed, run
 corruption could have been caught: the new image's good copy was still in
 the page cache.
 
+`--csv` and `--json` each write to stdout when the path is left out or
+is `-`, and to the file named otherwise.
+
 ## Rules
 
 `plumb --rules` prints all of them, and `plumb --explain RULE_ID` prints why

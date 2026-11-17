@@ -33,6 +33,7 @@ Options:
   --max-template-len N truncate a template at this many chars   (512)
   --example-len N      how much of an example line to keep     (300)
   --csv [PATH] / --json [PATH]
+                       stdout if PATH is - or left out
   --ascii              plain sparklines (automatic when LANG is C/POSIX)
 
 Full manual: https://binnacle.readthedocs.io/en/latest/tools/logtriage.html
@@ -53,7 +54,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 PROG = os.path.basename(sys.argv[0]) or "logtriage.py"
 
 MAX_BUCKETS = 4096
@@ -1132,6 +1133,12 @@ def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
     args = build_parser().parse_args(glue_relative_times(argv, TIME_OPTIONS))
+    # `-` is stdout, as it is in reckon.  Taken literally it is a file
+    # called `-` in the current directory: `resolve --json -` wrote one,
+    # and it was committed to this repository by accident (BN-012).
+    for key in ("csv", "json"):
+        if getattr(args, key) == "-":
+            setattr(args, key, "")
     args.weights = parse_weights(args.weights)
     args.min_severity_level = SEV_LEVELS[args.min_severity]
     # --split is a fraction of the log, so a value outside it puts the

@@ -159,6 +159,9 @@ Timezone is reported for the same reason. `TZ_NOT_UTC` is INFO and not a
 fault; across a fleet it is how you find the one box that was built from a
 different image, whose logs will never line up with the rest by eye.
 
+`--csv` and `--json` each write to stdout when the path is left out or
+is `-`, and to the file named otherwise.
+
 ## Rules
 
 `skew --rules` prints all of them with their thresholds; `skew --explain
