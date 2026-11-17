@@ -27,6 +27,10 @@ Options:
                       on the host and reported, not grouped (AGREE_MAX_OUTPUT)
   --user NAME         ssh user                                (AGREE_USER)
   --ssh CMD/--scp CMD transports                     (AGREE_SSH / AGREE_SCP)
+  --keep-preamble     keep what a host's login shell prints before the
+                      command (a greeting from ~/.bashrc, a setlocale
+                      warning) in its answer; by default it is dropped
+                                                 (AGREE_KEEP_PREAMBLE=1)
   --sudo              prefix the command with `sudo -n`
   --sudo-user NAME    sudo to this user rather than root
   --push FILE         copy FILE to each host first, repeatable
@@ -97,7 +101,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 PROG = os.path.basename(sys.argv[0]) or "agree.py"
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
@@ -134,6 +138,29 @@ MARK_SH = ("p=$PPID; g=0; s=; if { read -r s < /proc/$p/stat; } 2>/dev/null; "
            "else s=$(ps -o pgid= -p $p 2>/dev/null); set -- $s; "
            "case ${1:-x} in *[!0-9]*) ;; *) g=$1 ;; esac; fi; "
            "echo %s $p $g >&2")
+
+# What the login shell says first (BN-011, the binnacle side of
+# quarterdeck's QD-038).  sshd runs the command through the user's login
+# shell, and that shell reads its startup files -- ~/.bashrc,
+# /etc/bash.bashrc, ~/.zshenv -- before it runs anything.  Whatever they
+# print (a greeting, a maintenance notice, `bash: warning: setlocale`)
+# lands in the same stdout and stderr as the command's answer, and one
+# chatty host then splits the fleet into groups that differ by nothing but
+# the greeting.  So the line above goes to stdout as well (MARK_OUT_SH):
+# on each stream, everything before it was printed before the command ran,
+# and is dropped.  bash and zsh read every startup file before they run the
+# -c string, and each stream is one pipe, so nothing the command prints can
+# come before it.  No line, no cut: where it never comes (the command never
+# ran, a startup file exec'd something else) or more than HEAD_MAX comes
+# first, the stream is kept as it came, as 0.11.0 kept it.  The same idea as
+# dredge.py's MARK_TAR, which drops "the login talking" in front of a tar.
+# --keep-preamble sends only the stderr line, as 0.11.0 did, and keeps
+# everything.  quarterdeck's fleet.py takes the same line and the same rules.
+MARK_OUT_SH = "; echo %s $p $g"
+
+# How much of a stream is held back, uncounted by --max-output, while the
+# line is looked for.  Past it, nothing is cut.
+HEAD_MAX = 65536
 
 # Most of a minute: the 8 s to connect, and a few seconds for TERM to
 # work, then KILL.
@@ -606,7 +633,7 @@ def normalize(text, host, args):
 class Result(object):
     __slots__ = ("host", "outcome", "rc", "stdout", "stderr", "duration",
                  "norm", "digest", "group", "pull_error", "emptied",
-                 "cleanup_error", "left_running")
+                 "cleanup_error", "left_running", "preamble")
 
     def __init__(self, host):
         self.host = host
@@ -636,6 +663,11 @@ class Result(object):
         # and could not confirm it stopped on the host: it may still be
         # running there.  The why is in stderr.
         self.left_running = False
+        # How many bytes this host's login shell printed before the
+        # command, which were dropped (BN-011).  Only counted, for the one
+        # line run_fleet says about it: never part of the answer, the
+        # outcome or any output.
+        self.preamble = 0
 
 
 class Runner(object):
@@ -675,10 +707,19 @@ class Runner(object):
                           if sudo and sudo_user else
                           "sudo -n" if sudo else "")
         # the line every command sends first (MARK_SH): this run's own, so
-        # nothing a host prints can be taken for it
+        # nothing a host prints can be taken for it.  Not anchored to the
+        # start of a line: a startup file whose last word has no newline
+        # (`printf Welcome`) puts the line straight after it.
         self.mark = "agree.%s.pgid" % self.run_id
         self._mark_re = re.compile(
-            b"(?m)^" + re.escape(self.mark.encode()) + b" ([0-9]+) ([0-9]+)\n")
+            re.escape(self.mark.encode()) + b" ([0-9]+) ([0-9]+)\n")
+        # The longest the line can be (pid and group of up to 20 digits
+        # each): past HEAD_MAX, this much is held back at a time so the
+        # line is still taken off when it comes across two reads.
+        self._mark_max = len(self.mark) + 43
+        # Drop what the login shell prints before the command (BN-011),
+        # unless --keep-preamble: then the command goes out as in 0.11.0.
+        self.cut = not getattr(args, "keep_preamble", False)
 
     def target(self, host):
         """ssh takes a bare address, v6 included: `ssh user@2001:db8::1`."""
@@ -697,7 +738,7 @@ class Runner(object):
         argv += [self.target(host), command]
         return argv
 
-    def _exec(self, argv, timeout):
+    def _exec(self, argv, timeout, marked=False):
         """Bounded capture: one runaway host must not sink the whole run.
 
         communicate() holds everything a child ever prints, so a single
@@ -708,14 +749,17 @@ class Runner(object):
         the front half of a flood would be an answer to a question nobody
         asked.  -> (rc, stdout, stderr)
         """
-        return self._capture(argv, timeout)[:3]
+        return self._capture(argv, timeout, marked)[:3]
 
     def _capture(self, argv, timeout, marked=False):
-        """_exec, and for a command sent by command_for (`marked`), the
-        process group the host said it runs in, with that line taken off
-        its stderr: -> (rc, stdout, stderr, group).  The group is None
-        when the line never came, and 0 when the shell does not lead a
-        group of its own.  Past the deadline rc is TimedOut, past
+        """_exec, and for a command sent after the start line (`marked`:
+        command_for, _remote), the process group the host said it runs in,
+        with that line taken off: -> (rc, stdout, stderr, group, cut).
+        Unless --keep-preamble, the line came on stdout too, and on each
+        stream what came before it -- the login shell talking, BN-011 --
+        is dropped; `cut` is how many bytes of it there were.  The group
+        is None when the line never came, and 0 when the shell does not
+        lead a group of its own.  Past the deadline rc is TimedOut, past
         --max-output Flooded; either way ssh is killed here, and the
         command is not: run_one stops that (Runner.stop)."""
         limit = int(self.max_output)
@@ -724,16 +768,24 @@ class Runner(object):
                                  stderr=subprocess.PIPE,
                                  stdin=subprocess.DEVNULL)
         except OSError as exc:
-            return 127, "", str(exc), None
+            return 127, "", str(exc), None, 0
         chunks = {p.stdout: [], p.stderr: []}
         sizes = {p.stdout: 0, p.stderr: 0}
         deadline = time.monotonic() + timeout
         flooded = False
-        # stderr is held here, uncounted, until the line naming the group
-        # has come and been taken off (or 64 KiB came first, or it ended):
-        # what is left counts against --max-output exactly as before
-        head = [b""] if marked else None
+        # A stream the line is still looked for on is held here, uncounted,
+        # until it has come and been taken off, or the stream ended: at
+        # first all of it, and once HEAD_MAX has come without it (`late`:
+        # no cut now) only the tail the line could be split across.  What
+        # is let through counts against --max-output exactly as before.
+        held = {}
+        if marked:
+            held[p.stderr] = b""
+            if self.cut:
+                held[p.stdout] = b""
+        late = set()
         group = [None]
+        cut = [0]
 
         def take(f, data):
             room = limit - sizes[f]
@@ -742,18 +794,32 @@ class Runner(object):
             sizes[f] += len(data)
             return sizes[f] > limit
 
-        def take_head(eof):
-            buf = head[0]
+        def look(f, data):
+            """DATA came on F (b"" at its end) while the line is still
+            looked for there -> whether that went past --max-output."""
+            buf = held[f] + data
             m = self._mark_re.search(buf)
             if m:
-                pid, pgid = int(m.group(1)), int(m.group(2))
-                # 0: the line came, but its shell leads no group of its own
-                group[0] = pgid if pid == pgid > 1 else 0
-                buf = buf[:m.start()] + buf[m.end():]
-            elif not eof and len(buf) < 65536:
+                del held[f]
+                if group[0] is None:
+                    pid, pgid = int(m.group(1)), int(m.group(2))
+                    # 0: the line came, but its shell leads no group of
+                    # its own
+                    group[0] = pgid if pid == pgid > 1 else 0
+                if self.cut and f not in late and m.start() <= HEAD_MAX:
+                    cut[0] += m.start()
+                    return take(f, buf[m.end():])
+                return take(f, buf[:m.start()] + buf[m.end():])
+            if not data:
+                del held[f]
+                return take(f, buf)
+            if f not in late and len(buf) < HEAD_MAX:
+                held[f] = buf
                 return False
-            head[0] = None
-            return take(p.stderr, buf)
+            late.add(f)
+            keep = min(len(buf), self._mark_max)
+            held[f] = buf[len(buf) - keep:]
+            return take(f, buf[:len(buf) - keep])
 
         # selectors rather than select(): with --jobs worth of children a
         # descriptor number can pass select()'s 1024 ceiling
@@ -773,14 +839,10 @@ class Runner(object):
                 if not chunk:
                     sel.unregister(f)
                     open_count -= 1
-                    if f is p.stderr and head and head[0] is not None:
-                        flooded = take_head(True) or flooded
-                    continue
-                if f is p.stderr and head and head[0] is not None:
-                    head[0] += chunk
-                    flooded = take_head(False) or flooded
-                    continue
-                flooded = take(f, chunk) or flooded
+                if f in held:
+                    flooded = look(f, chunk) or flooded
+                elif chunk:
+                    flooded = take(f, chunk) or flooded
             if flooded:
                 break
         sel.close()
@@ -803,11 +865,11 @@ class Runner(object):
 
         if flooded:
             return (Flooded(125), "", "output exceeded --max-output (%d "
-                    "bytes)" % limit, group[0])
+                    "bytes)" % limit, group[0], cut[0])
         if timed_out:
             return (TimedOut(124), "", "timed out after %ss" % timeout,
-                    group[0])
-        return rc, text(p.stdout), text(p.stderr), group[0]
+                    group[0], cut[0])
+        return rc, text(p.stdout), text(p.stderr), group[0], cut[0]
 
     def stop(self, host, group):
         """Stop a command agree gave up on, on the host: TERM to its
@@ -830,7 +892,7 @@ class Runner(object):
             if self.stop_sudo != "sudo -n":
                 tries.append(plain)
         for cmd in tries:
-            rc, _, err = self._exec(self.ssh_argv(host, cmd), STOP_TIMEOUT)
+            rc, _, err = self._remote(host, cmd, STOP_TIMEOUT)
             if rc == 0:
                 return ""
         last = (err or "").strip().splitlines()
@@ -847,14 +909,33 @@ class Runner(object):
         wherever the run id put it.  The command still runs where it always
         did, in the login directory, so a relative path in its arguments
         (`--from-facts facts.json`) means what it meant before.  It goes
-        after the line naming its process group (MARK_SH), which --dry-run
-        leaves out (`marked`) so the command can be read."""
+        after the start line (start_line), which --dry-run leaves out
+        (`marked`) so the command can be read."""
         if pushed:
             command = "AGREE_DIR=%s; export AGREE_DIR; %s" % (
                 shlex.quote(self.work_dir), command)
         if not marked:
             return command
-        return "sh -c %s; %s" % (shlex.quote(MARK_SH % self.mark), command)
+        return self.start_line() + command
+
+    def start_line(self):
+        """The `sh -c` a command goes out after: the line naming its
+        process group on stderr (MARK_SH), and the same line on stdout
+        (MARK_OUT_SH) unless --keep-preamble, so that what the login shell
+        printed before it can be told from the command's answer."""
+        sh = MARK_SH % self.mark
+        if self.cut:
+            sh += MARK_OUT_SH % self.mark
+        return "sh -c %s; " % shlex.quote(sh)
+
+    def _remote(self, host, cmd, timeout):
+        """One of agree's own commands on a host -- making the run's
+        directory, chmod, cleanup, the stop -- after the start line too,
+        so a greeting is never taken for its error.  Under --keep-preamble
+        it goes out bare, as in 0.11.0.  -> (rc, stdout, stderr)"""
+        if self.cut:
+            cmd = self.start_line() + cmd
+        return self._exec(self.ssh_argv(host, cmd), timeout, marked=self.cut)
 
     def push_files(self, host, files):
         for f in files:
@@ -874,7 +955,7 @@ class Runner(object):
                    d, d, self.dir_mode, w, shlex.quote(self.run_id), s,
                    shlex.quote("agree: could not make this run's directory %s"
                                % self.work_dir))
-        rc, out, err = self._exec(self.ssh_argv(host, cmd), 60)
+        rc, out, err = self._remote(host, cmd, 60)
         if rc != 0:
             return rc, err
         self._made[host.name] = "agree-made-parent" in out
@@ -889,7 +970,7 @@ class Runner(object):
         names = " ".join(shlex.quote("%s/%s" % (self.work_dir,
                                                 os.path.basename(f)))
                          for f in files)
-        return self._exec(self.ssh_argv(host, "chmod +x %s" % names), 60)[0:3:2]
+        return self._remote(host, "chmod +x %s" % names, 60)[0:3:2]
 
     def cleanup(self, host):
         """Remove this run's directory from a host, and --remote-dir too if
@@ -905,7 +986,7 @@ class Runner(object):
                 self.remote_dir)
         if self.cleanup_sudo:
             cmd = "sudo -n sh -c %s" % shlex.quote(cmd)
-        rc, _, err = self._exec(self.ssh_argv(host, cmd), 60)
+        rc, _, err = self._remote(host, cmd, 60)
         if rc == 0:
             return ""
         lines = (err or "").strip().splitlines()
@@ -953,7 +1034,7 @@ class Runner(object):
                     r.cleanup_error = self.cleanup(host)
                 r.duration = time.monotonic() - t0
                 return r
-        rc, out, err, group = self._capture(
+        rc, out, err, group, r.preamble = self._capture(
             self.ssh_argv(host, self.command_for(command, bool(push))),
             self.timeout, marked=True)
         r.rc, r.stdout, r.stderr = rc, out, err
@@ -1032,6 +1113,25 @@ def guarded_rm(work_dir, run_id):
             refuse("it is not a directory"),
             s, s, refuse("it holds no %s" % SENTINEL),
             s, rid, refuse("its %s is another run's" % SENTINEL))
+
+
+def say_preamble(results):
+    """One line on stderr naming the hosts whose login shell printed
+    before the command, and nothing when none did (BN-011).  Not a
+    finding: the host keeps the group and the outcome its command earned,
+    and the line is not in any report, CSV or JSON.  It is said so the
+    startup file can be quieted, rather than dropped silently."""
+    said = [r.host.name for r in results if r.preamble]
+    if not said:
+        return
+    one = len(said) == 1
+    sys.stderr.write(
+        "[%s] %s printed before the command (%s): dropped from %s "
+        "(--keep-preamble keeps it)\n"
+        % (PROG, "1 host's login shell" if one else
+           "%d hosts' login shells" % len(said),
+           ", ".join(said[:8]) + (" ..." if len(said) > 8 else ""),
+           "its answer" if one else "their answers"))
 
 
 def fan_out(hosts, fn, jobs, quiet=False):
@@ -1589,6 +1689,7 @@ def run_fleet(args, command, label=None):
                                  cleanup=not args.keep_remote),
         args.jobs, quiet=args.quiet)
     elapsed = time.monotonic() - t0
+    say_preamble(results)
 
     groups = group_results(results, args)
     meta = {"command": command, "elapsed": round(elapsed, 2),
@@ -1842,6 +1943,7 @@ def probe_fleet(args, hosts, probes):
         return None
     results = fan_out(hosts, lambda h: runner.run_one(h, script),
                       args.jobs, quiet=args.quiet)
+    say_preamble(results)
     return [(h, r, split_answers(r.stdout, probes, mark)
              if r.outcome in (OK, FAILED) else {})
             for h, r in zip(hosts, results)]
@@ -2153,6 +2255,10 @@ def _add_reach(p):
     p.add_argument("--scp", default=_env("SCP", "scp"))
     p.add_argument("--sudo", action="store_true")
     p.add_argument("--sudo-user")
+    # Any value but 0 keeps it, so AGREE_KEEP_PREAMBLE=0 in a profile
+    # does not quietly mean the opposite of what it says.
+    p.add_argument("--keep-preamble", action="store_true",
+                   default=_env("KEEP_PREAMBLE", "0") != "0")
     p.add_argument("--first", type=int)
     p.add_argument("--limit", type=int,
                    default=int(_env("LIMIT", 0)) or None)

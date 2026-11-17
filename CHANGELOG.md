@@ -4,6 +4,49 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-11-17
+
+shared_tools BN-011, the binnacle side of quarterdeck's QD-038.
+
+### Changed
+
+- **agree drops what a host's login shell prints before the command.**
+  sshd runs the command through the user's login shell, which reads
+  `~/.bashrc`, `/etc/bash.bashrc` or `~/.zshenv` first, and whatever those
+  print -- a greeting, a maintenance notice, `bash: warning: setlocale` --
+  came back as part of the host's answer. One chatty startup file split the
+  fleet into groups that differed by nothing but the greeting, and agree
+  then told the owner to fix the hosts that were right; a setlocale warning
+  became a failed host's error. The line agree already sends before every
+  command (BN-004) now goes to stdout as well as stderr, and on each stream
+  everything before it is dropped: it is in no group, diff, report, CSV,
+  JSON or baseline, and the host keeps the outcome its command earned. One
+  line on stderr names the hosts whose shell printed, and nothing is said
+  when none did. No line, no cut: where it never comes (a startup file that
+  exits or `exec`s something else) or more than 64 KiB comes first, the
+  stream is kept as it came. A quiet host's answer is unchanged, byte for
+  byte. agree's own commands on a host (making the run's directory, chmod,
+  cleanup, the stop) go after the line too, so a failed push's error is the
+  push's.
+- The line is found anywhere in the first 64 KiB, not only at the start of a
+  line, so a startup file whose last word has no newline (`printf Welcome`)
+  no longer hides it -- which in 0.11.0 also left the stop with no process
+  group to signal. Past 64 KiB it is still taken off when it comes, so it
+  never shows in an answer.
+
+### Added
+
+- `--keep-preamble` (`AGREE_KEEP_PREAMBLE=1`) keeps everything, byte for
+  byte as 0.11.0 did, and sends the command exactly as 0.11.0 sent it.
+- `watch record` and `watch check` say the same line. A baseline recorded by
+  0.11.0 needs no recording again: each probe's answer was always framed by
+  lines of its own, so a greeting never got into one.
+- Tests: a fake host's login shell can print before the command
+  (`fake_login_rc` in `tests/test_helper.bash`), with cases in
+  `test_agree.sh`, `test_watch.sh` and `test_stop.sh`;
+  `tests/check_real_sshd.sh` checks the same against a real sshd and bash
+  reading `~/.bashrc`, under a `HOME` of its own.
+
 ## [0.11.0] - 2026-11-17
 
 shared_tools BN-009.
@@ -2649,6 +2692,7 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
+[0.12.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.0...v0.10.1

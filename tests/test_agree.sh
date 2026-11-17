@@ -687,6 +687,206 @@ t_slices_that_can_only_empty_the_comparison_are_refused() {
     assert_not_contains "$out" "    a"
 }
 
+# -- what a host's login shell prints before the command (BN-011) ----------
+#
+# sshd runs the command through the user's login shell, which reads its
+# startup files first.  A host with a .bashrc in its sandbox (fake_login_rc)
+# has its bash read that before the command, so it prints ahead of it on
+# stdout and stderr, as a chatty ~/.bashrc does under a real sshd.
+
+GREETING='Welcome to node7 -- scheduled maintenance Friday'
+WARNING='bash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)'
+NOISY="echo '$GREETING'; echo '$WARNING' >&2"
+
+# agree.Runner on fake hosts, for what the CLI does not show: each host's
+# answer byte for byte, and how many bytes of what came were its login
+# shell's.  The command is $CASE_CMD, more flags $CASE_FLAGS, a file to
+# push $CASE_PUSH.  One JSON line per host, this run's mark as <MARK>.
+write_runner() {
+    cat > "$TEST_TMPDIR/runner.py" <<'PYEOF'
+import json, os, shlex, sys
+sys.path.insert(0, sys.argv[1])
+import agree
+
+args = agree.build_parser()[0].parse_args(
+    ["run", "--ssh", os.environ["FAKE_BIN"] + "/ssh",
+     "--scp", os.environ["FAKE_BIN"] + "/scp", "--timeout", "20"]
+    + shlex.split(os.environ.get("CASE_FLAGS", "")))
+r = agree.Runner(args)
+push = [os.environ["CASE_PUSH"]] if os.environ.get("CASE_PUSH") else None
+for name in sys.argv[2:]:
+    x = r.run_one(agree.Host(name, name), os.environ["CASE_CMD"], push=push)
+    print(json.dumps({"outcome": x.outcome, "rc": int(x.rc),
+                      "out": x.stdout.replace(r.mark, "<MARK>"),
+                      "err": x.stderr.replace(r.mark, "<MARK>"),
+                      "cut": x.preamble}))
+PYEOF
+}
+answers() { "$PY" "$TEST_TMPDIR/runner.py" "$BINNACLE_DIR" "$@"; }
+# the answer without the count of what was cut
+answer_only() { sed 's/, "cut": [0-9]*}$/}/'; }
+
+t_a_login_shell_greeting_does_not_split_the_fleet() {
+    # The ticket's reproduction: both hosts answered Linux, and 0.11.0
+    # reported two groups and told the owner to fix the quiet one.
+    install_fake_ssh
+    fake_host node7; fake_host node8
+    fake_login_rc node7 "$NOISY"
+    out="$(ag -S node7,node8 --csv "$TEST_TMPDIR/r.csv" \
+             --json "$TEST_TMPDIR/r.json" -- uname -s 2> "$TEST_TMPDIR/err")"
+    assert_status $? 0
+    assert_contains "$out" "2 hosts, 1 group, 2 agree"
+    assert_contains "$out" "Nothing to chase here"
+    assert_not_contains "$out" "Welcome"
+    assert_not_contains "$out" "setlocale"
+    assert_not_contains "$(cat "$TEST_TMPDIR/r.json")" "Welcome"
+    # the host is not flagged: ok, in the one group, with the command's
+    # own byte counts
+    assert_contains "$(cat "$TEST_TMPDIR/r.json")" '"outcome": "ok"'
+    assert_not_contains "$(cat "$TEST_TMPDIR/r.json")" '"outcome": "failed"'
+    assert_eq "$(cut -d, -f3,7,8 "$TEST_TMPDIR/r.csv" | sed 1d | sort -u)" "ok,6,0"
+    # said once, on stderr, naming the host; the text itself is not said
+    err="$(cat "$TEST_TMPDIR/err")"
+    assert_eq "$(grep -c 'printed before the command' "$TEST_TMPDIR/err")" 1
+    assert_contains "$err" "1 host's login shell printed before the command (node7): dropped from its answer (--keep-preamble keeps it)"
+    assert_not_contains "$err" "Welcome"
+    # --stderr merge puts stderr in the answer: not the warning, though
+    out="$(ag -S node7,node8 --stderr merge -- uname -s 2> /dev/null)"
+    assert_contains "$out" "1 group, 2 agree"
+    # several hosts are counted, and a quiet fleet says nothing
+    fake_host node9
+    fake_login_rc node9 "$NOISY"
+    ag -S node7,node8,node9 -- uname -s > /dev/null 2> "$TEST_TMPDIR/err"
+    assert_contains "$(cat "$TEST_TMPDIR/err")" "2 hosts' login shells printed before the command (node7, node9): dropped from their answers"
+    ag -S node8 -- uname -s > /dev/null 2> "$TEST_TMPDIR/err"
+    assert_eq "$(cat "$TEST_TMPDIR/err")" ""
+}
+
+t_a_login_shell_warning_is_not_the_commands_error() {
+    # The first stderr line is a failed host's error: the command's own,
+    # not the setlocale warning its login shell printed first.
+    install_fake_ssh
+    fake_host node7; fake_host node8
+    fake_login_rc node7 "echo '$WARNING' >&2"
+    set +e
+    out="$(ag -S node7,node8 -- 'echo "widget: no such widget" >&2; exit 4' 2> /dev/null)"
+    rc=$?
+    set -e
+    assert_status $rc 3
+    assert_contains "$out" "2 hosts, 1 group"
+    assert_contains "$out" "exit:4"
+    assert_contains "$out" "    widget: no such widget"
+    assert_not_contains "$out" "setlocale"
+    # agree's own commands go after the line too: a push that fails says
+    # why, not what the login shell said
+    echo x > "$TEST_TMPDIR/x"
+    set +e
+    out="$(ag -S node7 --push "$TEST_TMPDIR/x" --remote-dir /dev/null/agree \
+             -- true 2> /dev/null)"
+    set -e
+    assert_contains "$out" "push-failed"
+    assert_contains "$out" "    mkdir"
+    assert_not_contains "$out" "setlocale"
+}
+
+t_keep_preamble_keeps_the_raw_stream() {
+    install_fake_ssh
+    fake_host node7; fake_host node8
+    fake_login_rc node7 "$NOISY"
+    set +e
+    out="$(ag -S node7,node8 --keep-preamble -- uname -s 2> "$TEST_TMPDIR/err")"
+    rc=$?
+    set -e
+    assert_status $rc 1
+    assert_contains "$out" "2 hosts, 2 groups, 1 agree"
+    assert_contains "$out" "$GREETING"
+    assert_eq "$(cat "$TEST_TMPDIR/err")" ""
+    # AGREE_KEEP_PREAMBLE=1 is the same, and =0 does not mean keep it
+    set +e
+    out="$(AGREE_KEEP_PREAMBLE=1 ag -S node7,node8 -- uname -s 2> /dev/null)"
+    set -e
+    assert_contains "$out" "2 groups, 1 agree"
+    out="$(AGREE_KEEP_PREAMBLE=0 ag -S node7,node8 -- uname -s 2> /dev/null)"
+    assert_contains "$out" "1 group, 2 agree"
+    # byte for byte what 0.11.0 kept: the greeting before the answer, the
+    # warning before the command's stderr, and only the line taken off
+    write_runner
+    CASE_FLAGS=--keep-preamble \
+        CASE_CMD='printf "a\tb\n\nc"; printf "e1\ne2\n" >&2; exit 3' \
+        answers node7 > "$TEST_TMPDIR/got"
+    assert_eq "$(cat "$TEST_TMPDIR/got")" "{\"outcome\": \"failed\", \"rc\": 3, \"out\": \"$GREETING\\na\\tb\\n\\nc\", \"err\": \"$WARNING\\ne1\\ne2\\n\", \"cut\": 0}"
+    # and it goes out as 0.11.0 sent it: the line on stderr only
+    : > "$FAKE_SSH_LOG"
+    ag -S node8 --keep-preamble -- true > /dev/null
+    assert_eq "$(grep -o 'echo agree[.]' "$FAKE_SSH_LOG" | wc -l | tr -d ' ')" 1
+    : > "$FAKE_SSH_LOG"
+    ag -S node8 -- true > /dev/null
+    assert_eq "$(grep -o 'echo agree[.]' "$FAKE_SSH_LOG" | wc -l | tr -d ' ')" 2
+}
+
+t_without_the_line_nothing_is_cut() {
+    install_fake_ssh
+    fake_host node7
+    write_runner
+    # a startup file that ends the shell before the command runs: the line
+    # never comes, so all of it is kept, and nothing is said
+    fake_login_rc node7 "echo Welcome; echo 'going away' >&2; exit 0"
+    CASE_CMD='echo Linux' answers node7 > "$TEST_TMPDIR/got"
+    assert_eq "$(cat "$TEST_TMPDIR/got")" '{"outcome": "ok", "rc": 0, "out": "Welcome\n", "err": "going away\n", "cut": 0}'
+    ag -S node7 -- echo Linux > /dev/null 2> "$TEST_TMPDIR/err"
+    assert_eq "$(cat "$TEST_TMPDIR/err")" ""
+    # one that hands the session to something else
+    fake_login_rc node7 'exec echo hijacked'
+    CASE_CMD='echo Linux' answers node7 > "$TEST_TMPDIR/got"
+    assert_eq "$(cat "$TEST_TMPDIR/got")" '{"outcome": "ok", "rc": 0, "out": "hijacked\n", "err": "", "cut": 0}'
+    # more than 64 KiB before the line, on either stream: kept whole, and
+    # the line itself still taken off when it comes
+    fake_login_rc node7 'head -c 70000 /dev/zero | tr "\0" g; echo; head -c 70000 /dev/zero | tr "\0" w >&2; echo >&2'
+    CASE_CMD='echo Linux; echo oops >&2' answers node7 > "$TEST_TMPDIR/got"
+    "$PY" - "$TEST_TMPDIR/got" <<'PYEOF'
+import json, sys
+x = json.loads(open(sys.argv[1]).read())
+assert x["out"] == "g" * 70000 + "\nLinux\n", repr(x["out"][-60:])
+assert x["err"] == "w" * 70000 + "\noops\n", repr(x["err"][-60:])
+assert x["cut"] == 0, x["cut"]
+PYEOF
+}
+
+t_the_commands_own_output_is_never_cut() {
+    install_fake_ssh
+    fake_host node7; fake_host node8
+    fake_login_rc node7 "$NOISY"
+    write_runner
+    # the noisy host answers exactly what the quiet one does, whatever the
+    # command prints: nothing, no final newline, bytes that are not UTF-8,
+    # blank lines, a byte order mark, a line slowly, in pieces
+    # shellcheck disable=SC2016  # commands for the far side
+    for cmd in 'true' 'printf "no newline"' \
+               'printf "\377\376abc\n"; printf "\377x" >&2' \
+               'echo; echo; echo' 'printf "\357\273\277bom\n"' \
+               'for c in L i n u x; do printf $c; sleep 0.05; done; echo' \
+               'echo out; echo err >&2; exit 7'; do
+        CASE_CMD="$cmd" answers node7 node8 > "$TEST_TMPDIR/got"
+        noisy="$(sed -n 1p "$TEST_TMPDIR/got" | answer_only)"
+        quiet="$(sed -n 2p "$TEST_TMPDIR/got" | answer_only)"
+        assert_eq "$noisy" "$quiet"
+        assert_contains "$(sed -n 1p "$TEST_TMPDIR/got")" '"cut": 118}'
+        assert_contains "$(sed -n 2p "$TEST_TMPDIR/got")" '"cut": 0}'
+    done
+    # text just like the line, printed by the command, is the command's:
+    # this run's own (it knows the run's id from $AGREE_DIR) and another's
+    echo x > "$TEST_TMPDIR/x"
+    # shellcheck disable=SC2016
+    CASE_FLAGS="--remote-dir rd" CASE_PUSH="$TEST_TMPDIR/x" CASE_CMD='m="${AGREE_DIR##*/}.pgid"; echo "$m 1 1"; echo "$m 2 2" >&2; echo "agree.000000000000.pgid 3 3"' \
+        answers node7 > "$TEST_TMPDIR/got"
+    assert_eq "$(cat "$TEST_TMPDIR/got")" '{"outcome": "ok", "rc": 0, "out": "<MARK> 1 1\nagree.000000000000.pgid 3 3\n", "err": "<MARK> 2 2\n", "cut": 118}'
+    # a startup file that prints slowly, in pieces, with no newline at the
+    # end of what it says
+    fake_login_rc node7 'printf Wel; sleep 0.3; printf come; printf warn >&2; sleep 0.3; printf ing >&2'
+    CASE_CMD='echo Linux' answers node7 > "$TEST_TMPDIR/got"
+    assert_eq "$(cat "$TEST_TMPDIR/got")" '{"outcome": "ok", "rc": 0, "out": "Linux\n", "err": "", "cut": 14}'
+}
+
 echo "agree"
 run_test "top-level flags survive defaulting"  t_top_level_flags_survive_verb_defaulting
 run_test "ranges expand"                       t_ranges_expand
@@ -728,4 +928,9 @@ run_test "other impossible numbers refused"   t_other_numbers_that_cannot_mean_a
 run_test "agreeing on nothing is not agreeing" t_hosts_that_agree_on_nothing_are_not_unanimous
 run_test "a really silent fleet still agrees" t_a_fleet_that_really_is_silent_still_agrees
 run_test "slices that only empty are refused" t_slices_that_can_only_empty_the_comparison_are_refused
+run_test "a login greeting does not split"     t_a_login_shell_greeting_does_not_split_the_fleet
+run_test "a shell warning is not the error"   t_a_login_shell_warning_is_not_the_commands_error
+run_test "--keep-preamble keeps it raw"       t_keep_preamble_keeps_the_raw_stream
+run_test "no line, no cut"                    t_without_the_line_nothing_is_cut
+run_test "the command's output is never cut"  t_the_commands_own_output_is_never_cut
 finish

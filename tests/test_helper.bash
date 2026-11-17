@@ -8,6 +8,8 @@
 #                           (FAKE_SSH_DETACH=1: apart from the client, as
 #                           OpenSSH runs them)
 #   fake_host NAME          create a sandbox root for one fake host
+#   fake_login_rc NAME TEXT that host's login shell runs TEXT before the
+#                           command, as sshd's bash reads ~/.bashrc
 #   gen_log FILE            a synthetic log with a known planted structure
 #   facts_json FILE k=v...  a why-slow fact file built from defaults
 #
@@ -36,7 +38,7 @@ setup_env() {
     unset NETMESH_MESH NETMESH_USER NETMESH_JOBS NETMESH_REMOTE_DIR
     unset NETMESH_PYTHON NETMESH_SSH NETMESH_SCP NETMESH_REPORTS
     unset AGREE_SERVERS AGREE_JOBS AGREE_TIMEOUT AGREE_USER AGREE_SSH
-    unset AGREE_SCP AGREE_REMOTE_DIR AGREE_LIMIT
+    unset AGREE_SCP AGREE_REMOTE_DIR AGREE_LIMIT AGREE_KEEP_PREAMBLE
     unset WHY_SLOW_INTERVAL WHY_SLOW_TOP WHY_SLOW_MIN_SEVERITY
     unset WHY_SLOW_BOOT_WINDOW WHY_SLOW_PROC WHY_SLOW_SYS WHY_SLOW_SSH
     unset LOGTRIAGE_TOP LOGTRIAGE_MAX_TEMPLATES LOGTRIAGE_BUCKET
@@ -177,6 +179,14 @@ if [ -f "$FAKE_ROOT/$host/.unreachable" ]; then
 fi
 [ -d "$FAKE_ROOT/$host" ] || { echo "ssh: no such host $host" >&2; exit 255; }
 cd "$FAKE_ROOT/$host" || exit 255
+# A host with a .bashrc in its sandbox (fake_login_rc) has its bash read
+# that first, before the command, as sshd's bash reads ~/.bashrc: what it
+# prints comes ahead of the command on stdout and stderr (BN-011).  Read
+# once, through login_rc, so a bash the command starts does not read it
+# again.
+if [ -f .bashrc ]; then
+  export FAKE_LOGIN_RC="$PWD/.bashrc" BASH_ENV="$FAKE_BIN/login_rc"
+fi
 # FAKE_SSH_DETACH=1: as OpenSSH does, the "remote" command runs in a
 # session of its own, apart from this client, so killing the client
 # leaves it running (BN-004).  Otherwise it is this process.
@@ -250,7 +260,19 @@ else
   cp "${srcs[0]}" "$target" 2>/dev/null || exit 1
 fi
 SHIM
+    cat > "$FAKE_BIN/login_rc" <<'RC'
+unset BASH_ENV
+# shellcheck disable=SC1090
+. "$FAKE_LOGIN_RC"
+RC
     chmod +x "$FAKE_BIN/ssh" "$FAKE_BIN/scp"
+}
+
+# fake_login_rc HOST TEXT -- HOST's login shell runs TEXT (bash) before every
+# command it is given: a greeting from ~/.bashrc, a setlocale warning on
+# stderr, a startup file that exits before the command can run.
+fake_login_rc() {
+    printf '%s\n' "$2" > "$FAKE_ROOT/$1/.bashrc"
 }
 
 fake_host() {

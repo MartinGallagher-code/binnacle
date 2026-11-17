@@ -376,6 +376,32 @@ t_binnacle_watch_survives_an_ascii_stdout() {
     assert_contains "$out" "a = b"
 }
 
+t_a_login_shell_that_prints_is_not_drift() {
+    # BN-011: a host whose login shell prints before the command (a
+    # greeting from ~/.bashrc, a setlocale warning) answers what a quiet
+    # one does, so a baseline recorded through it and checked through a
+    # quiet shell, or the other way round, shows no drift.
+    fleet
+    noisy="echo 'Welcome -- maintenance Friday'; echo 'bash: warning: setlocale' >&2"
+    for h in node01 node02 node03 node04; do fake_login_rc "$h" "$noisy"; done
+    record > /dev/null 2> "$TEST_TMPDIR/err"
+    assert_contains "$(cat "$TEST_TMPDIR/err")" "4 hosts' login shells printed before the command"
+    assert_not_contains "$(cat "$BASE")" "Welcome"
+    assert_not_contains "$(cat "$BASE")" "setlocale"
+    rm "$FAKE_ROOT"/node0*/.bashrc
+    out="$(watch check -b "$BASE" 2> "$TEST_TMPDIR/err")"
+    assert_status $? 0
+    assert_contains "$out" "no drift: every host matches its baseline and its peers"
+    assert_eq "$(cat "$TEST_TMPDIR/err")" ""
+    # recorded quiet, checked with one host printing
+    record > /dev/null
+    fake_login_rc node02 "$noisy"
+    out="$(watch check -b "$BASE" --json "$TEST_TMPDIR/f.json" 2> /dev/null)"
+    assert_status $? 0
+    assert_contains "$out" "no drift"
+    assert_not_contains "$(cat "$TEST_TMPDIR/f.json")" "Welcome"
+}
+
 t_watch_is_in_the_help() {
     out="$("$PY" "$AG" help)"
     assert_contains "$out" "agree watch -- a standing check"
@@ -407,4 +433,5 @@ run_test "--json has each finding"               t_json_has_each_finding
 run_test "binnacle watch is agree watch"         t_binnacle_watch_is_agree_watch
 run_test "binnacle watch on an ascii stdout"     t_binnacle_watch_survives_an_ascii_stdout
 run_test "watch is in the help"                  t_watch_is_in_the_help
+run_test "a printing login shell is not drift"    t_a_login_shell_that_prints_is_not_drift
 finish
