@@ -4,6 +4,28 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-11-17
+
+shared_tools BN-009.
+
+### Added
+
+- **`agree watch`, a standing check of what a fleet is running; `binnacle
+  watch` is the same command.** `watch record -b FILE` runs a set of probes
+  on every host -- BIOS, CPU microcode, kernel, NIC driver and firmware,
+  NIC settings (MTU, speed, rings, channels, offloads) -- all in one ssh
+  per host, and saves each host's raw answers, the probe set and the host
+  list in FILE. `watch check -b FILE` runs the saved probes again and
+  reports the hosts whose answers changed since the baseline (a change
+  the whole fleet took at once included) and the hosts that disagree with
+  their peers, by `agree run`'s own grouping and normalizations. It exits
+  1 if there are any, 3 if there are none but some hosts could not be
+  checked, and lists unreachable hosts on their own, never as drift.
+  `--probes FILE`, `--probe NAME=COMMAND`, `--skip NAME` and
+  `--no-defaults` change the probe set, and `watch probes` prints it as a
+  file `--probes` reads; `check --json PATH` writes the findings too.
+- `tests/test_watch.sh`, against a fake fleet behind the ssh shim.
+
 ## [0.10.2] - 2026-11-16
 
 shared_tools BN-005 and BN-006. No change to any tool.
@@ -2627,6 +2649,7 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
+[0.11.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.9.0...v0.10.0

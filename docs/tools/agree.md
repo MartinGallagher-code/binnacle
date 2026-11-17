@@ -375,6 +375,128 @@ containing a colon alone.
 **`netmesh` still refuses IPv6** — its agents bind sockets, echo UDP and
 walk path MTU, so the family reaches much further into it than a host list.
 
+## watch
+
+`agree run` answers *who disagrees, right now?* once, for one command.
+`agree watch` makes it a standing check of what the fleet is running —
+firmware, kernel, NIC driver and settings — that a cron job or a CI step can
+run every night. `binnacle watch` is the same command.
+
+```bash
+agree watch record -b fleet.json --servers prod.txt   # save the answers
+agree watch check  -b fleet.json                      # later: what moved?
+```
+
+`record` runs a set of probes on every host, all of them in one ssh, and
+saves each host's raw answers in the baseline file, with the probe set and
+the host list. `check` runs the same probes again, on the same hosts unless
+`--servers`/`-S` names others, and reports two different things:
+
+- **CHANGED SINCE THE BASELINE** — a host's answer is not what it was when
+  the baseline was recorded. This is the regression watcher, and the only
+  way to see a change that the whole fleet took at once: if every host
+  moved to the same new kernel, nobody disagrees with anybody.
+- **DISAGREES WITH ITS PEERS** — a host's answer is not the majority's, by
+  exactly the grouping `agree run` uses (the largest successful group is
+  the majority). This is the drift checker, and it does not care what the
+  baseline says: a host that was already the odd one out when it was
+  recorded is still named.
+
+```text
+agree watch -- 48 hosts, 5 probes, against fleet.json of 2026-11-17 02:10:04 +0000      [normalized: strip-ansi, trim]
+
+CHANGED SINCE THE BASELINE  1 host
+  node31
+    bios:  (- baseline, + now)
+      -2.1.0
+      -03/04/2025
+      +2.3.1
+      +09/10/2026
+
+DISAGREES WITH ITS PEERS  1 host
+  bios: 46 agree on "Dell Inc." (+2 more lines)
+    node31:  (- the 46, + this host)
+      -2.1.0
+      -03/04/2025
+      +2.3.1
+      +09/10/2026
+
+UNREACHABLE  1 host, not compared:
+  node09         unreachable: ssh: connect to host node09 port 22: Connection timed out
+
+DRIFT: 1 host changed since the baseline; 1 host disagrees with its peers; 1 host not checked
+```
+
+A host that gave no answers at all — ssh failed, `sudo -n` was refused, the
+run timed out — is listed under **UNREACHABLE** and never counted as drift.
+A host that was unreachable when the baseline was recorded stays in it with
+no answers, so a later check still goes to it, and compares it with its
+peers only (**NOT IN THE BASELINE**).
+
+### The probes
+
+| Probe | Asks |
+|---|---|
+| `bios` | `/sys/class/dmi/id/bios_vendor`, `bios_version`, `bios_date` |
+| `microcode` | the CPU microcode revision, from `/proc/cpuinfo` |
+| `kernel` | `uname -r` |
+| `nic-driver` | every interface with a device behind it: `ethtool -i`'s driver, version and firmware-version (the driver from `/sys` without ethtool) |
+| `nic-settings` | the same interfaces: MTU, and with ethtool the speed, duplex and autonegotiation, ring sizes (`-g`), channels (`-l`) and offloads (`-k`) |
+
+None of these needs root. A probe's stderr is part of its answer and so is
+its exit status: a probe that fails the same way on every host is
+agreement, and one that starts working on one host is a change.
+
+The set is yours to change. `agree watch probes` prints it as a file that
+`--probes FILE` reads back — one `NAME = COMMAND` per line, run by `sh`,
+`#` comments — so the usual way to make your own is to start from it:
+
+```bash
+agree watch probes > probes.txt          # edit it
+agree watch record -b fleet.json --servers prod.txt --no-defaults --probes probes.txt
+agree watch record -b fleet.json --servers prod.txt \
+      --probe 'bmc = ipmitool mc info | grep -i firmware' --sudo --skip nic-settings
+```
+
+`--probe NAME=COMMAND` adds one, or replaces the probe of that name in its
+place; `--skip NAME` leaves one out; `--no-defaults` starts from nothing.
+These are `record`'s (and `probes`'s): **`check` runs exactly the probes
+saved in the baseline** and refuses the flags, so a check can never compare
+answers to two different questions. Record again to change the set.
+
+### Normalization
+
+The baseline holds every answer raw. The normalizations `agree run` has —
+`--loose`, `--strict`, `--sort-lines`, `--mask-numbers`, `--scrub RE` and the
+rest — apply at `check`, to every probe, and are printed in the heading as
+always. The slices (`--grep`, `--head`, `--tail`, `--field`) are not
+offered: they pick lines out of one command, and a check runs several.
+
+`--json PATH` writes the findings as well: `changed`, `disagrees`,
+`unreachable`, `not_in_baseline` and `not_checked`.
+
+### Exit codes of watch
+
+| Code | `record` | `check` |
+|---|---|---|
+| `0` | every host answered | no host changed, none disagrees |
+| `1` | — | a host changed since the baseline or disagrees with its peers |
+| `3` | some hosts could not be recorded (none at all: the file is left as it was) | no drift, but some hosts could not be checked |
+| `2` | usage error | usage error, or a file that is not a baseline |
+
+Drift outranks an unreachable host here, unlike `agree run`: the finding a
+nightly check exists for is the change, and the unreachable hosts are
+listed beside it either way.
+
+### Why it is a verb of agree
+
+It runs on agree's runner, groups with agree's grouping and normalizes with
+agree's normalizations, and every tool here is one standalone file that
+imports nothing from its siblings. So `watch` lives in `agree.py`, beside
+the code it is built from, rather than in a copy of that code. The baseline
+is [`reckon --baseline`](reckon.md)'s idea: an earlier run's own output,
+refused if it is anything else, and named with when it was taken.
+
 ## Exit codes
 
 | Code | Meaning |
