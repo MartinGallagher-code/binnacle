@@ -33,7 +33,7 @@ module is therefore optional: `from binnacle import netmesh` works, and so
 does `scp netmesh.py somehost:` followed by running it there.
 """
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 __version__ = VERSION
 
 __all__ = ["VERSION", "TOOLS"]

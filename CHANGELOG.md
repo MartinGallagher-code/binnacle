@@ -4,6 +4,45 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-11-17
+
+shared_tools BN-012.
+
+### Fixed
+
+- **`-` is stdout in every `--csv [PATH]` and `--json [PATH]`.** `resolve
+  --json -` printed nothing and wrote its report to a file called `-` in
+  the current directory, which a later `git add -A` picks up -- one sat at
+  the root of this repository from 67c5c70 until now. `resolve`, `during`
+  (`--samples` too), `plumb`, `skew` and `why-slow` read `-` as stdout now,
+  as `reckon` already did, and so do `logtriage` and `reachable`, which
+  had the same flags and the same fault. `-` prints exactly what the bare
+  flag prints; with no path, or with a real one, nothing changes.
+- `why-slow --ssh HOST --csv -` (or `--json -`) is no longer refused as a
+  path that would be written on the far box: `-` is not a path, and the
+  report comes back on stdout as the bare flag's does.
+
+### Removed
+
+- The stray file named `-` at the repository root: a 139-line `resolve
+  --json` dump from a test's fake DNS server, committed by accident.
+
+### Docs
+
+- Each of those tools' `--help` and page under `docs/tools/` says `-` is
+  stdout where it lists the flags, `reckon`'s included, and
+  `docs/conventions.md` says it once for all of them.
+
+### Tests
+
+- Each of the seven tools' suites writes `--csv -` and `--json -` (and
+  `during --samples -`) in a scratch directory, checks the output is on
+  stdout and the same as the bare flag's, and that no file called `-` is
+  left. `resolve NAME --json -` runs against the fake DNS server, and
+  `why-slow --ssh` with `-` against the fake ssh.
+- `tests/test_binnacle.sh` fails when a file named `-` is tracked anywhere
+  in a checkout of this repository.
+
 ## [0.12.0] - 2026-11-17
 
 shared_tools BN-011, the binnacle side of quarterdeck's QD-038.
@@ -2692,6 +2731,7 @@ Bugs found while writing the test suite, before any release:
   the flag it sets. The atomic write meant the host list came through
   untouched rather than half-rewritten.
 
+[0.12.1]: https://github.com/MartinGallagher-code/binnacle/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/MartinGallagher-code/binnacle/compare/v0.10.1...v0.10.2

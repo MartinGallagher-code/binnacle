@@ -254,6 +254,24 @@ t_a_split_outside_the_log_is_refused() {
 }
 
 echo "logtriage"
+t_a_dash_is_stdout_not_a_file() {
+    # `resolve --json -` once wrote a file called `-` in the current
+    # directory, and one was committed to the repository by accident
+    # (BN-012).  `-` is stdout, as it is in reckon, and prints what the
+    # bare flag prints.
+    gen_log "$TEST_TMPDIR/test.log"
+    cd "$TEST_TMPDIR"
+    a="$(lt test.log --csv -)"
+    assert_contains "$a" "template_id,rank,count"
+    assert_eq "$a" "$(lt test.log --csv)"
+    a="$(lt test.log --json -)"
+    assert_contains "$a" '"templates"'
+    assert_eq "$a" "$(lt test.log --json)"
+    # With no input named, the log is still read from stdin.
+    assert_eq "$(lt --csv - < test.log)" "$(lt - --csv < test.log)"
+    assert_no_file "$TEST_TMPDIR/-"
+}
+
 run_test "--csv swallowing the log is caught" t_csv_swallowing_the_log_is_diagnosed
 run_test "uuid masked before hex"             t_mask_order_uuid_before_hex
 run_test "timestamps masked before numbers"   t_mask_timestamps_before_numbers
@@ -311,4 +329,5 @@ run_test "a mac is not eaten by the clock"    t_a_mac_is_not_eaten_by_the_clock_
 run_test "the timestamps still mask"          t_the_timestamps_still_mask
 run_test "an unfilterable record is disclosed" t_records_a_window_cannot_filter_are_disclosed
 run_test "a split outside the log is refused" t_a_split_outside_the_log_is_refused
+run_test "a dash is stdout, not a file" t_a_dash_is_stdout_not_a_file
 finish

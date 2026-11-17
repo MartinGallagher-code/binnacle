@@ -190,6 +190,9 @@ burst_factor,score,template,example
 agree script ./logtriage.py --servers prod.txt --fleet-csv -- /var/log/syslog --csv
 ```
 
+Both write to stdout when the path is left out or is `-`, and to the file
+named otherwise. A `-` among the inputs is still stdin: `logtriage - --csv`.
+
 With `LANG` set to `C` or `POSIX`, or unset, the output is pure ASCII,
 like the rest of these tools: the sparklines are drawn with plain
 characters instead of block glyphs. `--ascii` forces the same anywhere.

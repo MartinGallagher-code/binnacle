@@ -162,8 +162,11 @@ compact.
 host,addr,ping,ssh,usable,outcome,detail,duration_s
 ```
 
-`--json` adds a summary block. Exit `0` if everything is usable, `1` if
-anything was not, `2` for a usage error — so cron can tell the difference.
+`--json` adds a summary block. Both write to stdout when the path is left
+out or is `-`, and to the file named otherwise.
+
+Exit `0` if everything is usable, `1` if anything was not, `2` for a usage
+error — so cron can tell the difference.
 
 The summary groups failures by outcome and says what to do about each:
 

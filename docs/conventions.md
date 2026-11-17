@@ -75,6 +75,12 @@ command line. See the [CLI reference](cli.md) for the full table.
 snake_case headers and no formatting. None of these tools draw anything. The
 CSV is the artifact; the human report is a view of it.
 
+An output flag that takes an optional path (`--csv [PATH]`, `--json [PATH]`
+and their kin) writes to stdout when the path is left out or is `-`. A `-`
+is never a file name: taken literally it leaves a file called `-` in the
+current directory, and one was once committed to this repository that way.
+For a file that really is called `-`, write `./-`.
+
 ## Standard library only, no imports between modules
 
 Each tool is a complete standalone program. This is not tidiness — it is a

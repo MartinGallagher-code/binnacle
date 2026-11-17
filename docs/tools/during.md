@@ -158,6 +158,9 @@ would call every disk-bound run unstable each time the CPU idled.
 - `--samples` is the **raw series**, one row per sample, tidy and
   deterministic — the artifact for plotting. Blank means not measured.
 
+`--samples`, `--csv` and `--json` each write to stdout when the path is
+left out or is `-`, and to the file named otherwise.
+
 ```bash
 # Every host diagnosed while the fleet is under load, grouped by what bound it
 agree script ./during.py --servers prod.txt --fleet-csv -- --seconds 60 --csv

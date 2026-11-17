@@ -182,7 +182,8 @@ locally. `--ssh-cmd` swaps the transport if plain `ssh` is not it.
 Two refusals worth knowing about: `--no-exec` contradicts `--ssh` (one
 forbids subprocesses, the other *is* one), and `--csv PATH`/`--json PATH`
 are refused with `--ssh` because the file would be written on the remote
-box — use the bare form and redirect locally:
+box — use the bare form (or `-`, which is the same: stdout) and redirect
+locally:
 `why-slow --ssh node07 --csv > node07.csv`.
 
 One host only, deliberately. Fanning out and grouping the answers is
@@ -209,6 +210,9 @@ agree script why-slow --servers prod.txt --fleet-csv --merge-csv triage.csv -- -
 ```
 
 That reports *"44 hosts healthy, 4 agree they are swapping, 2 unreachable"*.
+
+`--csv` and `--json` each write to stdout when the path is left out or
+is `-`, and to the file named otherwise.
 
 ## Exit codes
 

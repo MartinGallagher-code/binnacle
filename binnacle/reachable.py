@@ -24,7 +24,8 @@ Options:
       --keep-auth     treat an ssh key/permission failure as usable
       --recheck-only  re-test the already-commented hosts and nothing else
       --csv [PATH]    host,addr,ping,ssh,usable,outcome,detail,duration_s
-      --json [PATH]   the same, with a summary block
+      --json [PATH]   the same, with a summary block -- either goes to
+                      stdout if PATH is - or left out
       --quiet         no progress and no summary, just the list
       --dry-run       check nothing; print what would be contacted
 
@@ -46,7 +47,7 @@ import sys
 import time
 from datetime import date
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 PROG = os.path.basename(sys.argv[0]) or "reachable.py"
 
 # Lines this tool has commented out carry this marker, so a later run can
@@ -696,6 +697,12 @@ def build_parser():
 def main(argv=None):
     _stdio_safe()
     args = build_parser().parse_args(argv)
+    # `-` is stdout, as it is in reckon.  Taken literally it is a file
+    # called `-` in the current directory: `resolve --json -` wrote one,
+    # and it was committed to this repository by accident (BN-012).
+    for key in ("csv", "json"):
+        if getattr(args, key) == "-":
+            setattr(args, key, "")
     if args.in_place and args.path == "-":
         die("cannot rewrite stdin in place")
     if args.in_place and args.output:
